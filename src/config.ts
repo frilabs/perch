@@ -14,6 +14,12 @@ export interface PerchConfig {
   allowedHosts: string[];
   allowedOrigins: string[];
   googleClientFile?: string;
+  /** Application (client) ID of the Entra app registration (public client; not a secret). */
+  microsoftClientId?: string;
+  /** Entra tenant for sign-in: common (default), consumers, organizations, a tenant GUID or domain. */
+  microsoftTenant: string;
+  /** stdio only: client token file selecting a client grant (default stdio is read-only). */
+  clientTokenFile?: string;
 }
 
 const list = (v: string | undefined) =>
@@ -39,6 +45,9 @@ export function resolveConfig(env: Record<string, string | undefined>): PerchCon
     allowedHosts: list(env.PERCH_ALLOWED_HOSTS),
     allowedOrigins: list(env.PERCH_ALLOWED_ORIGINS),
     ...(env.PERCH_GOOGLE_CLIENT_FILE ? { googleClientFile: path.resolve(env.PERCH_GOOGLE_CLIENT_FILE) } : {}),
+    ...(env.PERCH_MICROSOFT_CLIENT_ID ? { microsoftClientId: env.PERCH_MICROSOFT_CLIENT_ID.trim() } : {}),
+    microsoftTenant: env.PERCH_MICROSOFT_TENANT?.trim() || 'common',
+    ...(env.PERCH_CLIENT_TOKEN_FILE ? { clientTokenFile: path.resolve(env.PERCH_CLIENT_TOKEN_FILE) } : {}),
   };
 }
 

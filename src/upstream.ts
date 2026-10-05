@@ -2,28 +2,47 @@ import { PerchError } from './errors.js';
 
 /**
  * All outbound HTTP goes through here. Origins are fixed constants and every (method, path)
- * must match a read-only allowlist before any network I/O. There is no way to point Perch at
- * an arbitrary URL; tests swap the transport function, never the origins.
+ * must match an allowlist before any network I/O. Routes are tagged with the capability they
+ * exercise: read routes are the default, and draft/send routes are only reachable when the
+ * caller explicitly passes the same capability tag (defence in depth behind the MCP-level grant
+ * check). There is no way to point Perch at an arbitrary URL; tests swap the transport function,
+ * never the origins.
  */
 
-export type Service = 'drive' | 'oauth' | 'notion';
+export type Service = 'drive' | 'oauth' | 'notion' | 'gmail' | 'graph' | 'msauth';
+export type RouteCapability = 'read' | 'draft' | 'send';
 
 export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
   drive: 'https://www.googleapis.com',
   oauth: 'https://oauth2.googleapis.com',
   notion: 'https://api.notion.com',
+  gmail: 'https://gmail.googleapis.com',
+  graph: 'https://graph.microsoft.com',
+  msauth: 'https://login.microsoftonline.com',
 });
 
 const SERVICE_NAMES: Record<Service, string> = {
   drive: 'Google Drive API',
   oauth: 'Google OAuth',
   notion: 'Notion API',
+  gmail: 'Gmail API',
+  graph: 'Microsoft Graph',
+  msauth: 'Microsoft identity platform',
 };
 
 const NOTION_ID = '[0-9a-fA-F-]{32,36}';
 const DRIVE_ID = '[A-Za-z0-9_-]{1,200}';
+const GMAIL_ID = '[A-Za-z0-9_-]{1,256}';
+const GMAIL_ATTACHMENT_ID = '[A-Za-z0-9_-]{1,4096}';
+/** Graph ids are base64; '/', '+' and '=' arrive percent-encoded. */
+const GRAPH_ID = '[A-Za-z0-9_%=-]{1,1024}';
+const GRAPH_FOLDER = '[A-Za-z0-9_%=-]{1,1024}';
+/** Tenant: common/organizations/consumers, a GUID or a verified domain name. */
+const MS_TENANT = '(?:common|organizations|consumers|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\\.[A-Za-z0-9-]{1,63})+)';
 
-const ROUTES: Record<Service, Array<[string, RegExp]>> = {
+type Route = [method: string, path: RegExp, capability?: RouteCapability];
+
+const ROUTES: Record<Service, Route[]> = {
   drive: [
     ['GET', /^\/drive\/v3\/about$/],
     ['GET', /^\/drive\/v3\/files$/],
@@ -43,7 +62,31 @@ const ROUTES: Record<Service, Array<[string, RegExp]>> = {
     ['GET', new RegExp(`^/v1/data_sources/${NOTION_ID}$`)],
     ['POST', new RegExp(`^/v1/data_sources/${NOTION_ID}/query$`)],
   ],
+  gmail: [
+    ['GET', /^\/gmail\/v1\/users\/me\/profile$/],
+    ['GET', /^\/gmail\/v1\/users\/me\/messages$/],
+    ['GET', new RegExp(`^/gmail/v1/users/me/messages/${GMAIL_ID}$`)],
+    ['GET', new RegExp(`^/gmail/v1/users/me/messages/${GMAIL_ID}/attachments/${GMAIL_ATTACHMENT_ID}$`)],
+    ['POST', /^\/gmail\/v1\/users\/me\/drafts$/, 'draft'],
+    ['POST', /^\/gmail\/v1\/users\/me\/messages\/send$/, 'send'],
+  ],
+  graph: [
+    ['GET', /^\/v1\.0\/me$/],
+    ['GET', /^\/v1\.0\/me\/messages$/],
+    ['GET', new RegExp(`^/v1\\.0/me/mailFolders/${GRAPH_FOLDER}/messages$`)],
+    ['GET', new RegExp(`^/v1\\.0/me/messages/${GRAPH_ID}$`)],
+    ['GET', new RegExp(`^/v1\\.0/me/messages/${GRAPH_ID}/attachments$`)],
+    ['GET', new RegExp(`^/v1\\.0/me/messages/${GRAPH_ID}/attachments/${GRAPH_ID}$`)],
+    ['POST', /^\/v1\.0\/me\/messages$/, 'draft'],
+    ['POST', /^\/v1\.0\/me\/sendMail$/, 'send'],
+  ],
+  msauth: [['POST', new RegExp(`^/${MS_TENANT}/oauth2/v2\\.0/token$`)]],
 };
+
+/** True when (service, method, path) is allowlisted for exactly this capability. */
+export function isAllowedRoute(service: Service, method: string, path: string, capability: RouteCapability = 'read'): boolean {
+  return ROUTES[service].some(([m, re, cap]) => m === method && (cap ?? 'read') === capability && re.test(path));
+}
 
 export const DEFAULT_JSON_MAX_BYTES = 5 * 1024 * 1024;
 export const DEFAULT_TIMEOUT_MS = 30_000;
@@ -143,7 +186,11 @@ export interface CallOptions {
   headers?: Record<string, string>;
   json?: unknown;
   form?: Record<string, string>;
+  /** Raw text body with explicit content type (e.g. base64 MIME for Graph). */
+  text?: { contentType: string; data: string };
   maxBytes?: number;
+  /** Required for draft/send routes; must equal the route's tag. */
+  capability?: RouteCapability;
 }
 
 const SAFE_CODE = /^[A-Za-z_]{1,64}$/;
@@ -161,8 +208,8 @@ function extractCode(service: Service, body: Buffer): string | undefined {
   if (service === 'notion') code = o.code;
   else if (typeof o.error === 'string') code = o.error;
   else if (o.error && typeof o.error === 'object') {
-    const e = o.error as { errors?: Array<{ reason?: unknown }>; status?: unknown };
-    code = e.errors?.[0]?.reason ?? e.status;
+    const e = o.error as { errors?: Array<{ reason?: unknown }>; status?: unknown; code?: unknown };
+    code = e.errors?.[0]?.reason ?? e.status ?? e.code;
   }
   return typeof code === 'string' && SAFE_CODE.test(code) ? code : undefined;
 }
@@ -181,8 +228,7 @@ export class Upstream {
 
   /** Performs an allowlisted call and returns the raw 2xx response; non-2xx become sanitised errors. */
   async raw(service: Service, opts: CallOptions): Promise<UpstreamResponse> {
-    const allowed = ROUTES[service].some(([m, re]) => m === opts.method && re.test(opts.path));
-    if (!allowed) {
+    if (!isAllowedRoute(service, opts.method, opts.path, opts.capability)) {
       throw new PerchError(`Blocked non-allowlisted ${SERVICE_NAMES[service]} call`, 'route_not_allowed');
     }
     const url = new URL(opts.path, ORIGINS[service]);
@@ -200,6 +246,9 @@ export class Upstream {
     } else if (opts.form) {
       headers['content-type'] = 'application/x-www-form-urlencoded';
       body = new URLSearchParams(opts.form).toString();
+    } else if (opts.text) {
+      headers['content-type'] = opts.text.contentType;
+      body = opts.text.data;
     }
     let res: UpstreamResponse;
     try {

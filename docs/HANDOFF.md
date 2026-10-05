@@ -1,6 +1,38 @@
 # Handoff: Perch
 
-Stand 2026-10-05, Branch `feat/perch-multi-account-mcp`.
+## Update 2026-10-05: E-Mail-Meilenstein (Branch `feat/perch-email-connectors`, Basis `50db560`)
+
+- **Implementiert:**
+  - Gmail, Microsoft Graph (Outlook.com/M365) und GMX bzw. generisches IMAP/SMTP: suchen, lesen, Anhänge, Entwürfe, Senden mit Herkunftsangabe und explizitem Absenderkonto.
+  - Lokale Client-Grants (`perch client add`), gebunden an Konto-IDs. Das globale Token und stdio bleiben read-only.
+- **Review-Fixes (2026-10-05, jeweils RED vor GREEN, Nachweise in `docs/EMAIL_MILESTONE.md` §7, Zeilen 13a–13e):**
+  - Client-Grants sind nur für Mail: keine Drive/Notion-Tools oder -Metadaten, nur die benannten Konten, Lese-Tools nur mit `read`.
+  - Der Grant wird vor jedem Tool-Aufruf neu aus dem Store geprüft. Widerruf oder Einschränkung greifen sofort, auch in laufenden stdio-Sessions, ohne Provider-Aufruf.
+  - `replyToMessageId` braucht zusätzlich `read`, geprüft vor jeder I/O. Ungültige Upstream-Message-IDs werden verworfen, Eingaben des Aufrufers bleiben streng.
+  - HTML-zu-Text (Gmail, Graph, IMAP) läuft über einen gemeinsamen linearen, begrenzten Scanner statt quadratischer Regexe. Der Regressionstest läuft in einem Kindprozess mit hartem Timeout.
+  - Microsoft Graph: MIME-Requests über 4 000 000 Byte Base64 werden lokal abgelehnt (Graph-Doku: „limited to 4 MB“).
+  - Details, Freigabe und TDD-Nachweise: `docs/EMAIL_MILESTONE.md`. Setup: `docs/SETUP.md` §4a.
+- **Neue MCP-Tools:**
+  - immer registriert: `mail_search`, `mail_read_message`, `mail_get_attachment`;
+  - nur für Client-Grants mit `draft` bzw. `send`: `mail_create_draft`, `mail_send`.
+- **Lokal getestet:**
+  - `npm run typecheck` fehlerfrei;
+  - `npm test` **337/337** (26 Dateien; vor den Review-Fixes 314/314);
+  - `npm run smoke` **5/5**;
+  - `npm audit --omit=dev` 0 Befunde.
+  - Upstreams nur als **Mocks**. TLS und SMTP liefen gegen lokale Testserver.
+- **Live verifiziert:** **nichts.** Es gab keinen echten OAuth-Flow, kein echtes Konto und keine echte Mail.
+- **Git:** Nichts committet. Commit, Push und PR macht der Orchestrator. Merge und Deployment sind nicht autorisiert.
+- **Nutzeraufgaben für den Live-Test:**
+  - Gmail API und Scopes im Consent Screen;
+  - Entra-App-Registrierung (`http://localhost`, delegierte Mail-Rechte), `PERCH_MICROSOFT_CLIENT_ID`;
+  - GMX: IMAP aktivieren, App-Passwort anlegen;
+  - danach `perch client add` und ein Testversand an die eigene Adresse.
+- **Offene Grenzen:** `docs/EMAIL_MILESTONE.md` §8. Keine Mehrbenutzer-Isolation.
+
+---
+
+Stand 2026-10-05 (Drive/Notion-Meilenstein), Branch `feat/perch-multi-account-mcp`.
 
 **Git:** Nichts committet. Autorisiert ist nur ein Commit und Push auf diesen Feature-Branch plus ein PR, durch den Orchestrator. **Merge und Deployment sind nicht autorisiert.**
 

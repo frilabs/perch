@@ -1,6 +1,6 @@
 # Perch
 
-Perch ist ein read-only MCP-Server. Er bündelt **mehrere Google-Drive-Konten** und **mehrere Notion-Workspaces** hinter **einem** Connector.
+Perch ist ein MCP-Server. Er bündelt **mehrere Google-Drive-Konten**, **mehrere Notion-Workspaces** und **mehrere Mail-Konten** (Gmail, Outlook.com/Microsoft 365, GMX bzw. IMAP/SMTP) hinter **einem** Connector. Standardmäßig ist alles read-only. Mail-Entwürfe und -Versand gibt es nur über explizite lokale Client-Grants pro Konto.
 
 - Läuft auf dem Heimserver.
 - Claude Code auf dem Laptop bindet ihn einmal ein, per Tailscale Serve (HTTPS) oder SSH-Tunnel.
@@ -8,8 +8,8 @@ Perch ist ein read-only MCP-Server. Er bündelt **mehrere Google-Drive-Konten** 
 - Jedes Ergebnis trägt Konto- bzw. Workspace-ID und Label als Herkunftsangabe.
 
 Stand 2026-10-05:
-- Das MVP ist implementiert und lokal mit Mock-Upstreams getestet.
-- **Nicht** live gegen Google oder Notion verifiziert.
+- Das MVP (Drive/Notion) und der E-Mail-Meilenstein sind implementiert und lokal mit Mock-Upstreams bzw. lokalen Testservern getestet.
+- **Nicht** live gegen Google, Notion, Microsoft oder GMX verifiziert.
 - Nicht deployed.
 
 ## Funktionen
@@ -25,6 +25,13 @@ Stand 2026-10-05:
   - Titelsuche über Seiten und Data Sources (keine Volltextsuche)
   - Seiten und paginierte, verschachtelte Blockinhalte
   - Databases, Data Sources und Data-Source-Abfragen
+- **Mail** (`docs/EMAIL_MILESTONE.md`):
+  - Gmail: eigener OAuth-Grant, Default `gmail.readonly`, Opt-in `gmail.send`/`gmail.compose`
+  - Microsoft Graph: delegiert mit PKCE, Default `Mail.Read`, Opt-in `Mail.ReadWrite`/`Mail.Send`
+  - IMAP/SMTP (GMX-Presets): Passwort nur maskiert, TLS ≥ 1.2 mit Zertifikatsprüfung
+  - suchen, lesen, Anhänge; Entwürfe und Senden mit explizitem Absenderkonto
+  - Threading-Header; Ergebnis `accepted`/`rejected`/`indeterminate`, kein Blind-Retry
+- **Client-Grants:** `perch client add --allow read,draft,send --account …`. Das globale HTTP-Token bleibt read-only. Das ist **keine** Mehrbenutzer-Isolation.
 - **Transporte:** stdio und zustandsloses Streamable HTTP (`POST /mcp`)
 - **Sicherheit:**
   - verschlüsselter Credential Store (AES-256-GCM, Schlüssel separat abgelegt)
@@ -52,16 +59,20 @@ Die vollständige Anleitung steht in [`docs/SETUP.md`](docs/SETUP.md): Google-Cl
 
 ```bash
 npm run typecheck
-npm test          # vitest; Google/Notion nur als klar markierte Mocks
+npm test          # vitest; Google/Notion/Gmail/Graph nur als klar markierte Mocks, IMAP/SMTP gegen lokale Testserver
 npm run smoke     # baut und testet dist/cli.js über stdio und HTTP
 ```
 
 | Datei | Zweck |
 | --- | --- |
-| `src/cli.ts`, `src/cli/` | CLI (`init`, `serve`, `google`, `notion`, `accounts`, `token`) |
+| `src/cli.ts`, `src/cli/` | CLI (`init`, `serve`, `google`, `notion`, `gmail`, `microsoft`, `imap`, `client`, `accounts`, `token`) |
+| `src/auth/` | Client-Grants (read/draft/send pro Mail-Konto), Principals |
+| `src/oauth/` | PKCE-Loopback, Refresh mit Single-Flight und Rotation (fail closed) |
+| `src/mail/` | MailService, MIME-Bau, Gmail-, Graph- und IMAP/SMTP-Adapter, GMX-Presets |
+| `src/microsoft/` | Microsoft-OAuth und -Konten |
 | `src/store/` | verschlüsselter Credential Store, Lock |
 | `src/secureFs.ts` | Rechte, Symlinks, atomares Schreiben |
-| `src/upstream.ts` | feste Origins, Read-only-Allowlist, Timeouts und Größenlimits, bereinigte Fehler |
+| `src/upstream.ts` | feste Origins, Allowlist mit Capability-Tags (read/draft/send), Timeouts und Größenlimits, bereinigte Fehler |
 | `src/google/` | OAuth (Loopback und PKCE), Token-Refresh, Drive |
 | `src/notion/` | Notion (PAT, `Notion-Version: 2026-03-11`) |
 | `src/fanout.ts` | Abfragen über mehrere Konten, zusammengesetzte Cursor, Teilergebnisse |
@@ -72,11 +83,13 @@ npm run smoke     # baut und testet dist/cli.js über stdio und HTTP
 - [`docs/BRIEFING.md`](docs/BRIEFING.md): Briefing (freigegeben)
 - [`docs/SPEC.md`](docs/SPEC.md): Spezifikation
 - [`docs/SETUP.md`](docs/SETUP.md): Setup und Betrieb
+- [`docs/EMAIL_MILESTONE.md`](docs/EMAIL_MILESTONE.md): E-Mail-Meilenstein (Spezifikation, TDD-Nachweise)
+- [`docs/PROJECT_SCOPE.md`](docs/PROJECT_SCOPE.md): erweiterte Projektrichtung
 - [`docs/HANDOFF.md`](docs/HANDOFF.md): aktueller Stand
 - [`AGENTS.md`](AGENTS.md): Arbeitsregeln
 
 ## Roadmap
 
-- Gmail, Calendar, Contacts (read-only, gleiche Kontenverwaltung)
+- Mehrbenutzer-Isolation, Calendar, Contacts
 - WhatsApp höchstens experimentell, später
 - LinkedIn ausgeschlossen

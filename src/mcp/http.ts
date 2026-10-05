@@ -3,12 +3,15 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 import { isIP } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { hasWriteCapability, principalForClientToken, READONLY_PRINCIPAL, type Principal } from '../auth/grants.js';
 import type { PerchContext } from '../context.js';
 import { PerchError } from '../errors.js';
 import { createMcpServer } from './server.js';
 
 export const MIN_TOKEN_LENGTH = 43; // 32 random bytes as base64url
 const MAX_BODY_BYTES = 1024 * 1024;
+/** Draft/send clients may upload inline base64 attachments (10 MiB decoded is ~13.4 MiB base64). */
+const MAX_WRITE_BODY_BYTES = 16 * 1024 * 1024;
 const MCP_PATH = '/mcp';
 
 export function generateHttpToken(): string {
@@ -46,11 +49,17 @@ export function validateBindHost(host: string): void {
 const isLoopback = (h: string) => h === 'localhost' || h === '::1' || h.startsWith('127.');
 const hostPort = (h: string, port: number) => (isIP(h) === 6 ? `[${h}]:${port}` : `${h}:${port}`);
 
-function bearerMatches(header: string | undefined, expectedDigest: Buffer): boolean {
+/**
+ * The global token is the single operator in READ-ONLY mode. Any other well-formed token is
+ * looked up as a local client grant (hash lookup; tokens carry 256 bits of entropy).
+ */
+async function authenticate(header: string | undefined, expectedDigest: Buffer, ctx: PerchContext): Promise<Principal | null> {
   const m = /^Bearer\s+(\S+)\s*$/i.exec(header ?? '');
   const got = createHash('sha256').update(m?.[1] ?? '').digest();
   // Always compare (constant time on fixed-size digests), then require a well-formed header.
-  return timingSafeEqual(got, expectedDigest) && m !== null;
+  if (timingSafeEqual(got, expectedDigest) && m !== null) return READONLY_PRINCIPAL;
+  if (!m || m[1]!.length < MIN_TOKEN_LENGTH) return null;
+  return principalForClientToken(ctx.store, m[1]!);
 }
 
 export interface HttpServerOptions {
@@ -80,14 +89,14 @@ function sendJson(res: ServerResponse, status: number, body: unknown, headers: R
 
 const rpcError = (code: number, message: string) => ({ jsonrpc: '2.0', error: { code, message }, id: null });
 
-function readBody(req: IncomingMessage): Promise<Buffer | 'too_large'> {
+function readBody(req: IncomingMessage, limit: number): Promise<Buffer | 'too_large'> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
-    let tooLarge = Number(req.headers['content-length'] ?? 0) > MAX_BODY_BYTES;
+    let tooLarge = Number(req.headers['content-length'] ?? 0) > limit;
     req.on('data', (c: Buffer) => {
       total += c.length;
-      if (total > MAX_BODY_BYTES) tooLarge = true;
+      if (total > limit) tooLarge = true;
       if (!tooLarge) chunks.push(c);
     });
     req.on('end', () => resolve(tooLarge ? 'too_large' : Buffer.concat(chunks)));
@@ -115,7 +124,8 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
         log('perch: rejected request with a disallowed Origin');
         return sendJson(res, 403, rpcError(-32000, 'Forbidden origin'));
       }
-      if (!bearerMatches(req.headers.authorization, tokenDigest)) {
+      const principal = await authenticate(req.headers.authorization, tokenDigest, opts.context);
+      if (!principal) {
         return sendJson(res, 401, rpcError(-32001, 'Unauthorized'), { 'www-authenticate': 'Bearer realm="perch"' });
       }
       const path = new URL(req.url ?? '/', 'http://localhost').pathname;
@@ -123,7 +133,7 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
       if (req.method !== 'POST') {
         return sendJson(res, 405, rpcError(-32000, 'Method not allowed (stateless server: POST only)'), { allow: 'POST' });
       }
-      const body = await readBody(req);
+      const body = await readBody(req, hasWriteCapability(principal) ? MAX_WRITE_BODY_BYTES : MAX_BODY_BYTES);
       if (body === 'too_large') return sendJson(res, 413, rpcError(-32000, 'Request body too large'));
       let parsed: unknown;
       try {
@@ -132,7 +142,7 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
         return sendJson(res, 400, rpcError(-32700, 'Parse error'));
       }
 
-      const mcp = createMcpServer(opts.context);
+      const mcp = createMcpServer(opts.context, principal);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,

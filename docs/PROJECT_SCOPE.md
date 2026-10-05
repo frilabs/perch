@@ -27,6 +27,20 @@ User: Fritz. Product name Perch. This records the approved direction, **not an i
 
 Use installed Claude Code and existing Max subscription, incrementally on feature branches with verified PRs; no merge/deployment. Tests/build/typecheck and real MCP transport smoke, local upstream contract tests explicitly labeled mocks. No real accounts/secrets supplied: live checks remain unavailable. Phase 2 signup/billing and hosted production multi-tenancy are roadmap, not completed by adding a user_id field.
 
+## Status update 2026-10-05 (branch `feat/perch-email-connectors`)
+
+The email milestone is implemented and locally tested with mocks and local test servers, but not live-verified. See `docs/EMAIL_MILESTONE.md`:
+- Gmail, Microsoft Graph and GMX/IMAP+SMTP search/read/attachments/draft/send.
+- Explicit per-client read/draft/send grants bound to mail account ids; the global token stays read-only.
+
+Still open:
+- multi-user ownership/isolation;
+- Calendar/Contacts;
+- body-free audit and idempotent send workflow;
+- GOWA;
+- license/notices;
+- compose/backup.
+
 ## Next implementation order
 
 1. Ownership-aware client authorization and explicit read/write capability grants, regression tests preserving this Drive/Notion milestone.
