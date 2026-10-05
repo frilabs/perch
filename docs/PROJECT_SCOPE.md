@@ -55,6 +55,19 @@ Still open after this milestone (exact remaining acceptance criteria):
 - body-free audit log and an idempotent send workflow for mail;
 - GOWA (after API/license verification), license/notices, Docker/compose/backup.
 
+## Status update 2026-10-05 (delivery branch `feat/perch-user-isolation`, stacked on the Calendar milestone, independently tested/review-approved)
+
+The admin-provisioned user ownership/isolation subset is implemented and tested against MOCK upstreams only. See `docs/USER_ISOLATION_MILESTONE.md`:
+- local admin CLI `perch user add|list|remove`;
+- a physically separate encrypted store and key per user, with its own context and token caches;
+- a per-user read-only token (only its hash is stored) and per-user client grants;
+- every token resolves to exactly one namespace (ambiguity fails closed);
+- membership and grants are rechecked on every request and tool call;
+- cursors are bound to their namespace;
+- `PERCH_USER` is the trusted local selector.
+
+This is not public signup and not hosted multi-tenancy hardening. Audit/idempotent send, containers/backup, WhatsApp and live validation remain open.
+
 ## Latest delivery checklist
 
 `docs/PHASE1_REMAINING.md` contains the consolidated exact acceptance criteria and branch relationships. MIT/notices are delivered separately in sibling PR #3 (`feat/perch-oss-license`, based on email PR #2), not integrated into this Calendar branch. No combined-release test run or merge is claimed. Earlier status sections are historical snapshots.

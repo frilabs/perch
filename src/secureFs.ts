@@ -53,6 +53,19 @@ export async function ensurePrivateDir(dir: string): Promise<void> {
 }
 
 /**
+ * Checks an EXISTING owner-only directory without creating or changing anything: it must be a real
+ * directory (not a symlink), owned by the current user and closed to group/others.
+ */
+export async function assertPrivateDir(dir: string): Promise<void> {
+  const st = await lstatOrNull(dir);
+  if (!st) throw new PerchError(`Directory not found: ${dir}`, 'not_initialised');
+  if (st.isSymbolicLink()) throw new PerchError(`Refusing symlinked directory: ${dir}`, 'insecure_path');
+  if (!st.isDirectory()) throw new PerchError(`Not a directory: ${dir}`, 'insecure_path');
+  if (!ownedByMe(st.uid)) throw new PerchError(`Directory ${dir} is not owned by the current user`, 'insecure_path');
+  if ((st.mode & 0o077) !== 0) throw new PerchError(`Directory ${dir} is accessible by group/others (run chmod 700 '${dir}')`, 'insecure_path');
+}
+
+/**
  * Reads a regular, owner-only, non-symlink file. The checks run on the opened handle (fstat),
  * so the file that is validated is the file that is read. O_NONBLOCK keeps FIFOs from hanging.
  */

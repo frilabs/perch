@@ -59,7 +59,7 @@ export class ContactsService {
   private readonly access: ProductivityAccess;
 
   constructor(
-    store: CredentialStore,
+    private readonly store: CredentialStore,
     private readonly upstream: Upstream,
     tokens: ProductivityTokenSource,
   ) {
@@ -91,6 +91,7 @@ export class ContactsService {
       kind: 'contacts',
       queryKey: { f: fields, s: pageSize, o: opts.sortOrder ?? '', a: opts.accountId ?? '*' },
       sources: targets.map((a) => ({ id: a.id, label: a.label })),
+      seal: this.store,
       ...(opts.cursor ? { cursor: opts.cursor } : {}),
       fetchPage: async (source, cursor) => {
         const account = byId.get(source.id)!;

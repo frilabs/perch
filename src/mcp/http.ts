@@ -6,6 +6,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { hasWriteCapability, principalForClientToken, READONLY_PRINCIPAL, type Principal } from '../auth/grants.js';
 import type { PerchContext } from '../context.js';
 import { PerchError } from '../errors.js';
+import type { NamespaceRouter, SessionScope } from '../users/namespaces.js';
 import { createMcpServer } from './server.js';
 
 export const MIN_TOKEN_LENGTH = 43; // 32 random bytes as base64url
@@ -49,17 +50,40 @@ export function validateBindHost(host: string): void {
 const isLoopback = (h: string) => h === 'localhost' || h === '::1' || h.startsWith('127.');
 const hostPort = (h: string, port: number) => (isIP(h) === 6 ? `[${h}]:${port}` : `${h}:${port}`);
 
+interface Authenticated {
+  context: PerchContext;
+  principal: Principal;
+  scope: SessionScope;
+}
+
 /**
- * The global token is the single operator in READ-ONLY mode. Any other well-formed token is
- * looked up as a local client grant (hash lookup; tokens carry 256 bits of entropy).
+ * The global token is the root operator in READ-ONLY mode. Any other well-formed token is looked up by
+ * hash (tokens carry 256 bits of entropy): with a namespace router, among root client grants and active
+ * users' read-only tokens and client grants, resolving to exactly one namespace; without a router (legacy
+ * single-operator mode), among root client grants only.
  */
-async function authenticate(header: string | undefined, expectedDigest: Buffer, ctx: PerchContext): Promise<Principal | null> {
+async function authenticate(
+  header: string | undefined,
+  expectedDigest: Buffer,
+  ctx: PerchContext,
+  namespaces: NamespaceRouter | undefined,
+): Promise<Authenticated | null> {
   const m = /^Bearer\s+(\S+)\s*$/i.exec(header ?? '');
   const got = createHash('sha256').update(m?.[1] ?? '').digest();
   // Always compare (constant time on fixed-size digests), then require a well-formed header.
-  if (timingSafeEqual(got, expectedDigest) && m !== null) return READONLY_PRINCIPAL;
+  if (timingSafeEqual(got, expectedDigest) && m !== null) {
+    if (namespaces && (await namespaces.collidesWithGlobal(m[1]!))) {
+      throw new PerchError('The global token also matches a user or client token; refusing to choose a namespace', 'ambiguous_token');
+    }
+    return { context: ctx, principal: READONLY_PRINCIPAL, scope: {} };
+  }
   if (!m || m[1]!.length < MIN_TOKEN_LENGTH) return null;
-  return principalForClientToken(ctx.store, m[1]!);
+  if (namespaces) {
+    const r = await namespaces.resolveToken(m[1]!);
+    return r && { context: r.context, principal: r.principal, scope: r.session };
+  }
+  const principal = await principalForClientToken(ctx.store, m[1]!);
+  return principal && { context: ctx, principal, scope: {} };
 }
 
 export interface HttpServerOptions {
@@ -67,6 +91,11 @@ export interface HttpServerOptions {
   port: number;
   token: string;
   context: PerchContext;
+  /**
+   * Routes per-user tokens to their own namespace contexts. Its root context must be `context`.
+   * Without it, the server is the legacy single-operator server (root store only).
+   */
+  namespaces?: NamespaceRouter;
   /** Extra exact Host header values, e.g. the Tailscale Serve MagicDNS name. */
   allowedHosts?: string[];
   /** Exact Origin values; a request carrying any other Origin is rejected. */
@@ -107,6 +136,7 @@ function readBody(req: IncomingMessage, limit: number): Promise<Buffer | 'too_la
 /** Stateless Streamable HTTP: one MCP server + transport per POST, JSON responses. */
 export async function startHttpServer(opts: HttpServerOptions): Promise<RunningHttpServer> {
   validateBindHost(opts.host);
+  if (opts.namespaces && opts.namespaces.root !== opts.context) throw new PerchError('namespaces.root must be the server context', 'bad_config');
   const tokenDigest = createHash('sha256').update(validateHttpToken(opts.token)).digest();
   const log = opts.log ?? ((line: string) => process.stderr.write(`${line}\n`));
   const allowedOrigins = new Set(opts.allowedOrigins ?? []);
@@ -124,10 +154,22 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
         log('perch: rejected request with a disallowed Origin');
         return sendJson(res, 403, rpcError(-32000, 'Forbidden origin'));
       }
-      const principal = await authenticate(req.headers.authorization, tokenDigest, opts.context);
-      if (!principal) {
+      let auth: Authenticated | null;
+      try {
+        auth = await authenticate(req.headers.authorization, tokenDigest, opts.context, opts.namespaces);
+      } catch (err) {
+        if (err instanceof PerchError && err.code === 'ambiguous_token') {
+          log('perch: rejected a bearer token that matches more than one grant (ambiguous token hash; check perch user list / perch client list)');
+          auth = null;
+        } else if (err instanceof PerchError && err.code === 'namespace_unavailable') {
+          log('perch: an active user namespace could not be opened (missing/corrupt store or key); all bearer tokens, including the global token, fail closed until it is restored or the user is removed');
+          return sendJson(res, 503, rpcError(-32000, 'Service unavailable'));
+        } else throw err;
+      }
+      if (!auth) {
         return sendJson(res, 401, rpcError(-32001, 'Unauthorized'), { 'www-authenticate': 'Bearer realm="perch"' });
       }
+      const { principal } = auth;
       const path = new URL(req.url ?? '/', 'http://localhost').pathname;
       if (path !== MCP_PATH) return sendJson(res, 404, rpcError(-32000, 'Not found'));
       if (req.method !== 'POST') {
@@ -142,7 +184,7 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
         return sendJson(res, 400, rpcError(-32700, 'Parse error'));
       }
 
-      const mcp = createMcpServer(opts.context, principal);
+      const mcp = createMcpServer(auth.context, principal, auth.scope);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,

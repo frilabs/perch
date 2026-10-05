@@ -138,6 +138,8 @@ interface RetryBudget {
 
 const newBudget = (): RetryBudget => ({ remaining: MAX_RETRIES_PER_CALL });
 
+const childrenKind = (ws: NotionWorkspace, blockId: string) => `notion-children:${ws.id}:${normaliseNotionId(blockId)}`;
+
 export class NotionService {
   private readonly sleep: (ms: number) => Promise<void>;
 
@@ -153,6 +155,18 @@ export class NotionService {
     const ws = (await this.store.read()).notion.find((w) => w.id === id);
     if (!ws) throw new PerchError(`Unknown Notion workspace: ${id}`, 'unknown_account');
     return ws;
+  }
+
+  /**
+   * Notion's own cursors are sealed per namespace store and bound to workspace and parent (block/page or
+   * data source), so a cursor from another namespace, workspace or parent fails before any request.
+   */
+  private openCursor(kind: string, cursor: string | undefined): string | undefined {
+    return cursor ? this.store.openCursor(kind, cursor) : undefined;
+  }
+
+  private sealCursor(kind: string, next: string | null): string | null {
+    return next ? this.store.sealCursor(kind, next) : null;
   }
 
   private prov(ws: NotionWorkspace): WorkspaceProvenance {
@@ -199,6 +213,7 @@ export class NotionService {
       kind: 'notion',
       queryKey: { q: input.query ?? '', f: input.filter ?? null, pageSize, ws: input.workspaceId ?? null },
       sources: workspaces,
+      seal: this.store,
       cursor: input.cursor,
       fetchPage: async (source, startCursor) => {
         const ws = workspaces.find((w) => w.id === source.id)!;
@@ -250,12 +265,13 @@ export class NotionService {
   async getBlockChildren(workspaceId: string, blockId: string, opts: { cursor?: string; pageSize?: number }) {
     const ws = await this.workspace(workspaceId);
     const pageSize = bounded('pageSize', opts.pageSize, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
-    const list = await this.children(newBudget(), ws, blockId, opts.cursor, pageSize);
+    const kind = childrenKind(ws, blockId);
+    const list = await this.children(newBudget(), ws, blockId, this.openCursor(kind, opts.cursor), pageSize);
     return {
       ...this.prov(ws),
       blockId,
       blocks: list.results.map(toBlock),
-      nextCursor: list.has_more ? list.next_cursor : null,
+      nextCursor: list.has_more ? this.sealCursor(kind, list.next_cursor) : null,
       hasMore: list.has_more,
     };
   }
@@ -281,7 +297,8 @@ export class NotionService {
     let rateLimited = false;
     const errors: Array<{ blockId: string; message: string }> = [];
 
-    const top = await this.children(retries, ws, pageId, opts.cursor, Math.min(pageSize, budget));
+    const kind = childrenKind(ws, pageId);
+    const top = await this.children(retries, ws, pageId, this.openCursor(kind, opts.cursor), Math.min(pageSize, budget));
     budget -= top.results.length;
     const blocks = top.results.map(toBlock);
 
@@ -309,7 +326,7 @@ export class NotionService {
         node.children = list.results.map(toBlock);
         if (list.has_more) {
           node.childrenHasMore = true;
-          node.childrenNextCursor = list.next_cursor;
+          node.childrenNextCursor = this.sealCursor(childrenKind(ws, node.id), list.next_cursor);
           truncated = true;
         }
         await expand(node.children, depth + 1);
@@ -323,7 +340,7 @@ export class NotionService {
       pageId,
       blocks,
       blocksReturned: total(blocks),
-      nextCursor: top.has_more ? top.next_cursor : null,
+      nextCursor: top.has_more ? this.sealCursor(kind, top.next_cursor) : null,
       hasMore: top.has_more,
       truncated,
       partial: errors.length > 0,
@@ -350,17 +367,19 @@ export class NotionService {
     opts: { filter?: unknown; sorts?: unknown; cursor?: string; pageSize?: number },
   ) {
     const ws = await this.workspace(workspaceId);
+    const kind = `notion-query:${ws.id}:${normaliseNotionId(dataSourceId)}`;
+    const start = this.openCursor(kind, opts.cursor);
     const list = await this.post<NotionList>(newBudget(), ws, `/v1/data_sources/${normaliseNotionId(dataSourceId)}/query`, {
       ...(opts.filter !== undefined ? { filter: opts.filter } : {}),
       ...(opts.sorts !== undefined ? { sorts: opts.sorts } : {}),
       page_size: bounded('pageSize', opts.pageSize, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE),
-      ...(opts.cursor ? { start_cursor: opts.cursor } : {}),
+      ...(start ? { start_cursor: start } : {}),
     });
     return {
       ...this.prov(ws),
       dataSourceId,
       results: list.results,
-      nextCursor: list.has_more ? list.next_cursor : null,
+      nextCursor: list.has_more ? this.sealCursor(kind, list.next_cursor) : null,
       hasMore: list.has_more,
     };
   }
