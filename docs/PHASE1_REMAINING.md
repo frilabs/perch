@@ -7,16 +7,30 @@ As of 2026-10-05. This is a completion checklist, **not a claim that phase 1 is 
 - Email: PR #2, `feat/perch-email-connectors`, based on PR #1. Gmail/Graph/IMAP-SMTP search/read/attachments/draft/send, single-operator scoped client grants. See `EMAIL_MILESTONE.md`.
 - OSS licensing: PR #3, `feat/perch-oss-license`, an independent sibling based on PR #2. MIT source license, dependency inventory/notices and gate; not yet combined with this Calendar branch. See that branch's `OSS_LICENSE_MILESTONE.md`. Precise copied type-fest revision provenance must be confirmed before container distribution.
 - This Calendar/Contacts increment: separate productivity OAuth, five read tools and private owned-calendar create/update with opt-in grants, explicit private visibility and popup-only reminders. See `GOOGLE_PRODUCTIVITY_MILESTONE.md`. It does not add multi-user hosting.
+- User ownership/isolation: branch `feat/perch-user-isolation`, based on the Calendar commit `acc3eeb`. **Not yet committed, pushed or reviewed.** See `USER_ISOLATION_MILESTONE.md`.
 
 The sibling branches have separate test reports. Do not sum them into a fictional combined test run. They need a reviewed integration branch and full regression verification before any combined release; no automatic merge is authorised.
 
-## 1. User ownership and isolation — NOT implemented
+## 1. User ownership and isolation — admin-provisioned subset implemented, mock-tested, review-approved
 
-- Explicit admin user provisioning with ownership-bound credential storage, provider requests, downloadable content/files, cursors, MCP sessions and results.
-- Resolve a request to exactly one user before selecting credentials/context. No global bearer token exposing every user's connected accounts. A local single-user operator token remains valid only inside that operator's namespace.
-- Per-client grants must belong to that user, explicitly enumerate accounts and capabilities, and be rechecked on every HTTP and persistent stdio operation.
-- Tests with at least two users: other-user account listing, read, attachment/download, search/fan-out, forged cursor, draft/send, Calendar write, session reuse and grant revocation must fail without upstream I/O or identifying metadata. Preserve all existing operator/client regression tests.
-- Document local-admin versus remote-user powers; do not equate an `ownerId` field with enforced isolation.
+Implemented on delivery branch `feat/perch-user-isolation` (independently tested/review-approved; MOCK upstreams only, not live-verified). Evidence: `USER_ISOLATION_MILESTONE.md` §5–§6. Each criterion below is marked done only where a test covers it:
+
+- [x] Explicit admin user provisioning (`perch user add|list|remove`). Ownership-bound storage: a physically separate encrypted store and key per user. Each namespace has its own context and access-token caches, so provider requests, downloaded content and results use only the owner's credentials. Cursors are sealed per namespace; MCP sessions are bound to one namespace.
+- [x] Every request resolves to exactly one namespace before credentials/context are selected; ambiguous token hashes fail closed. The global bearer token sees only the root operator namespace; the local operator token stays valid only there.
+- [x] Per-client grants belong to the user's own store, enumerate accounts and capabilities, and are rechecked, together with user membership and the integrity of the owner namespace (directories, key file, store), on every HTTP request and before every tool call, including persistent stdio. The global token is refused if its hash matches any user token or any active user's client grant; a damaged active namespace therefore makes all HTTP tokens answer 503 (documented availability trade-off).
+- [x] Tests with two users plus root, all with colliding account ids. Each of these fails without upstream I/O or identifying metadata, for the other user and for the global token:
+  - another user's account listing, read, attachment/download and search/fan-out;
+  - cross-user and forged cursors;
+  - draft/send and Calendar create/update (each acts only in the owner's namespace);
+  - a reused persistent session after user removal;
+  - grant revocation and narrowing.
+  All pre-existing tests pass unmodified.
+- [x] Local-admin versus remote-user powers are documented (`USER_ISOLATION_MILESTONE.md` §2, `SETUP.md` §4c); there is no bare `ownerId` field.
+- Still open:
+  - review, commit and PR of this branch;
+  - live validation;
+  - user token rotation/re-activation and destructive deletion (not implemented, documented);
+  - hosted production multi-tenancy hardening (per-user quotas/rate limits, separate processes or OAuth apps, public exposure), which remains phase 2.
 
 ## 2. Body-free audit and idempotent mail workflow — NOT implemented
 

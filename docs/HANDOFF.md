@@ -1,5 +1,47 @@
 # Handoff: Perch
 
+## Update 2026-10-05: Nutzer-Isolations-Meilenstein (Delivery-Branch `feat/perch-user-isolation`, Basis `acc3eeb`)
+
+- **Abgrenzung:**
+  - Bereits auf `origin` liegen (laut lokalen Remote-Refs, ohne Fetch geprüft):
+    - PR2 `feat/perch-email-connectors`;
+    - PR3 `feat/perch-oss-license` (Schwester-Branch, hier nicht integriert);
+    - PR4 `feat/perch-calendar-contacts` (`acc3eeb`).
+  - Dieser Meilenstein wurde im Worktree `/home/hermes/perch-users-work` unabhängig getestet und frisch review-freigegeben. Veröffentlichung erfolgt durch den Orchestrator; GitHub ist die Quelle für PR-/Merge-Status. Kein Merge oder Deploy ist autorisiert.
+- **Freigabe:** Fritz hat am 2026-10-05 über den Orchestrator die erweiterte Phase 1 freigegeben, für dieses Inkrement nur admin-angelegte Nutzer-Isolation.
+- **Implementiert** (Details, TDD-Nachweise: `docs/USER_ISOLATION_MILESTONE.md`; Setup: `docs/SETUP.md` §4c):
+  - Lokale Registry im verschlüsselten Root-Store (`users`, Default `[]`):
+    - CLI `perch user add|list|remove`;
+    - IDs `user-<16 hex>`, nie wiederverwendet; höchstens 100 Einträge;
+    - `remove` sperrt nur, Store und Schlüssel bleiben liegen.
+  - Pro Nutzer ein physisch getrennter Store (`$PERCH_DATA_DIR/users/<id>/`) und Schlüssel (`<Verzeichnis von PERCH_KEY_FILE>/user-keys/<id>.key`). Dazu kommen ein eigener Kontext mit eigenen Token-Caches, ein Read-only-Token (nur der Hash wird gespeichert, die Datei ist neu und `0600`) und eigene Client-Grants.
+  - Fehlende, verlinkte oder beschädigte Stores und Schlüssel schlagen geschlossen fehl, ohne Neuanlage.
+  - HTTP: Das Token wählt genau einen Namespace (globales Token = Root, read-only wie bisher). Mehrdeutige Hashes ergeben `401`, ein beschädigter aktiver Namespace `503` für alle Bearer-Tokens, auch das globale (bewusster Verfügbarkeits-Tradeoff, weil die Eindeutigkeit des globalen Tokens gegen die Client-Grants dieses Namespace nicht beweisbar ist). Das globale Token wird auch abgewiesen (`401`), wenn sein Hash einem Client-Grant eines aktiven Nutzers gleicht. Es gibt keine Auswahl per Header, Query oder Pfad.
+  - Mitgliedschaft und Grants prüft Perch bei jedem Request und vor jedem Tool-Aufruf neu, auch in stdio. Vor jedem Tool-Aufruf einer Nutzer-Session prüft Perch zusätzlich Verzeichnisse, Schlüsseldatei (fehlt/verlinkt/ersetzt) und Store (beschädigt) des Namespace; nichts wird neu angelegt.
+  - Cursor sind per HMAC an Namespace, Abfrage und Parent gebunden.
+  - `PERCH_USER` wählt lokal den Namespace für Onboarding, Konten, Client-Grants und stdio. Ein ungültiger Wert ist ein Fehler, es gibt keinen Rückfall auf Root. Admin-Befehle sind im Nutzer-Modus gesperrt.
+- **Lokal getestet (nur Mocks):**
+  - Orchestrator: `npm run check` nach Review-Fixes auf Host-Node und Mindest-Node 22.12: typecheck/build fehlerfrei, `npm test` **468/468** (39 Dateien; vor Fixes 461, vor Meilenstein 423), smoke **9/9** (vorher 8). Unabhängige Offline-Probe: beide zuerst reproduzierten Lücken geschlossen, null externe Calls.
+  - Grün auf Host-Node 26.7.0 und portablem Node **22.12.0**; Host und `engines` unverändert.
+  - `npm audit --omit=dev`: 0 Befunde; `git diff --check`: sauber.
+  - Vier Mutationsproben (Guard, Cursor-MAC, Mehrdeutigkeit, HTTP-Routing) wurden jeweils erkannt; die Quellen sind byte-identisch wiederhergestellt.
+  - In der Guard-Mutation hat der Offline-Guard einen IMAP-Connect auf den nicht auflösbaren Testhost blockiert und protokolliert. Kein Request hat den Rechner verlassen.
+- **Live verifiziert:** nichts.
+- **Grenzen** (Meilenstein-Doku §8):
+  - keine gehärtete Mandantenfähigkeit: ein Prozess, keine Quoten, gemeinsame OAuth-App, der Host-Admin sieht alles;
+  - keine Token-Rotation, keine Reaktivierung, kein Löschbefehl;
+  - ein beschädigter aktiver Namespace blockiert alle HTTP-Bearer-Tokens, auch das globale, bis er repariert oder der Nutzer entfernt ist. Nur lokales Root-stdio ohne Nutzer- und Client-Token-Selektor bleibt davon unabhängig.
+- **Weiter offen:** `docs/PHASE1_REMAINING.md` §2–§5:
+  - Audit und idempotentes Senden;
+  - Container, Backup und Migrationen;
+  - WhatsApp;
+  - Live-Tests;
+  - kombinierte Integration mit dem Lizenz-Branch.
+  Phase 1 ist **nicht** abgeschlossen.
+- **Review-Gate:** frischer unabhängiger Review bestanden, keine Security-/Logic-Blocker; Commit/Push/PR durch den Orchestrator. Kein Merge ohne Fritz' OK.
+
+---
+
 ## Update 2026-10-05: Google-Productivity-Meilenstein (Branch `feat/perch-calendar-contacts`, Basis `ad12f1e`)
 
 - **Freigabe:** Fritz hat am 2026-10-05 über den Orchestrator die erweiterte Phase 1 und diesen Meilenstein freigegeben.

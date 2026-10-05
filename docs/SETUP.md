@@ -212,7 +212,7 @@ perch client remove client-1a2b3c4d     # wirkt ab dem nächsten Tool-Aufruf, au
   - Andere Konten sind unsichtbar. Eine nicht gewährte und eine nicht existierende Konto-ID liefern dieselbe Ablehnung.
 - **Widerruf und Einschränkung:** Vor **jedem** Tool-Aufruf liest Perch den Grant neu aus dem Store (Grant-ID und Token-Hash). `perch client remove` oder ein eingeschränkter Grant gilt damit sofort, auch für eine laufende stdio-Session. Der Aufruf scheitert mit `grant_revoked` bzw. `capability_denied`, bevor ein Provider kontaktiert wird. Über HTTP wird ein entferntes Token zusätzlich mit `401` abgewiesen. Die Tool-Liste einer laufenden stdio-Session wird nicht aktualisiert.
 - **Betreiber:** Das globale HTTP-Token und `perch serve --stdio` ohne Client-Token behalten alle Read-only-Tools (Drive, Notion, Mail, seit dem Productivity-Meilenstein auch Calendar/Contacts lesend) für alle Konten. Schreib-Tools gibt es dort nie.
-- **Grenze:** Das ist **keine Mehrbenutzer-Isolation.** Alle Clients handeln für den einen Betreiber des Stores. Perch nicht als geteilten Mehrbenutzerdienst betreiben.
+- **Grenze:** Client-Grants schränken einen Client innerhalb **eines** Namespace ein. Die Trennung zwischen Personen leisten erst die vom Admin angelegten Nutzer (Abschnitt 4c).
 
 ## 4b. Google Calendar und Contacts verbinden (Productivity-Meilenstein)
 
@@ -249,6 +249,78 @@ perch client add --label "Kontakte" --allow contacts_read --account gprod-1a2b3c
 - **Wiederholen:** `calendar_create_event` braucht eine stabile `requestId`. Bei `indeterminate` (Ausgang unbekannt) dieselbe `requestId` und dieselbe `calendarId` erneut senden: Der Termin entsteht dann höchstens einmal, sonst kommt `conflict`. Perch wiederholt nie selbst.
 - **Widerruf:** <https://myaccount.google.com/permissions> oder `remove --revoke`.
 
+## 4c. Nutzer anlegen und trennen (Nutzer-Isolations-Meilenstein)
+
+Spezifikation und Testnachweise: `docs/USER_ISOLATION_MILESTONE.md`. **Nur mit Mocks getestet, nicht live verifiziert.** Das ist **keine** gehärtete Mandantenfähigkeit für einen öffentlichen Dienst (Grenzen: Meilenstein-Doku §8).
+
+### 4c.1 Modell
+
+- **Root-Namespace:** der bisherige Store (`PERCH_DATA_DIR/store.enc`, `PERCH_KEY_FILE`).
+  - Er gehört dem lokalen Betreiber. Bestehende Konten bleiben dort; Perch verschiebt nichts und migriert nichts automatisch.
+  - Das globale HTTP-Token und `perch serve --stdio` ohne `PERCH_USER` sehen nur diesen Namespace.
+- **Nutzer:** Nur der lokale Admin legt Nutzer per CLI an. Es gibt keine Registrierung.
+  - Jeder Nutzer bekommt einen **eigenen** verschlüsselten Store unter `$PERCH_DATA_DIR/users/<id>/` und einen **eigenen** Schlüssel unter `<Verzeichnis von PERCH_KEY_FILE>/user-keys/<id>.key`, also außerhalb des Datenverzeichnisses.
+  - Dazu kommen eigene Token-Caches im Server.
+  - Die ID (`user-` plus 16 Hex-Zeichen) erzeugt Perch selbst. Sie wird nie wiederverwendet.
+- **Zugangsdaten eines Nutzers:**
+  - ein Read-only-Token: alle Lese-Tools, aber nur für die eigenen Konten;
+  - optional Client-Grants im eigenen Namespace (Mail-Grants nur Mail, `gprod`-Grants nur Calendar/Contacts, wie bisher).
+  - Jedes Token gehört zu genau einem Namespace. Passt ein Token-Hash mehrfach, lehnt Perch ab und wählt nie selbst aus.
+- **Höchstens 100 Registry-Einträge.** Entfernte Nutzer zählen mit.
+- **Macht des Admins:** Wer auf dem Host den Root-Schlüssel und `user-keys/` lesen kann, kann alle Namespaces lesen. Das ist die bewusste privilegierte Grenze. Perch schützt Nutzer **nicht** vor dem Host-Admin.
+
+### 4c.2 Nutzer anlegen, auflisten, entfernen
+
+```bash
+perch user add --label "Alice"           # Token -> ~/.config/perch/users/<id>.token (0600), wird nie angezeigt
+perch user add --label "Bob" --token-file ~/.config/perch/users/bob.token
+perch user list
+perch user remove user-0123456789abcdef  # sperrt die Mitgliedschaft; Store und Schlüssel bleiben liegen
+```
+
+- Das Token entsteht genau einmal in einer **neuen** `0600`-Datei. Eine vorhandene Datei wird nie überschrieben. In der Registry steht nur der SHA-256-Hash. Das Token sicher an den Nutzer übergeben.
+- `remove` wirkt sofort:
+  - Über HTTP liefern Read-only-Token und Client-Grants dieses Nutzers beim nächsten Request `401`.
+  - Eine laufende stdio-Session scheitert beim nächsten Tool-Aufruf, bevor ein Provider kontaktiert wird.
+  - Store und Schlüssel löscht Perch nicht. Archivieren oder löschen ist Sache des Admins.
+  - Es gibt weder eine Reaktivierung noch eine Token-Rotation: Bei Bedarf einen neuen Nutzer anlegen und neu einrichten.
+
+### 4c.3 Konten und Client-Grants eines Nutzers einrichten (lokal, Admin)
+
+`PERCH_USER=<id>` wählt den Namespace für Konten-, Client- und stdio-Befehle. Die Onboarding-Schritte aus den Abschnitten 3, 4, 4a und 4b gelten unverändert. Das Konto landet nur im Store dieses Nutzers.
+
+```bash
+export PERCH_USER=user-0123456789abcdef
+perch google add --label "Alice Drive" --port 8766
+perch imap add --label "Alice GMX" --email alice@gmx.at --allow-send
+perch google-productivity add --label "Alice Kalender" --services calendar --allow-calendar-write
+perch accounts                                 # nur Alices Konten
+perch client add --label "Alice Laptop" --allow read,send --account imap-1a2b3c4d
+perch serve --stdio                            # Alices Read-only-Session
+unset PERCH_USER                               # zurück zum Root-Namespace
+```
+
+- Ein leerer, falsch geformter, unbekannter oder entfernter `PERCH_USER` bricht ab. Es gibt **keinen** Rückfall auf den Root-Namespace.
+- Mit `PERCH_USER` sind gesperrt: `perch init`, `perch token`, `perch user …` (keine verschachtelte Nutzerverwaltung) und `perch serve --http`.
+- `PERCH_CLIENT_TOKEN_FILE` muss zu einem Grant **des gewählten Namespace** gehören, sonst startet stdio nicht.
+- Konto-IDs gelten nur im eigenen Namespace. Dieselbe ID kann in zwei Namespaces verschiedene Konten bezeichnen. Ein Grant kann nur Konten des eigenen Namespace nennen.
+
+### 4c.4 HTTP für mehrere Nutzer
+
+`perch serve --http` (ohne `PERCH_USER`) bedient alle Nutzer. Welcher Namespace gilt, entscheidet allein das Bearer-Token. Es gibt keinen Header, Query-Parameter oder Pfad dafür.
+
+```bash
+# Laptop von Alice: ihr Read-only-Token oder ihr Client-Token statt des globalen Tokens
+TOKEN="$(ssh homeserver 'cat ~/.config/perch/users/user-0123456789abcdef.token')"
+claude mcp add --transport http perch https://homeserver.tailnet-name.ts.net/mcp --header "Authorization: Bearer ${TOKEN}"
+```
+
+- Host-, Origin- und Bearer-Prüfung, Loopback-Default und die Bind-Regeln gelten unverändert.
+- Mitgliedschaft und Grants prüft Perch bei **jedem** Request und vor **jedem** Tool-Aufruf neu.
+- Cursor (`nextCursor`) sind an Namespace, Abfrage und Konto gebunden. Fremde oder veränderte Cursor scheitern mit `bad_cursor`, bevor ein Provider kontaktiert wird. Cursor aus früheren Versionen gelten nicht mehr: die Abfrage neu beginnen.
+- **Beschädigter Namespace:** Fehlt der Store oder Schlüssel eines **aktiven** Nutzers oder ist er beschädigt, antwortet der Server auf **alle** Bearer-Tokens mit `503` (fail closed), **auch auf das globale Token**: Perch kann sonst nicht beweisen, dass das globale Token keinem Client-Grant dieses Nutzers gleicht. Laufende Sitzungen dieses Nutzers (auch stdio) scheitern beim nächsten Tool-Aufruf. Perch legt nichts neu an. Abhilfe: Dateien aus dem Backup zurückspielen oder `perch user remove <id>`. Lokales Root-stdio ohne `PERCH_USER` **und ohne `PERCH_CLIENT_TOKEN_FILE`** bleibt nutzbar. Root-stdio mit Client-Token prüft die Namespace-Eindeutigkeit beim Start und sperrt bei einem beschädigten aktiven Nutzer-Namespace ebenfalls.
+- **Fehlgeschlagenes `perch user add`:** Bricht der Befehl ab, können eine Token-Datei und `users/<id>/` bzw. `user-keys/<id>.key` ohne Registry-Eintrag liegen bleiben. Sie sind nie nutzbar; Dateien ohne passenden Eintrag in `perch user list` löschen.
+
 ## 5. Konten anzeigen, trennen, widerrufen
 
 ```bash
@@ -280,6 +352,8 @@ perch serve --stdio
 ```bash
 perch serve --http
 ```
+
+- Der Server bedient den Root-Namespace (globales Token, Root-Client-Grants) und alle aktiven Nutzer (deren Tokens), siehe Abschnitt 4c.4.
 
 - Ohne gültiges Token (≥ 43 Zeichen) startet der Server nicht.
 - Erlaubte Bind-Adressen: Loopback oder eine **explizite Tailscale-IP**, z. B. `--host 100.x.y.z`. `0.0.0.0` und `::` werden abgelehnt.

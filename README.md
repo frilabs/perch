@@ -35,7 +35,8 @@ Stand 2026-10-05:
   - eigener OAuth-Grant, Dienste explizit per `--services calendar,contacts`, Default `calendar.readonly`/`contacts.readonly`, Opt-in `calendar.events.owned`
   - Kalender und Termine lesen; private Termine anlegen (idempotent per `requestId`) und ändern (`If-Match`), ohne Teilnehmer, Einladungen oder Benachrichtigungen
   - Kontakte seitenweise lesen (keine Suche)
-- **Client-Grants:** `perch client add --allow read,draft,send|calendar_read,calendar_write,contacts_read --account …`. Das globale HTTP-Token bleibt read-only. Das ist **keine** Mehrbenutzer-Isolation.
+- **Client-Grants:** `perch client add --allow read,draft,send|calendar_read,calendar_write,contacts_read --account …`. Das globale HTTP-Token bleibt read-only.
+- **Admin-angelegte Nutzer** (`docs/USER_ISOLATION_MILESTONE.md`, nur mit Mocks getestet): `perch user add|list|remove`. Jeder Nutzer bekommt einen eigenen verschlüsselten Store und Schlüssel, ein Read-only-Token und eigene Client-Grants (`PERCH_USER=<id> perch …`). Jedes Token gilt in genau einem Namespace; Mitgliedschaft und Grants prüft Perch vor jedem Tool-Aufruf neu. Keine öffentliche Registrierung, keine gehärtete Mandantenfähigkeit.
 - **Transporte:** stdio und zustandsloses Streamable HTTP (`POST /mcp`)
 - **Sicherheit:**
   - verschlüsselter Credential Store (AES-256-GCM, Schlüssel separat abgelegt)
@@ -89,13 +90,14 @@ npm run smoke     # baut und testet dist/cli.js über stdio und HTTP
 - [`docs/SETUP.md`](docs/SETUP.md): Setup und Betrieb
 - [`docs/EMAIL_MILESTONE.md`](docs/EMAIL_MILESTONE.md): E-Mail-Meilenstein (Spezifikation, TDD-Nachweise)
 - [`docs/GOOGLE_PRODUCTIVITY_MILESTONE.md`](docs/GOOGLE_PRODUCTIVITY_MILESTONE.md): Calendar/Contacts-Meilenstein (Spezifikation, TDD-Nachweise)
+- [`docs/USER_ISOLATION_MILESTONE.md`](docs/USER_ISOLATION_MILESTONE.md): Nutzer-Isolations-Meilenstein (Spezifikation, TDD-Nachweise)
 - [`docs/PROJECT_SCOPE.md`](docs/PROJECT_SCOPE.md): erweiterte Projektrichtung
 - [`docs/HANDOFF.md`](docs/HANDOFF.md): aktueller Stand
 - [`AGENTS.md`](AGENTS.md): Arbeitsregeln
 
 ## Roadmap
 
-- Mehrbenutzer-Isolation
+- Body-freies Audit-Log und idempotenter Sende-Workflow; Docker/Compose, Backup, Migrationen
 - Kalender-Einladungen, Serien, Löschen; Kontakte schreiben
 - WhatsApp höchstens experimentell, später
 - LinkedIn ausgeschlossen
