@@ -146,7 +146,8 @@ async function connect(token: string) {
 }
 
 const parse = (r: Awaited<ReturnType<Client['callTool']>>) => JSON.parse((r.content as Array<{ text: string }>)[0]!.text);
-const sendArgs = (accountId: string) => ({ accountId, to: ['friend@example.test'], subject: 'Hi', text: 'Body' });
+// requestId is required on mail_send (mail workflow milestone); a fresh id per call keeps each call a new send.
+const sendArgs = (accountId: string) => ({ accountId, to: ['friend@example.test'], subject: 'Hi', text: 'Body', requestId: `mcp-test-${Math.random().toString(16).slice(2, 14)}` });
 
 beforeEach(async () => {
   dirs = await makeTempDirs();
@@ -227,7 +228,7 @@ describe('client grants are mail-only and least-privilege [MOCK providers]', () 
     const { token } = await grant('Send only', ['send'], ['imap-0000000a']);
     const client = await connect(token);
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
-    expect(names).toEqual(['mail_send', 'perch_list_accounts']);
+    expect(names).toEqual(['mail_send', 'mail_send_status', 'perch_list_accounts']);
     for (const n of names) expect(n).not.toMatch(/^(drive|notion)_/);
     for (const [tool, args] of [
       ['drive_search', { query: 'x' }],

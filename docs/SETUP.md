@@ -24,13 +24,16 @@ CLI-Aufruf: `node dist/cli.js …`. Optional global per `npm link`, dann heißt 
 perch init
 ```
 
-Der Befehl legt drei Dinge an, aber nur, was noch fehlt. Rechte: Verzeichnisse `0700`, Dateien `0600`.
+Der Befehl legt vier Dinge an, aber nur, was noch fehlt. Rechte: Verzeichnisse `0700`, Dateien `0600`.
 
 | Was | Default-Pfad | Variable |
 | --- | --- | --- |
 | Schlüssel (32 Byte) | `~/.config/perch/store.key` | `PERCH_KEY_FILE` |
 | Verschlüsselte DB | `~/.local/share/perch/store.enc` | `PERCH_DATA_DIR` |
+| Mail-Workflow-/Audit-Ledger (verschlüsselt, nur mit einer **neuen** DB) | `~/.local/share/perch/mail-workflow.enc` | `PERCH_DATA_DIR` |
 | HTTP-Bearer-Token | `~/.config/perch/http-token` | `PERCH_HTTP_TOKEN_FILE` |
+
+- **Upgrade von einer älteren Version:** Eine bestehende DB bekommt den Ledger **nicht** automatisch. Bis er existiert, scheitern alle MCP-Tool-Aufrufe und Sends dieses Namespace geschlossen (`ledger_missing`). Einmalig ausführen, für den Root-Namespace `perch mail-workflow init` und für jeden Nutzer `PERCH_USER=<id> perch mail-workflow init`. Ist ein Ledger verloren gegangen, hilft nur ein Backup: `init` lehnt für Namespaces ab, die schon einen Ledger hatten. Details in Abschnitt 4d.
 
 - **Schlüssel separat sichern.** Ohne ihn lässt sich die DB nicht mehr entschlüsseln.
 - Fehlt der Schlüssel, die DB existiert aber, bricht `perch init` ab. Perch erzeugt dann bewusst keinen neuen Schlüssel. Den alten aus dem Backup zurückspielen.
@@ -50,6 +53,8 @@ rm -r ~/.local/share/perch/store.lock    # dann den verwaisten Lock entfernen
 ```
 
 Betroffen sind Kontenänderungen und das Speichern rotierter Google-Refresh-Tokens. Lesen funktioniert weiter.
+
+Dasselbe gilt für den Mail-Workflow-Ledger: Lock-Verzeichnis `mail-workflow.lock` im selben Datenverzeichnis (pro Nutzer unter `users/<id>/`). Ein verwaister Ledger-Lock blockiert ab 60 s alle auditierten Tool-Aufrufe und Sends dieses Namespace (fail closed). Abhilfe wie oben, nur wenn kein Perch-Prozess läuft: `rm -r ~/.local/share/perch/mail-workflow.lock`.
 
 Weitere Variablen stehen in `.env.example`. Laden geht zum Beispiel so: `node --env-file=.env dist/cli.js …`.
 
@@ -209,6 +214,7 @@ perch client remove client-1a2b3c4d     # wirkt ab dem nächsten Tool-Aufruf, au
   - Keine Drive- oder Notion-Tools und keine Drive/Notion-Metadaten. `perch_list_accounts` zeigt nur `mail` (die gewährten Konten) und `connection`.
   - Lese-Tools (`mail_search`, `mail_read_message`, `mail_get_attachment`) gibt es nur mit `read`, `mail_create_draft` nur mit `draft`, `mail_send` nur mit `send`.
   - Antworten mit `replyToMessageId` lesen die Originalmail und brauchen deshalb zusätzlich `read`.
+  - `mail_send` verlangt eine `requestId` (idempotenter Versand, Abschnitt 4d). `mail_send_status` (nur mit `send`) zeigt den Stand eigener Sends.
   - Andere Konten sind unsichtbar. Eine nicht gewährte und eine nicht existierende Konto-ID liefern dieselbe Ablehnung.
 - **Widerruf und Einschränkung:** Vor **jedem** Tool-Aufruf liest Perch den Grant neu aus dem Store (Grant-ID und Token-Hash). `perch client remove` oder ein eingeschränkter Grant gilt damit sofort, auch für eine laufende stdio-Session. Der Aufruf scheitert mit `grant_revoked` bzw. `capability_denied`, bevor ein Provider kontaktiert wird. Über HTTP wird ein entferntes Token zusätzlich mit `401` abgewiesen. Die Tool-Liste einer laufenden stdio-Session wird nicht aktualisiert.
 - **Betreiber:** Das globale HTTP-Token und `perch serve --stdio` ohne Client-Token behalten alle Read-only-Tools (Drive, Notion, Mail, seit dem Productivity-Meilenstein auch Calendar/Contacts lesend) für alle Konten. Schreib-Tools gibt es dort nie.
@@ -320,6 +326,50 @@ claude mcp add --transport http perch https://homeserver.tailnet-name.ts.net/mcp
 - Cursor (`nextCursor`) sind an Namespace, Abfrage und Konto gebunden. Fremde oder veränderte Cursor scheitern mit `bad_cursor`, bevor ein Provider kontaktiert wird. Cursor aus früheren Versionen gelten nicht mehr: die Abfrage neu beginnen.
 - **Beschädigter Namespace:** Fehlt der Store oder Schlüssel eines **aktiven** Nutzers oder ist er beschädigt, antwortet der Server auf **alle** Bearer-Tokens mit `503` (fail closed), **auch auf das globale Token**: Perch kann sonst nicht beweisen, dass das globale Token keinem Client-Grant dieses Nutzers gleicht. Laufende Sitzungen dieses Nutzers (auch stdio) scheitern beim nächsten Tool-Aufruf. Perch legt nichts neu an. Abhilfe: Dateien aus dem Backup zurückspielen oder `perch user remove <id>`. Lokales Root-stdio ohne `PERCH_USER` **und ohne `PERCH_CLIENT_TOKEN_FILE`** bleibt nutzbar. Root-stdio mit Client-Token prüft die Namespace-Eindeutigkeit beim Start und sperrt bei einem beschädigten aktiven Nutzer-Namespace ebenfalls.
 - **Fehlgeschlagenes `perch user add`:** Bricht der Befehl ab, können eine Token-Datei und `users/<id>/` bzw. `user-keys/<id>.key` ohne Registry-Eintrag liegen bleiben. Sie sind nie nutzbar; Dateien ohne passenden Eintrag in `perch user list` löschen.
+
+## 4d. Idempotenter Versand und Audit (Mail-Workflow-Meilenstein)
+
+Spezifikation, Speichervertrag und Testnachweise: `docs/MAIL_WORKFLOW_MILESTONE.md`. **Nur mit Mocks getestet, nicht live verifiziert.**
+
+### 4d.1 `requestId` im MCP-Client
+
+- `mail_send` verlangt `requestId`: pro neuer Nachricht eine neue Zufalls-ID (8–128 Zeichen `A-Z a-z 0-9 . _ : -`, z. B. eine UUID). Sie darf nichts aus dem Inhalt oder den Adressen enthalten.
+- **Wiederholen** (Timeout, Verbindungsabbruch) nur mit derselben `requestId` und **identischen** Argumenten. Perch sendet dann nie ein zweites Mal und liefert das gespeicherte Ergebnis (`replayed: true`).
+- Dieselbe `requestId` mit anderem Inhalt scheitert mit `idempotency_conflict`, ohne Provider-Aufruf.
+- `mail_send_status {accountId, requestId}` zeigt den Stand eines eigenen Sends, ohne etwas zu senden.
+- Bedeutung der Ergebnisse:
+  - `accepted`: vom Provider angenommen, **kein** Zustellnachweis;
+  - `rejected`: nicht gesendet;
+  - `indeterminate`: unbekannt. Mit `requestState: "pending"` heißt das: unterbrochen, das Ergebnis wurde nie gespeichert.
+- Perch wiederholt nichts automatisch und sendet eine `requestId` nie erneut. Ein neuer Versuch braucht eine **neue** `requestId`, nach `indeterminate` erst nach Prüfung des Gesendet-Ordners.
+
+### 4d.2 Lokale Einsicht und Auflösung (Admin)
+
+```bash
+perch audit list [--limit 50] [--client client-1a2b3c4d] [--account imap-1a2b3c4d]
+perch mail-workflow list [--state pending]
+perch mail-workflow resolve op-0123456789abcdef01234567 --outcome sent     # oder not-sent, nach Prüfung des Gesendet-Ordners
+PERCH_USER=user-0123456789abcdef perch audit list                          # Namespace eines Nutzers
+```
+
+- **Audit:**
+  - Enthält Zeit, Namespace, Akteur (Client-ID bzw. Betreiber), Operations-ID, Tool, Perch-Konto-ID/Provider, Ergebnis und Fehlercode.
+  - Enthält **keine** Inhalte, Betreffzeilen, Empfänger, Adressen, Labels, Anhänge, Suchbegriffe, IDs von Mails/Dateien, Tokens oder `requestId`s.
+  - Alle Mail-Operationen (Lesen, Anhänge, Suche, Kontoliste, Entwürfe, Senden, Status) protokolliert `MailService` selbst, also auch bei direkten Aufrufen außerhalb von MCP; Entwürfe **vor** jedem Provider-Zugriff (fail closed).
+  - Einsicht gibt es nur lokal; es gibt kein MCP-Audit-Tool.
+  - Höchstens 2000 Einträge pro Namespace; ältere werden verworfen und gezählt.
+- **`resolve`** vermerkt nur das von einem Menschen geprüfte Ergebnis eines `pending`/`indeterminate`-Sends. Es sendet nie und gibt die `requestId` nicht frei.
+- **Kein `prune`:**
+  - Eine benutzte `requestId` wird nie vergessen; sonst könnte ein erneuter Aufruf doppelt senden. `perch mail-workflow prune` lehnt deshalb ab (`prune_unsupported`) und ändert nichts.
+  - Ab 1000 Send-Einträgen pro Namespace scheitern neue Sends geschlossen (`ledger_full`). Lesen, Entwürfe und Status bleiben möglich. Eine sichere Ablösung (Rollover) ist noch nicht gebaut.
+
+### 4d.3 Backup und Störungen
+
+- **Backup:** `mail-workflow.enc` liegt neben `store.enc` (Root: `$PERCH_DATA_DIR/`, Nutzer: `$PERCH_DATA_DIR/users/<id>/`) und gehört ins Backup. Einen eigenen Schlüssel gibt es nicht: Er wird aus dem Store-Schlüssel abgeleitet, also den Store-Schlüssel wie bisher getrennt sichern.
+- **Älteres Backup:** Das Zurückspielen eines älteren Ledgers vergisst neuere Send-Einträge. Ein wiederholter alter `requestId` könnte dann erneut senden.
+- **Beschädigter oder fehlender Ledger:** Alle auditierten Tool-Aufrufe und Sends dieses Namespace scheitern geschlossen. Lese-Ergebnisse werden zurückgehalten, Schreib-Tools laufen nicht. Perch setzt den Ledger nie zurück und überschreibt ihn nie.
+- **Abhilfe:** den Ledger aus dem Backup zurückspielen. `perch mail-workflow init` ist nur für Namespaces gedacht, die nie einen Ledger hatten. `store.enc` merkt sich, dass ein Ledger angelegt wurde (Feld `mailWorkflowLedger`). Hatte der Namespace je einen, lehnt `init` ab (`ledger_missing`) und setzt nie zurück; eine vorhandene Datei wird nie überschrieben. Vor jedem Ledger-Schreibzugriff muss dieses Feld dauerhaft in `store.enc` stehen; lässt es sich nicht schreiben, wird nichts gesendet.
+- **Kein Downgrade, Backups zusammen zurückspielen:** Eine ältere Perch-Version oder ein `store.enc`-Backup von vor diesem Feld entfernt die Markierung. Geht danach auch der Ledger verloren, kann `init` das nicht erkennen und legt einen leeren an; benutzte `requestId`s wären vergessen. `store.enc` und `mail-workflow.enc` deshalb immer aus demselben Backup zurückspielen und keine ältere Perch-Version starten.
 
 ## 5. Konten anzeigen, trennen, widerrufen
 
@@ -437,13 +487,14 @@ Token wechseln:
 | `mail_read_message` | Header, Thread-IDs, Text bis `maxBytes` (Default 48 KiB, `truncated`), Anhangsliste. HTML-only-Mails werden mit einem linearen, begrenzten Scanner zu Text (`truncated` auch, wenn der Scan vorzeitig endet) |
 | `mail_get_attachment` | Base64, über `maxBytes` abgelehnt (nie gekürzt) |
 | `mail_create_draft` | nur mit Client-Grant `draft` und Provider-Freigabe. Mit `replyToMessageId` zusätzlich `read`. Microsoft Graph: höchstens 4 000 000 Byte Base64-MIME pro Request (`message_too_large`) |
-| `mail_send` | nur mit Client-Grant `send` und Provider-Freigabe. Absender ist immer das gewählte Konto. Ergebnis `accepted` (vom Provider angenommen, **keine Zustellbestätigung**), `rejected` (nicht gesendet) oder `indeterminate` (Ausgang unbekannt, kein automatischer Retry: vor erneutem Senden „Gesendet“ prüfen). Mit `replyToMessageId` zusätzlich `read`. Anhänge nur als Base64, max. 10 MiB gesamt. Über HTTP max. 16 MiB Request (nur für Schreib-Clients). Microsoft Graph: lokal abgelehnt über 4 000 000 Byte Base64-MIME (ca. 2,2 MB Anhänge), laut Graph-Doku „limited to 4 MB“ |
+| `mail_send` | nur mit Client-Grant `send` und Provider-Freigabe. **Pflichtfeld `requestId`** (idempotent: gleiche ID + gleicher Inhalt sendet nie zweimal, anderer Inhalt → `idempotency_conflict`; Abschnitt 4d). Absender ist immer das gewählte Konto. Ergebnis `accepted` (vom Provider angenommen, **keine Zustellbestätigung**), `rejected` (nicht gesendet) oder `indeterminate` (Ausgang unbekannt, kein automatischer Retry: vor erneutem Senden „Gesendet“ prüfen). Mit `replyToMessageId` zusätzlich `read`. Anhänge nur als Base64, max. 10 MiB gesamt. Über HTTP max. 16 MiB Request (nur für Schreib-Clients). Microsoft Graph: lokal abgelehnt über 4 000 000 Byte Base64-MIME (ca. 2,2 MB Anhänge), laut Graph-Doku „limited to 4 MB“ |
 
 | `calendar_list_calendars` | Kalender aller lesbaren Calendar-Konten oder eines Kontos, mit Herkunft und Cursor |
 | `calendar_list_events` | Primärkalender aller Konten oder eine `calendarId` eines Kontos. Serien als Einzeltermine, pro Konto nach Start sortiert, Default ab jetzt. Ganztägig: `start.date`/`end.date` (Ende exklusiv, `endExclusive`), sonst `dateTime` mit Offset und ggf. `timeZone`. Beschreibung bis 8192 Zeichen |
 | `calendar_get_event` | Ein Termin inklusive `etag` |
 | `contacts_list` | Alle Kontakte seitenweise (keine Suche), nur Kontaktquellen, `personFields` aus einer Allowlist |
 | `contacts_get` | Ein Kontakt per `people/c…`. Profile fremder Google-Konten sind nicht abrufbar |
+| `mail_send_status` | nur mit Client-Grant `send` für das Konto: Stand eines **eigenen** früheren `mail_send` (gleicher Client, gleiches Konto, gleiche `requestId`), ohne zu senden. Andere Clients, Nutzer oder Konten finden ihn nicht |
 | `calendar_create_event` | Nur mit Client-Grant `calendar_write` und Provider-Freigabe. Private Termine (`private`/`confidential`, ohne Angabe `private`) ohne Gäste/Benachrichtigungen an andere, nur Popup-Erinnerungen; `requestId` macht Wiederholungen idempotent. Ergebnis `created`, `conflict`, `rejected` oder `indeterminate` |
 | `calendar_update_event` | Nur mit `calendar_write` + `calendar_read`. PATCH mit `If-Match: etag`, `sendUpdates=none`, nur eigene Termine ohne Gäste und ohne Serie. Das Ergebnis ist immer privat und nur mit Popup-Erinnerungen (wird im selben PATCH gesetzt). Ergebnis `updated`, `precondition_failed`, `rejected` oder `indeterminate` |
 

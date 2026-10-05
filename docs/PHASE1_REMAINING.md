@@ -5,9 +5,11 @@ As of 2026-10-05. This is a completion checklist, **not a claim that phase 1 is 
 ## Delivered feature branches (not merged)
 
 - Email: PR #2, `feat/perch-email-connectors`, based on PR #1. Gmail/Graph/IMAP-SMTP search/read/attachments/draft/send, single-operator scoped client grants. See `EMAIL_MILESTONE.md`.
-- OSS licensing: PR #3, `feat/perch-oss-license`, an independent sibling based on PR #2. MIT source license, dependency inventory/notices and gate; not yet combined with this Calendar branch. See that branch's `OSS_LICENSE_MILESTONE.md`. Precise copied type-fest revision provenance must be confirmed before container distribution.
+- OSS licensing: PR #3, `feat/perch-oss-license`, an independent sibling based on PR #2. MIT source license, dependency inventory/notices and gate; not yet combined with the later feature branches. See that branch's `OSS_LICENSE_MILESTONE.md`. Precise copied type-fest revision provenance must be confirmed before container distribution.
 - This Calendar/Contacts increment: separate productivity OAuth, five read tools and private owned-calendar create/update with opt-in grants, explicit private visibility and popup-only reminders. See `GOOGLE_PRODUCTIVITY_MILESTONE.md`. It does not add multi-user hosting.
-- User ownership/isolation: branch `feat/perch-user-isolation`, based on the Calendar commit `acc3eeb`. **Not yet committed, pushed or reviewed.** See `USER_ISOLATION_MILESTONE.md`.
+- User ownership/isolation: PR #5, `feat/perch-user-isolation` (`560c6ae`), based on the Calendar commit `acc3eeb`: committed, pushed, review-approved, CI green; verified 468 tests + 9 smoke. See `USER_ISOLATION_MILESTONE.md`.
+- Body-free audit and idempotent mail send workflow: working branch `feat/perch-mail-workflow`, based on `560c6ae`. Implemented and mock-tested, **not yet committed or pushed**; two review/repair rounds done, a final independent re-review is still open (539 tests + 10 smoke on Node 26.7.0 and 22.12.0 after repair 2). See `MAIL_WORKFLOW_MILESTONE.md`.
+- Operations (container/backup) sibling: separate branch, not combined here. It backs up each namespace's `mail-workflow.enc` per the shared storage contract in `MAIL_WORKFLOW_MILESTONE.md` §3.
 
 The sibling branches have separate test reports. Do not sum them into a fictional combined test run. They need a reviewed integration branch and full regression verification before any combined release; no automatic merge is authorised.
 
@@ -27,24 +29,50 @@ Implemented on delivery branch `feat/perch-user-isolation` (independently tested
   All pre-existing tests pass unmodified.
 - [x] Local-admin versus remote-user powers are documented (`USER_ISOLATION_MILESTONE.md` §2, `SETUP.md` §4c); there is no bare `ownerId` field.
 - Still open:
-  - review, commit and PR of this branch;
+  - merge of PR #5 (needs Fritz's OK);
   - live validation;
   - user token rotation/re-activation and destructive deletion (not implemented, documented);
   - hosted production multi-tenancy hardening (per-user quotas/rate limits, separate processes or OAuth apps, public exposure), which remains phase 2.
 
-## 2. Body-free audit and idempotent mail workflow — NOT implemented
+## 2. Body-free audit and idempotent mail workflow — implemented on `feat/perch-mail-workflow`, mock-tested, not yet reviewed
 
-- Record actor/client, owned account/provider, operation id, timestamp and outcome without body, attachment bytes, credentials or recipient content in default logs. Audit reads must be ownership-bound.
-- Atomic actor/account/request-key workflow with explicit pending/accepted/rejected/indeterminate states. Repeated or concurrent same-key requests must not silently submit a second message; mismatched payload fingerprints must fail.
-- A lost response or interrupted pending operation must remain indeterminate until checked. Never automatically retry an uncertain send. Provider-native idempotency limitations must be documented rather than promised away.
-- Tests for duplicate concurrent requests, network loss before/after upstream acceptance, restart recovery, cross-user keys, redaction and revoked grants. No real outgoing sends in automated tests.
-- Email limitations remain: Graph MIME cap and unverified live Bcc semantics; no SMTP Sent-folder copy; IMAP fetch/search/APPEND only mock validated. Sending an already stored draft and mail move/delete/flags are not implemented and are outside the current delivered subset.
+Evidence: `MAIL_WORKFLOW_MILESTONE.md` §7–§8 (MOCK providers only, not live-verified). Each criterion is marked done only where a test covers it:
+
+- [x] Audit records hold:
+  - timestamp, namespace, actor/client, Perch account id/provider, operation id, operation type and a fixed outcome/code;
+  - no body, attachment names or bytes, credentials, recipients, subjects, labels, addresses, queries, ids or request keys (decrypted-ledger marker tests).
+- [x] Coverage:
+  - every MCP tool call that passes the namespace guard (shared runner); writes are audited before the provider call, fail closed; read results are withheld if their audit cannot be written;
+  - `mail_send` is audited by the workflow itself.
+- [x] Audit reads are local and per namespace (`perch audit list`, `PERCH_USER`). There is no MCP audit tool.
+- [x] Atomic, durable namespace/actor/account/requestId workflow with explicit pending/accepted/rejected/indeterminate states:
+  - `requestId` is required on `mail_send` (documented pre-release break);
+  - repeated or concurrent same-key requests submit exactly once (same instance, separate instances, 6 real processes);
+  - a changed payload fails before provider I/O.
+- [x] A lost response, crash/kill after the claim or a finalization write failure stays indeterminate (`pending`) forever, with no automatic retry. Only a local admin can record a human-verified outcome, which never sends. Provider-native idempotency limits are documented.
+- [x] Tests cover:
+  - duplicate concurrent requests; network loss before/after acceptance (MOCK); restart and kill recovery;
+  - cross-user colliding account/grant/request ids; other-client status denial;
+  - revoked/narrowed grants on cached results; redaction;
+  - ledger corruption/missing/symlink/limits/locks/write failure;
+  - built stdio+HTTP smoke under the offline guard with zero network attempts.
+  No real outgoing sends.
+- Still open:
+  - independent review, commit and PR of this branch;
+  - live validation of real sends.
+  - Known limits (`MAIL_WORKFLOW_MILESTONE.md` §9): a pending record is forever unless resolved; ledger capacity (1000 sends per namespace, no prune, rollover not built); upgrade step `perch mail-workflow init` only for namespaces that never had a ledger; no deterministic Message-ID.
+- Email limitations remain:
+  - Graph MIME cap and unverified live Bcc semantics;
+  - no SMTP Sent-folder copy;
+  - IMAP fetch/search/APPEND only mock-validated.
+  Sending an already stored draft and mail move/delete/flags are not implemented and are outside the current delivered subset.
 
 ## 3. Docker/compose, persistence, backup/restore and migrations — NOT implemented
 
 - Build and actually exercise a non-root image and compose configuration. No host-wide runtime/service installation or deployment without separate approval. This host currently has no Docker/Podman runtime; configuration alone is not a verified container delivery.
 - Default network binding must not publish a public port. Remote/Tailscale exposure remains a separately authorised operation. Preserve existing MCP host/origin/bearer protections.
 - Persistent encrypted store and separated key material, protected mounts/files, no secrets baked into image or logged. Production-only locked dependency install; include source license, dependency notices and OS/base-image notices.
+- Backups must include each namespace's `mail-workflow.enc` next to `store.enc` (it has no own key file; the store key covers it, `MAIL_WORKFLOW_MILESTONE.md` §3). Restoring an older ledger forgets newer send keys, so a retried old `requestId` could be sent again: document that in recovery.
 - Restore into a fresh isolated directory with real encrypted fixture data; verify decryption and account/grant recovery, no missing-key regeneration or corrupt-store overwrite. Document safe backup custody and recovery of stale locks.
 - Versioned controlled migration with pre-migration backup, malformed/future-schema rejection and rollback/recovery tests. Existing backward-compatible defaults are not a complete migration system.
 - Integrate the licence sibling, regenerate/check notices, run production-only installation verification, then exercise the exact image/compose artifact.

@@ -4,8 +4,11 @@ import { PerchError } from '../errors.js';
 import { ROOT_NAMESPACE, type ClientGrant, type CredentialStore } from '../store/credentialStore.js';
 import { assertActiveUser, assertUserPaths, openUserStore } from './registry.js';
 
-/** Builds the long-lived services of one namespace (own store, upstream and token caches). */
-export type ContextFactory = (store: CredentialStore) => PerchContext;
+/**
+ * Builds the long-lived services of one namespace (own store, upstream and token caches). For user
+ * namespaces `guard` is the namespace guard; services that can be called directly (MailService) run it.
+ */
+export type ContextFactory = (store: CredentialStore, guard?: () => Promise<void>) => PerchContext;
 
 /** What createMcpServer needs besides context and principal to keep a session inside its namespace. */
 export interface SessionScope {
@@ -46,7 +49,7 @@ export class NamespaceRouter {
     await assertActiveUser(this.root.store, userId);
     let ctx = this.users.get(userId);
     if (!ctx) {
-      ctx = openUserStore(this.root.store, userId).then((store) => this.factory(store));
+      ctx = openUserStore(this.root.store, userId).then((store) => this.factory(store, () => this.namespaceGuard(userId, store)));
       this.users.set(userId, ctx);
       ctx.catch(() => this.users.delete(userId));
     }
@@ -57,6 +60,15 @@ export class NamespaceRouter {
     await resolved.store.assertKeyUnchanged();
     await resolved.store.read();
     return resolved;
+  }
+
+  /**
+   * Service-level guard of a user namespace: the user is still active, and the namespace (paths, key,
+   * store) is intact and still served by the context built around `store`.
+   */
+  async namespaceGuard(userId: string, store: CredentialStore): Promise<void> {
+    const current = await this.userContext(userId);
+    if (current.store !== store) throw new PerchError('The namespace of this service was re-opened; reconnect', 'namespace_unavailable');
   }
 
   /**
