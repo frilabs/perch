@@ -21,7 +21,7 @@ User: Fritz. Product name Perch. This records the approved direction, **not an i
 - Encrypted secrets/key separation/no logs: implemented storage milestone. Follow-up sending permissions, body-free audit, idempotent workflow and ambiguous-send handling.
 - Docker/compose, persistent encrypted storage, backup/restore, migrations: follow-up. No deployment or public exposure authorized.
 - Initial CLI/admin onboarding, no SaaS UI/payment in phase 1.
-- Permissive OSS license (MIT preferred) only after dependency compatibility/notice review: **not yet licensed in this milestone**. No repository visibility change authorized.
+- Permissive OSS license (MIT preferred) only after dependency compatibility/notice review: **review done, Perch source is MIT** (branch `feat/perch-oss-license`, `docs/OSS_LICENSE_MILESTONE.md`); `private: true` kept, nothing published. No repository visibility change authorized.
 
 ## Delivery discipline
 
@@ -38,8 +38,11 @@ Still open:
 - Calendar/Contacts;
 - body-free audit and idempotent send workflow;
 - GOWA;
-- license/notices;
-- compose/backup.
+- compose/backup (container notices: acceptance criterion in `docs/OSS_LICENSE_MILESTONE.md` §7).
+
+## Status update 2026-10-05 (branch `feat/perch-oss-license`)
+
+License/notices milestone done locally (not committed): MIT `LICENSE` (Copyright (c) 2026 Fritz Kuermayr), `THIRD_PARTY_NOTICES.md` for the 115-version production closure, dev inventory, fail-closed `npm run licenses:check` in CI. Details and findings: `docs/OSS_LICENSE_MILESTONE.md`. The SPDX allowlist covers package licenses only. One embedded grant without an SPDX id (Masanao Izumo's Base64 code in `encoding-japanese`) is reproduced and labelled separately.
 
 ## Status update 2026-10-05 (branch `feat/perch-calendar-contacts`, stacked on the email milestone)
 
@@ -79,6 +82,6 @@ This is not public signup and not hosted multi-tenancy hardening. Audit/idempote
 3. Microsoft Graph mail and delegated consent.
 4. IMAP/SMTP and GMX setup.
 5. GOWA adapter after primary API/license verification.
-6. License/dependency notices and compose/backup documentation.
+6. ~~License/dependency notices~~ (done, `docs/OSS_LICENSE_MILESTONE.md`) and compose/backup documentation.
 
 `docs/SPEC.md` describes only the implemented Drive/Notion milestone. This expanded direction supersedes its roadmap timing, not its tested acceptance criteria. Complete each incremental artifact and report fake-upstream versus live verification separately.
