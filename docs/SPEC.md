@@ -13,6 +13,10 @@ Stand 2026-10-05.
 
 Der Funktionsumfang bleibt unverändert.
 
+**Nachtrag 2026-10-05:** Der freigegebene E-Mail-Meilenstein (`docs/EMAIL_MILESTONE.md`) hebt für Mail die Read-only-Ausschlüsse aus §10 auf. Die Drive/Notion-Kriterien dieser Spezifikation gelten unverändert. Neu sind die Upstream-Origins `gmail.googleapis.com`, `graph.microsoft.com` und `login.microsoftonline.com`. Draft- und Send-Routen sind nur mit passendem Capability-Tag erreichbar.
+
+**Sicherheitsmodell nach dem Review vom 2026-10-05:** Das globale Token und stdio ohne Client-Token bleiben der Read-only-Betreiber mit allen bisherigen Tools. Client-Grants sind ausschließlich für Mail: keine Drive/Notion-Tools oder -Metadaten, nur die benannten Konto-IDs, Tools nur gemäß `read`/`draft`/`send`. Der Grant wird vor jedem Tool-Aufruf neu aus dem Store aufgelöst (stdio und HTTP); Widerruf oder Einschränkung schlagen ohne Provider-Aufruf fehl. Details: `docs/EMAIL_MILESTONE.md` §2.
+
 ## 1. Architektur
 
 ```
