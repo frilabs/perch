@@ -1,5 +1,45 @@
 # Handoff: Perch
 
+## Update 2026-10-05: Google-Productivity-Meilenstein (Branch `feat/perch-calendar-contacts`, Basis `ad12f1e`)
+
+- **Freigabe:** Fritz hat am 2026-10-05 über den Orchestrator die erweiterte Phase 1 und diesen Meilenstein freigegeben.
+- **Implementiert** (Details, Quellen, TDD-Nachweise: `docs/GOOGLE_PRODUCTIVITY_MILESTONE.md`; Setup: `docs/SETUP.md` §4b):
+  - **Eigener Google-Grant** pro Konto (`perch google-productivity add --services calendar,contacts [--allow-calendar-write]`), getrennt von Drive und Gmail. Default `calendar.readonly`/`contacts.readonly`, Opt-in `calendar.events.owned`, dazu `openid email`.
+  - Die gewährten Scopes werden geprüft. Die E-Mail kommt verifiziert über den festen Userinfo-Endpunkt; Duplikate werden per `sub` erkannt.
+  - Verschlüsselte Store-Sektion `googleProductivity`; alte Stores öffnen unverändert.
+  - Refresh single-flight; Rotation, Widerruf und Konto-Änderungen schlagen geschlossen fehl. Zusätzlich gilt der beim Refresh gemeldete Scope.
+  - **Neue Tools:**
+    - lesend für Betreiber und Clients mit `calendar_read`/`contacts_read`: `calendar_list_calendars`, `calendar_list_events`, `calendar_get_event`, `contacts_list`, `contacts_get`;
+    - nur für Client-Grants mit `calendar_write`: `calendar_create_event`, außerdem `calendar_update_event` (zusätzlich mit `calendar_read`).
+  - **Schreib-Subset:** nur private Termine ohne Teilnehmer, Einladungen oder Gast-Updates (`sendUpdates=none`); explizite private Sichtbarkeit und ausschließlich Popup-Erinnerungen.
+    - Anlegen idempotent per `requestId`: daraus wird eine deterministische Event-ID.
+    - Ändern per PATCH mit `If-Match`.
+    - Ergebnisse `created`/`updated`/`conflict`/`precondition_failed`/`rejected`/`indeterminate`, kein Blind-Retry.
+  - **Grants:** Mail-Capabilities gelten nur für Mail-Konten, Calendar/Contacts-Capabilities nur für `gprod-…`-Konten. Der Betreiber bleibt read-only. Mail-only-Clients aus PR2 sehen nichts Neues. Revalidierung vor jedem Tool-Aufruf, auch in stdio.
+- **Lokal getestet:**
+  - `npm run check`: typecheck fehlerfrei, `npm test` **423/423** (35 Dateien; vor den Review-Fixes 409, vor dem Meilenstein 337), smoke **8/8** (vorher 7 bzw. 5). Grün auf Node **22.12.0, 22.23.3, 24.21.0 und 26.7.0**: portable, per SHASUMS256 geprüfte Binaries im Scratch, Host und `engines` unverändert;
+  - `npm audit --omit=dev`: 0 Befunde; `git diff --check`: sauber.
+  - Upstreams nur als **Mocks**.
+- **Live verifiziert:** **nichts.**
+- **Vorfall:** Bei einer Mutationsprobe (Revalidierung absichtlich deaktiviert) hat das gebaute CLI einmal einen Token-Refresh mit *Dummy*-Zugangsdaten an `oauth2.googleapis.com` geschickt. Google hat ihn abgelehnt; echte Zugangsdaten gibt es hier nicht. Danach wurden die Smoke-Kindprozesse über einen Proxy (`NODE_USE_ENV_PROXY`) auf einen geschlossenen Loopback-Port umgeleitet. Das Review hat gezeigt, dass das auf Node 22.12–22.20 wirkungslos ist.
+  - **Ersetzt** durch einen reinen Test-Preload (`test/smoke/offlineGuard.mjs`, `--import`). Er blockiert `fetch` und Socket-Connects in jedem Kindprozess und protokolliert jeden Versuch.
+  - Ein Probe-Kindprozess beweist vorab, dass der Guard aktiv ist; der letzte Smoke-Test verlangt null Versuche.
+  - Die erneute Mutationsprobe lief erst danach. Der Token-Refresh wurde im Prozess geblockt, es gab keine externe Anfrage (Meilenstein-Doku §7, Zeile 16).
+  - Produktionscode und sein `fetch` sind unverändert.
+- **Git:** nichts committet. Commit, Push und PR macht der Orchestrator; Merge und Deployment sind nicht autorisiert.
+- **Review-Fixes (2026-10-05, RED vor GREEN, Meilenstein-Doku §5 und §7, Zeilen 11–16):**
+  - **Anlegen:** immer ausdrücklich `visibility: "private"` (oder `confidential`); `default` und `public` werden abgelehnt. Erinnerungen immer `{useDefault: false, overrides: [Popup…]}`; `useDefault: true` wird abgelehnt.
+  - **Ändern:** öffentliche, `default`- oder nicht gesetzte Sichtbarkeit sowie Standard- oder E-Mail-Erinnerungen werden im selben PATCH auf privat und Popup-only gesetzt.
+  - Ein fehlender `organizer` schlägt geschlossen fehl.
+  - Jahre 0001–0099 werden korrekt berechnet (`utcMs` statt `Date.UTC`).
+  - Text im Ergebnis: „No invitations or updates were sent to anyone".
+- **Offen** (exakt: `docs/PHASE1_REMAINING.md` und Meilenstein-Doku §8; Lizenz/Notices separat in Schwester-PR #3, noch nicht in diesem Branch kombiniert):
+  - **Mehrbenutzer-Isolation** (nicht Teil dieses Inkrements);
+  - Einladungen, Serien, Löschen; Kontakte schreiben;
+  - Live-Test durch Fritz: Calendar API und People API aktivieren, Scopes im Consent Screen eintragen, Konto verbinden, Client-Grant anlegen, ein privater Testtermin.
+
+---
+
 ## Update 2026-10-05: E-Mail-Meilenstein (Branch `feat/perch-email-connectors`, Basis `50db560`)
 
 - **Implementiert:**

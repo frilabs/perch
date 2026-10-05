@@ -9,8 +9,9 @@ import { PerchError } from './errors.js';
  * never the origins.
  */
 
-export type Service = 'drive' | 'oauth' | 'notion' | 'gmail' | 'graph' | 'msauth';
-export type RouteCapability = 'read' | 'draft' | 'send';
+export type Service = 'drive' | 'oauth' | 'notion' | 'gmail' | 'graph' | 'msauth' | 'calendar' | 'people' | 'openid';
+export type RouteCapability = 'read' | 'draft' | 'send' | 'calendar_write';
+export type HttpMethod = 'GET' | 'POST' | 'PATCH';
 
 export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
   drive: 'https://www.googleapis.com',
@@ -19,6 +20,10 @@ export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
   gmail: 'https://gmail.googleapis.com',
   graph: 'https://graph.microsoft.com',
   msauth: 'https://login.microsoftonline.com',
+  calendar: 'https://www.googleapis.com',
+  people: 'https://people.googleapis.com',
+  /** userinfo_endpoint of Google's OpenID Connect discovery document (hard-coded, never fetched). */
+  openid: 'https://openidconnect.googleapis.com',
 });
 
 const SERVICE_NAMES: Record<Service, string> = {
@@ -28,6 +33,9 @@ const SERVICE_NAMES: Record<Service, string> = {
   gmail: 'Gmail API',
   graph: 'Microsoft Graph',
   msauth: 'Microsoft identity platform',
+  calendar: 'Google Calendar API',
+  people: 'Google People API',
+  openid: 'Google OpenID Connect',
 };
 
 const NOTION_ID = '[0-9a-fA-F-]{32,36}';
@@ -39,6 +47,19 @@ const GRAPH_ID = '[A-Za-z0-9_%=-]{1,1024}';
 const GRAPH_FOLDER = '[A-Za-z0-9_%=-]{1,1024}';
 /** Tenant: common/organizations/consumers, a GUID or a verified domain name. */
 const MS_TENANT = '(?:common|organizations|consumers|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\\.[A-Za-z0-9-]{1,63})+)';
+
+/**
+ * Calendar ids (primary, x@group.calendar.google.com, holiday ids with '#') after encodeURIComponent:
+ * only '@', '+' and '#' may arrive encoded, so no encoded '/', '.' or '%' can reach the path.
+ */
+const CAL_ID = '(?:[A-Za-z0-9._-]|%40|%2B|%23){1,1024}';
+/**
+ * Event ids: base32hex (a-v, 0-9; the documented id alphabet), optionally with the recurring-instance
+ * suffix `_YYYYMMDD` or `_YYYYMMDDTHHMMSSZ`. Reserved collection verbs are excluded explicitly.
+ */
+const EVENT_ID = '(?!import$|quickAdd$|watch$)[a-v0-9]{5,1024}(?:_[0-9]{8}(?:T[0-9]{6}Z)?)?';
+/** People: only contact resource names (people/c<digits>), never people/me or Google account ids. */
+const CONTACT_ID = 'c[0-9]{1,30}';
 
 type Route = [method: string, path: RegExp, capability?: RouteCapability];
 
@@ -81,6 +102,18 @@ const ROUTES: Record<Service, Route[]> = {
     ['POST', /^\/v1\.0\/me\/sendMail$/, 'send'],
   ],
   msauth: [['POST', new RegExp(`^/${MS_TENANT}/oauth2/v2\\.0/token$`)]],
+  calendar: [
+    ['GET', /^\/calendar\/v3\/users\/me\/calendarList$/],
+    ['GET', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events$`)],
+    ['GET', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events/${EVENT_ID}$`)],
+    ['POST', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events$`), 'calendar_write'],
+    ['PATCH', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events/${EVENT_ID}$`), 'calendar_write'],
+  ],
+  people: [
+    ['GET', /^\/v1\/people\/me\/connections$/],
+    ['GET', new RegExp(`^/v1/people/${CONTACT_ID}$`)],
+  ],
+  openid: [['GET', /^\/v1\/userinfo$/]],
 };
 
 /** True when (service, method, path) is allowlisted for exactly this capability. */
@@ -92,7 +125,7 @@ export const DEFAULT_JSON_MAX_BYTES = 5 * 1024 * 1024;
 export const DEFAULT_TIMEOUT_MS = 30_000;
 
 export interface UpstreamRequest {
-  method: 'GET' | 'POST';
+  method: HttpMethod;
   url: URL;
   headers: Record<string, string>;
   body?: string;
@@ -180,7 +213,7 @@ export function createFetchTransport(opts: { timeoutMs?: number } = {}): Upstrea
 }
 
 export interface CallOptions {
-  method: 'GET' | 'POST';
+  method: HttpMethod;
   path: string;
   query?: Record<string, string | number | boolean | undefined>;
   headers?: Record<string, string>;
@@ -189,7 +222,7 @@ export interface CallOptions {
   /** Raw text body with explicit content type (e.g. base64 MIME for Graph). */
   text?: { contentType: string; data: string };
   maxBytes?: number;
-  /** Required for draft/send routes; must equal the route's tag. */
+  /** Required for draft/send/calendar_write routes; must equal the route's tag. */
   capability?: RouteCapability;
 }
 

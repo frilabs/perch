@@ -101,7 +101,7 @@ export class MailService {
         ...provenance(e),
         email: e.account.email,
         providerCapabilities: { read: true, ...this.provider(e).providerCapabilities(e.account) },
-        granted: [...principal.capabilities].sort(),
+        granted: [...principal.capabilities].filter((c) => c === 'read' || c === 'draft' || c === 'send').sort(),
       };
     });
   }
