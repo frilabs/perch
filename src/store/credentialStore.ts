@@ -36,14 +36,83 @@ const NotionWorkspaceSchema = z.object({
   updatedAt: z.string(),
 });
 
+/** Gmail grant (separate OAuth consent from Drive; default gmail.readonly, opt-in send/compose). */
+const GmailAccountSchema = z.object({
+  id: z.string().regex(/^gmail-[a-f0-9]{8}$/),
+  label: z.string().min(1).max(100),
+  email: z.string().min(3),
+  clientId: z.string().min(1),
+  clientSecret: z.string().min(1),
+  refreshToken: z.string().min(1),
+  scopes: z.array(z.string()),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+/** Microsoft Graph delegated grant (public client, PKCE; no client secret). */
+const MicrosoftAccountSchema = z.object({
+  id: z.string().regex(/^microsoft-[a-f0-9]{8}$/),
+  label: z.string().min(1).max(100),
+  email: z.string().min(3),
+  displayName: z.string().optional(),
+  tenant: z.string().min(1).max(100),
+  clientId: z.string().min(1),
+  refreshToken: z.string().min(1),
+  scopes: z.array(z.string()),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+const HostPortSchema = z.object({ host: z.string().min(1).max(253), port: z.number().int().min(1).max(65535) });
+
+/** Generic IMAP (implicit TLS) + SMTP account, e.g. GMX. The password is stored encrypted like every other secret. */
+const ImapAccountSchema = z.object({
+  id: z.string().regex(/^imap-[a-f0-9]{8}$/),
+  label: z.string().min(1).max(100),
+  email: z.string().min(3),
+  username: z.string().min(1),
+  password: z.string().min(1),
+  preset: z.string().optional(),
+  imap: HostPortSchema,
+  smtp: HostPortSchema.extend({ security: z.enum(['tls', 'starttls']) }),
+  /** IMAP has no OAuth scopes: drafts/send are explicit opt-ins recorded at onboarding. */
+  allowDrafts: z.boolean(),
+  allowSend: z.boolean(),
+  draftsMailbox: z.string().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+export const CAPABILITIES = ['read', 'draft', 'send'] as const;
+
+/** Local per-client grant. Only the SHA-256 of the (high-entropy) client token is stored. */
+const ClientGrantSchema = z.object({
+  id: z.string().regex(/^client-[a-f0-9]{8}$/),
+  label: z.string().min(1).max(100),
+  tokenSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  capabilities: z.array(z.enum(CAPABILITIES)).min(1),
+  accountIds: z.array(z.string()).min(1),
+  createdAt: z.string(),
+});
+
 const StoreDataSchema = z.object({
   version: z.literal(1),
   google: z.array(GoogleAccountSchema),
   notion: z.array(NotionWorkspaceSchema),
+  // Added by the email milestone; stores written earlier have no such keys.
+  gmail: z.array(GmailAccountSchema).default([]),
+  microsoft: z.array(MicrosoftAccountSchema).default([]),
+  imap: z.array(ImapAccountSchema).default([]),
+  clients: z.array(ClientGrantSchema).default([]),
 });
 
 export type GoogleAccount = z.infer<typeof GoogleAccountSchema>;
 export type NotionWorkspace = z.infer<typeof NotionWorkspaceSchema>;
+export type GmailAccount = z.infer<typeof GmailAccountSchema>;
+export type MicrosoftAccount = z.infer<typeof MicrosoftAccountSchema>;
+export type ImapAccount = z.infer<typeof ImapAccountSchema>;
+export type ClientGrant = z.infer<typeof ClientGrantSchema>;
+export type Capability = (typeof CAPABILITIES)[number];
 export type StoreData = z.infer<typeof StoreDataSchema>;
 
 export interface StorePaths {
@@ -54,7 +123,7 @@ export interface StorePaths {
 export const storeFilePath = (dataDir: string) => path.join(dataDir, 'store.enc');
 const lockFilePath = (dataDir: string) => path.join(dataDir, 'store.lock');
 
-const emptyData = (): StoreData => ({ version: 1, google: [], notion: [] });
+const emptyData = (): StoreData => ({ version: 1, google: [], notion: [], gmail: [], microsoft: [], imap: [], clients: [] });
 
 async function realpathOrResolve(p: string): Promise<string> {
   // Resolve the deepest existing ancestor so symlinked parents cannot hide containment.

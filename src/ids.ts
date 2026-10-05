@@ -2,7 +2,9 @@ import { randomBytes } from 'node:crypto';
 import { PerchError } from './errors.js';
 
 /** Random, stable account id like `google-1a2b3c4d`, unique among `existing`. */
-export function newAccountId(prefix: 'google' | 'notion', existing: Iterable<string>): string {
+export type IdPrefix = 'google' | 'notion' | 'gmail' | 'microsoft' | 'imap' | 'client';
+
+export function newAccountId(prefix: IdPrefix, existing: Iterable<string>): string {
   const taken = new Set(existing);
   for (;;) {
     const id = `${prefix}-${randomBytes(4).toString('hex')}`;
