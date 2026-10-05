@@ -49,6 +49,8 @@ As of 2026-10-05, branch `feat/perch-email-connectors` (based on `50db560`).
 | `mail_create_draft` | client grants with `draft` | create a draft in the chosen account |
 | `mail_send` | client grants with `send` | send from the explicitly chosen account; result `accepted` / `rejected` / `indeterminate` |
 
+**Update (mail workflow milestone, `docs/MAIL_WORKFLOW_MILESTONE.md`):** `mail_send` now requires an idempotency `requestId` and goes through the durable send ledger. Same key and same payload is sent at most once; a different payload fails. The new `mail_send_status` tool (send grants only) reports a client's own sends. Every tool call is audited without content.
+
 `perch_list_accounts` is registered for everyone. For the operator it returns `google[]`, `notion[]`, `mail[]` (all accounts) and `connection`. For a client grant it returns only `mail[]` (the granted accounts) and `connection` (principal kind, client id/label, capabilities). Drive and Notion tools are registered for the operator only.
 
 ## 4. Outbound mail rules (all providers)

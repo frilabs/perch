@@ -108,7 +108,7 @@ export async function addUser(
     }
     await ensurePrivateDir(path.join(rootPaths.dataDir, USERS_DIR));
     await ensurePrivateDir(path.dirname(paths.keyFile));
-    const created = await initStore(paths);
+    const created = await initStore(paths, { namespace: id });
     if (!created.createdKey || !created.createdStore) throw new PerchError(`Namespace files for ${id} appeared concurrently`, 'namespace_exists');
     const record: UserRecord = { id, label, status: 'active', readTokenSha256: tokenSha256(token), createdAt: new Date().toISOString() };
     data.users.push(record);

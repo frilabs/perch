@@ -2,7 +2,7 @@
 // No upstream (Google/Notion/Gmail/Graph/IMAP/SMTP/Calendar/People) is contacted: the only accounts are
 // dummy entries seeded directly into the store, and every mail/calendar call below is denied before any I/O.
 // Every child process additionally runs under the test-only offline guard (test/smoke/offlineGuard.mjs,
-// preloaded with --import): its fetch and outbound sockets are blocked and logged. The suite first proves
+// preloaded with --import): its fetch, outbound sockets and DNS APIs are blocked and logged. The suite first proves
 // the guard is active in a child and finally asserts that the smoke run itself made zero network attempts.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -13,6 +13,10 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { principalForClientToken } from '../../src/auth/grants.js';
+import { MailService, type MailProviders } from '../../src/mail/service.js';
+import type { MailProvider } from '../../src/mail/types.js';
+import { MailWorkflowLedger } from '../../src/mail/workflowLedger.js';
 import { CredentialStore } from '../../src/store/credentialStore.js';
 import { openUserStore } from '../../src/users/registry.js';
 import { dummySecret, makeTempDirs, type TempDirs } from '../support/fixtures.js';
@@ -53,10 +57,15 @@ beforeAll(async () => {
     [
       '-e',
       `const tls = require('node:tls');
+       const dns = require('node:dns');
        const out = { fetchName: globalThis.fetch.name };
+       const viaCb = (f) => new Promise((r) => f((e) => r(e ? e.message : 'SENT')));
        fetch('https://oauth2.googleapis.com/token', { method: 'POST', body: 'grant_type=refresh_token' })
          .then(() => { out.fetch = 'SENT'; }, (e) => { out.fetch = e.message; })
          .then(() => { try { tls.connect(443, 'oauth2.googleapis.com'); out.tls = 'SENT'; } catch (e) { out.tls = e.message; } })
+         .then(() => viaCb((cb) => new dns.Resolver().resolve4('smtp.invalid.example', cb))).then((m) => { out.resolver = m; })
+         .then(() => viaCb((cb) => dns.lookup('smtp.invalid.example', { all: true }, cb))).then((m) => { out.lookup = m; })
+         .then(() => dns.promises.resolve6('smtp.invalid.example').then(() => 'SENT', (e) => e.message)).then((m) => { out.promises = m; })
          .then(() => console.log(JSON.stringify(out)));`,
     ],
     { env: { ...env, PERCH_SMOKE_GUARD_LOG: probeLog }, encoding: 'utf8', timeout: 15_000 },
@@ -66,7 +75,9 @@ beforeAll(async () => {
   expect(out.fetchName, 'offline guard not loaded in the child').toBe('perchSmokeOfflineFetch');
   expect(out.fetch).toMatch(/offline guard: blocked fetch to https:\/\/oauth2\.googleapis\.com\/token/);
   expect(out.tls).toMatch(/offline guard: blocked socket connect/);
-  expect((await guardAttempts(probeLog)).map((a) => a.kind)).toEqual(['fetch', 'connect']);
+  // DNS too (nodemailer resolves with its own dns.Resolver before connecting): no query leaves the child.
+  for (const k of ['resolver', 'lookup', 'promises']) expect(out[k], k).toMatch(/offline guard: blocked dns/);
+  expect((await guardAttempts(probeLog)).map((a) => a.kind)).toEqual(['fetch', 'connect', 'dns', 'dns', 'dns']);
   // From here on every child logs blocked attempts here; the last test asserts there were none.
   guardLog = path.join(dirs.root, 'guard.log');
   env.PERCH_SMOKE_GUARD_LOG = guardLog;
@@ -174,10 +185,10 @@ describe('built artifact', () => {
     );
     const names = (await client.listTools()).tools.map((t) => t.name);
     // A send-only client grant gets exactly the tools it needs: no Drive/Notion, no mail read tools.
-    expect(names.sort()).toEqual(['mail_send', 'perch_list_accounts']);
+    expect(names.sort()).toEqual(['mail_send', 'mail_send_status', 'perch_list_accounts']);
     const other = await client.callTool({
       name: 'mail_send',
-      arguments: { accountId: 'imap-0000000b', to: ['x@example.test'], subject: 's', text: 't' },
+      arguments: { requestId: 'smoke-send-0001', accountId: 'imap-0000000b', to: ['x@example.test'], subject: 's', text: 't' },
     });
     expect(other.isError).toBe(true);
     expect(text(other)).toMatch(/not granted/i);
@@ -221,7 +232,7 @@ describe('built artifact', () => {
     });
     const narrowed = await client.callTool({
       name: 'mail_send',
-      arguments: { accountId: 'imap-0000000a', to: ['x@example.test'], subject: 's', text: 't' },
+      arguments: { requestId: 'smoke-send-0002', accountId: 'imap-0000000a', to: ['x@example.test'], subject: 's', text: 't' },
     });
     expect(narrowed.isError).toBe(true);
     expect(text(narrowed)).toMatch(/not granted/i);
@@ -231,7 +242,7 @@ describe('built artifact', () => {
     for (const [name, args] of [
       ['perch_list_accounts', {}],
       ['mail_search', {}],
-      ['mail_send', { accountId: 'imap-0000000a', to: ['x@example.test'], subject: 's', text: 't' }],
+      ['mail_send', { requestId: 'smoke-send-0003', accountId: 'imap-0000000a', to: ['x@example.test'], subject: 's', text: 't' }],
     ] as const) {
       const r = await client.callTool({ name, arguments: args });
       expect(r.isError, name).toBe(true);
@@ -427,6 +438,103 @@ describe('built artifact', () => {
       child.kill('SIGTERM');
       expect(await exited).toBe(0);
     }
+  });
+
+  it('keeps idempotent send records and a body-free audit trail in the built artifact (stdio + HTTP), without network', async () => {
+    const MARK = { text: 'BODY-MARKER-smoke', subject: 'SUBJECT-MARKER-smoke', to: 'rcpt-marker-smoke@example.test', requestId: 'REQ-MARKER-smoke-01' };
+    const tokenFile = path.join(dirs.root, 'config', 'clients', 'workflow.token');
+    const add = spawnSync(process.execPath, [CLI, 'client', 'add', '--label', 'WorkflowClient', '--allow', 'read,send', '--account', 'imap-0000000a', '--token-file', tokenFile], {
+      env,
+      encoding: 'utf8',
+    });
+    expect(add.status, add.stderr).toBe(0);
+    const token = (await readFile(tokenFile, 'utf8')).trim();
+    // A send whose process "died" mid-attempt: claimed (pending) in this test process by the same ledger code,
+    // with a MOCK provider that never returns. The built server must replay it as unknown and never send it.
+    const store = await CredentialStore.open({ dataDir: dirs.dataDir, keyFile: dirs.keyFile });
+    let attempts = 0;
+    const hanging = {
+      kind: 'imap',
+      providerCapabilities: () => ({ draft: true, send: true }),
+      replyContext: async () => ({ references: [] }),
+      send: () => (attempts++, new Promise(() => {})),
+    } as unknown as MailProvider<unknown>;
+    const args = { accountId: 'imap-0000000a', requestId: MARK.requestId, to: [MARK.to], subject: MARK.subject, text: MARK.text };
+    void new MailService(store, { gmail: hanging, microsoft: hanging, imap: hanging } as unknown as MailProviders).send((await principalForClientToken(store, token))!, args);
+    for (let i = 0; i < 300 && attempts === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(attempts).toBe(1);
+
+    const transport = new StdioClientTransport({ command: process.execPath, args: [CLI, 'serve', '--stdio'], env: { ...env, PERCH_CLIENT_TOKEN_FILE: tokenFile }, stderr: 'pipe' });
+    let childErr = '';
+    transport.stderr?.on('data', (c: Buffer) => (childErr += c.toString()));
+    const client = new Client({ name: 'smoke-workflow', version: '0.0.0' });
+    await client.connect(transport);
+    const sendTool = (await client.listTools()).tools.find((t) => t.name === 'mail_send')!;
+    expect(sendTool.inputSchema.required).toContain('requestId');
+    const replay = await client.callTool({ name: 'mail_send', arguments: args });
+    expect(replay.isError, text(replay)).toBeFalsy();
+    expect(JSON.parse(text(replay))).toMatchObject({ status: 'indeterminate', replayed: true, requestState: 'pending' });
+    const conflict = await client.callTool({ name: 'mail_send', arguments: { ...args, text: 'changed' } });
+    expect(conflict.isError).toBe(true);
+    expect(text(conflict)).toMatch(/different message/);
+    const missingKey = await client.callTool({ name: 'mail_send', arguments: { ...args, requestId: undefined } }).catch((e: Error) => ({ isError: true, e }));
+    expect(missingKey.isError).toBe(true);
+    const badRecipient = await client.callTool({ name: 'mail_send', arguments: { ...args, requestId: 'fresh-key-0001', to: ['not an address'] } });
+    expect(badRecipient.isError).toBe(true);
+    const status = JSON.parse(text(await client.callTool({ name: 'mail_send_status', arguments: { accountId: 'imap-0000000a', requestId: MARK.requestId } })));
+    expect(status).toMatchObject({ status: 'indeterminate', requestState: 'pending' });
+    await client.close();
+
+    // HTTP: another client cannot see this status; the global token is audited as the read-only operator.
+    const other = path.join(dirs.root, 'config', 'clients', 'workflow-other.token');
+    expect(spawnSync(process.execPath, [CLI, 'client', 'add', '--label', 'Other', '--allow', 'send', '--account', 'imap-0000000a', '--token-file', other], { env, encoding: 'utf8' }).status).toBe(0);
+    const http: ChildProcess = spawn(process.execPath, [CLI, 'serve', '--http', '--port', '0'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+    let httpErr = '';
+    try {
+      const url = await new Promise<string>((resolve, reject) => {
+        http.stderr!.on('data', (c: Buffer) => {
+          httpErr += c.toString();
+          const m = /listening on (http:\/\/\S+)/.exec(httpErr);
+          if (m) resolve(m[1]!);
+        });
+        http.once('exit', (code) => reject(new Error(`exited early (${code}): ${httpErr}`)));
+      });
+      const over = async (t: string) => {
+        const c = new Client({ name: 'smoke-workflow-http', version: '0.0.0' });
+        await c.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { authorization: `Bearer ${t}` } } }));
+        return c;
+      };
+      const o = await over((await readFile(other, 'utf8')).trim());
+      const peek = await o.callTool({ name: 'mail_send_status', arguments: { accountId: 'imap-0000000a', requestId: MARK.requestId } });
+      expect(peek.isError).toBe(true);
+      expect(text(peek)).toMatch(/No send with this requestId/);
+      await o.close();
+      const g = await over((await readFile(dirs.tokenFile, 'utf8')).trim());
+      expect((await g.listTools()).tools.map((t) => t.name)).not.toContain('mail_send_status');
+      await g.callTool({ name: 'perch_list_accounts', arguments: {} });
+      await g.close();
+    } finally {
+      const exited = new Promise<number | null>((r) => http.once('exit', (code) => r(code)));
+      http.kill('SIGTERM');
+      expect(await exited).toBe(0);
+    }
+
+    const list = spawnSync(process.execPath, [CLI, 'mail-workflow', 'list', '--state', 'pending'], { env, encoding: 'utf8' });
+    expect(list.status, list.stderr).toBe(0);
+    const op = /(op-[a-f0-9]{24})  pending/.exec(list.stdout)![1]!;
+    const resolve = spawnSync(process.execPath, [CLI, 'mail-workflow', 'resolve', op, '--outcome', 'not-sent'], { env, encoding: 'utf8' });
+    expect(resolve.status, resolve.stderr).toBe(0);
+    const audit = spawnSync(process.execPath, [CLI, 'audit', 'list'], { env, encoding: 'utf8' });
+    expect(audit.status, audit.stderr).toBe(0);
+    expect(audit.stdout).toMatch(/mail_send  replayed  client client-[a-f0-9]{8}  imap-0000000a \(imap\)  pending/);
+    expect(audit.stdout).toMatch(/mail_send  conflict/);
+    expect(audit.stdout).toMatch(/mail_send_status  invalid .*unknown_request/);
+    expect(audit.stdout).toMatch(/perch_list_accounts  ok  operator \(read-only\)/);
+    expect(audit.stdout).toMatch(/workflow_resolve  resolved  local admin  imap-0000000a \(imap\)  not_sent/);
+    const ledger = JSON.stringify(await new MailWorkflowLedger(await CredentialStore.open({ dataDir: dirs.dataDir, keyFile: dirs.keyFile })).read());
+    const everything = [ledger, childErr, httpErr, list.stdout, list.stderr, resolve.stdout, resolve.stderr, audit.stdout, audit.stderr].join('\n');
+    for (const m of [...Object.values(MARK), 'WorkflowClient', token, 'DUMMY-TEST']) expect(everything, m).not.toContain(m);
+    expect(attempts).toBe(1);
   });
 
   // Runs last (tests in a file run in order): no child process attempted any network connection.
