@@ -1,5 +1,39 @@
 # Handoff: Perch
 
+## Update 2026-10-05: OSS-Lizenz-Meilenstein (Branch `feat/perch-oss-license`, Basis `ad12f1e`)
+
+- **Entscheidung:** Perch steht unter **MIT** (`LICENSE`, „Copyright (c) 2026 Fritz Kuermayr“). Freigabe von Fritz galt nur nach Abhängigkeitsprüfung; die Prüfung ist dokumentiert in `docs/OSS_LICENSE_MILESTONE.md`. `package.json`/Lockfile-Root: `MIT` statt `UNLICENSED`; `private: true` bleibt (keine Veröffentlichung). Beschreibung auf den tatsächlichen E-Mail-Stand aktualisiert.
+- **Inventar (Lockfile v3, sauberes `npm ci`):**
+  - Produktion: 115 Paketversionen an 117 Orten (4 direkte Abhängigkeiten); MIT 103 (davon `@zone-eu/mailsplit` aus `MIT OR EUPL-1.1+` gewählt), ISC 8, BSD-3-Clause 2, BSD-2-Clause 1, MIT-0 1.
+  - Entwicklung: 68 Versionen (nicht verteilt; u. a. MPL-2.0 `lightningcss`, Apache-2.0 `typescript`).
+- **Befunde:** Die Texte von `imapflow` (MIT) und `nodemailer` (MIT-0) sind abgeschnitten, also weder MIT noch MIT-0; Perch behandelt sie konservativ und behält den Hinweis. `nodemailer` enthält `punycode.js` unter voller MIT. Weitere eingebettete Hinweise stehen in `hono`, `iconv-lite`, `encoding-japanese`, `fast-uri`, `negotiator` und `split2`. `pkce-challenge` nennt keinen Rechteinhaber. Alles ist in `THIRD_PARTY_NOTICES.md` wiedergegeben.
+- **Review-Fix (2026-10-05, RED vor GREEN, §6 Zeile 7):**
+  - `encoding-japanese` enthält Masanao Izumos Base64-Code (`src/util.js` 229–236, `encoding.js` 6124–6131) mit eigener Freigabe ohne SPDX-ID („This library is free.  You can redistribute it and/or modify it.“). In `encoding.min.js` fehlt der Kommentar.
+  - Die Hinweise sind wiedergegeben, gepinnt und als „Non-SPDX grant“ getrennt vom SPDX-Inventar ausgewiesen. Die SPDX-Allowlist gilt nur für Paketlizenzen.
+  - Der Scan erkennt jetzt auch reine Copyright-Zeilen. Zeilen mit dem Rechteinhaber aus der eigenen Lizenzdatei des Pakets gelten als Selbstverweis. Neu gefunden: `negotiator` (Blake Embrey), `hono` (type-fest), `split2`.
+  - Der Textklassifikator vergleicht jetzt den ganzen Lizenztext mit den Vorlagen und lehnt Zusätze ab (JSON „Good, not Evil“, Commons Clause, BSD-Werbeklausel). Neue reviewte Overrides: `encoding-japanese` (MIT+extra), `fast-uri` (umformulierte Klausel 3).
+  - Symlinks in Produktionspaketen und Policy-Pfade außerhalb des Pakets schlagen fehl.
+  - Grenzen in §5: Beides ist eine Heuristik, keine exakte SPDX-Erkennung und keine Erkennung kopierten Codes.
+- **Prüfung:** `npm run licenses:check` (`scripts/licenses.mjs`, nur Node-Bordmittel) schlägt fail-closed fehl, und zwar bei:
+  - fehlenden oder nicht erlaubten Lizenzen;
+  - ungeprüften SPDX-Ausdrücken;
+  - Text/SPDX-Abweichungen;
+  - ungeprüften eingebetteten Hinweisen;
+  - veralteten Policy-Einträgen;
+  - Drift gegenüber dem Lockfile.
+
+  Die Prüfung ist Teil von `npm run check` und CI. `npm run licenses:generate` erzeugt die Dateien neu.
+- **Lokal getestet:**
+  - `npm run check`: Typecheck fehlerfrei, `npm test` **386/386** (27 Dateien; vor dem Review-Fix 373/373), Smoke **5/5**, `licenses:check` OK;
+  - `npm audit --omit=dev` 0 Befunde;
+  - `git diff --check` sauber;
+  - zusätzlich `npm ci --omit=dev` + `licenses:check` OK;
+  - TDD-Nachweise in `docs/OSS_LICENSE_MILESTONE.md` §6.
+- **Offen:** Docker/Compose nicht umgesetzt (keine Container-Runtime auf dem Host); Akzeptanzkriterium für Image-Notices in §7. Keine Sichtbarkeitsänderung, kein Publish, keine Rechtsberatung.
+- **Git:** Nichts committet. Commit, Push und PR macht der Orchestrator. Merge und Deployment sind nicht autorisiert.
+
+---
+
 ## Update 2026-10-05: E-Mail-Meilenstein (Branch `feat/perch-email-connectors`, Basis `50db560`)
 
 - **Implementiert:**
