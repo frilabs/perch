@@ -4,3 +4,14 @@ node_modules/
 .env.*
 !.env.example
 .claude/
+dist/
+coverage/
+*.tsbuildinfo
+# Perch secret material must never be committed
+*.key
+*.enc
+*.lock
+http-token
+client_secret*.json
+.perch/
+tmp/

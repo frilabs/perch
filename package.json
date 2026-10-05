@@ -1,0 +1,33 @@
+{
+  "name": "perch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only multi-account Google Drive + multi-workspace Notion MCP server",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "bin": {
+    "perch": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "smoke": "npm run build && vitest run --config vitest.smoke.config.ts",
+    "check": "npm run typecheck && npm test && npm run smoke"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "~5.9.3",
+    "vitest": "^5.0.3"
+  }
+}
