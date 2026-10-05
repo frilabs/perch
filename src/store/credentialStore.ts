@@ -10,6 +10,7 @@ import {
   writePrivateFileAtomic,
   writePrivateFileExclusive,
 } from '../secureFs.js';
+import { createLedgerFile } from '../mail/workflowLedger.js';
 import { decryptEnvelope, encryptEnvelope, generateKeyFileContents, parseKey } from './crypto.js';
 import { withFileLock } from './lock.js';
 
@@ -158,6 +159,9 @@ const StoreDataSchema = z.object({
     .max(MAX_USERS)
     .default([])
     .refine((users) => new Set(users.map((u) => u.id)).size === users.length, 'duplicate user id'),
+  // Added by the mail workflow milestone: set once this namespace's mail-workflow.enc exists. A missing
+  // ledger with this marker was lost (restore from backup); it is never initialised again.
+  mailWorkflowLedger: z.strictObject({ createdAt: z.string() }).optional(),
 });
 
 export type GoogleAccount = z.infer<typeof GoogleAccountSchema>;
@@ -181,7 +185,19 @@ export interface StorePaths {
 export const storeFilePath = (dataDir: string) => path.join(dataDir, 'store.enc');
 const lockFilePath = (dataDir: string) => path.join(dataDir, 'store.lock');
 
-const emptyData = (): StoreData => ({ version: 1, google: [], notion: [], gmail: [], microsoft: [], imap: [], clients: [], googleProductivity: [], users: [] });
+const emptyData = (): StoreData => ({
+  version: 1,
+  google: [],
+  notion: [],
+  gmail: [],
+  microsoft: [],
+  imap: [],
+  clients: [],
+  googleProductivity: [],
+  users: [],
+  // initStore creates the ledger before the store, so a new store is born with it.
+  mailWorkflowLedger: { createdAt: new Date().toISOString() },
+});
 
 async function realpathOrResolve(p: string): Promise<string> {
   // Resolve the deepest existing ancestor so symlinked parents cannot hide containment.
@@ -227,8 +243,11 @@ function serialise(key: Buffer, data: StoreData): Buffer {
 /**
  * Explicit initialisation (`perch init`). Creates whatever is missing, but never generates
  * a new key when an encrypted store already exists (that would orphan the stored credentials).
+ * A newly created store also gets its empty mail workflow ledger (`mail-workflow.enc`, bound to
+ * `opts.namespace`, default root). An existing store never gets a ledger implicitly: a missing ledger
+ * next to an existing store fails closed until restored or explicitly initialised.
  */
-export async function initStore(paths: StorePaths): Promise<{ createdKey: boolean; createdStore: boolean }> {
+export async function initStore(paths: StorePaths, opts: { namespace?: string } = {}): Promise<{ createdKey: boolean; createdStore: boolean }> {
   await assertKeyOutsideDataDir(paths);
   await ensurePrivateDir(paths.dataDir);
   await ensurePrivateDir(path.dirname(paths.keyFile));
@@ -250,6 +269,8 @@ export async function initStore(paths: StorePaths): Promise<{ createdKey: boolea
     if (hasStore) {
       parseData(decryptEnvelope(key, (await readPrivateFile(storeFile)).toString('utf8')));
     } else {
+      // Ledger first: a store without its ledger would make every audited call fail closed.
+      await createLedgerFile(paths.dataDir, key, opts.namespace ?? ROOT_NAMESPACE);
       createdStore = await writePrivateFileExclusive(storeFile, serialise(key, emptyData()));
       if (!createdStore) parseData(decryptEnvelope(key, (await readPrivateFile(storeFile)).toString('utf8')));
     }

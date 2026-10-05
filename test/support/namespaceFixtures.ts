@@ -218,7 +218,7 @@ export async function seedWorld(store: CredentialStore, w: World): Promise<void>
  * of its own world (looked up by store.namespace). An unknown namespace fails the test loudly.
  */
 export function worldContextFactory(worlds: Map<string, World>, io: IoLog): ContextFactory {
-  return (store) => {
+  return (store, guard) => {
     const w = worlds.get(store.namespace);
     if (!w) throw new Error(`MOCK: no world for namespace ${store.namespace}`);
     const transport = worldTransport(w, io);
@@ -238,6 +238,6 @@ export function worldContextFactory(worlds: Map<string, World>, io: IoLog): Cont
       },
       smtp,
     });
-    return createPerchContext(store, transport, { ...createMailProviders(store, new Upstream(transport)), imap });
+    return createPerchContext(store, transport, { ...createMailProviders(store, new Upstream(transport)), imap }, guard);
   };
 }

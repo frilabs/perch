@@ -29,10 +29,14 @@ export function keyId(key: Buffer): string {
   return createHash('sha256').update('perch-kid').update(key).digest('hex').slice(0, 16);
 }
 
-export function encryptEnvelope(key: Buffer, plaintext: Buffer): string {
+/**
+ * `aad` defaults to the credential store's associated data. Other files encrypted with the same envelope
+ * (the mail workflow ledger) pass their own AAD so one file can never be decrypted as the other.
+ */
+export function encryptEnvelope(key: Buffer, plaintext: Buffer, aad: Buffer = AAD): string {
   const iv = randomBytes(IV_BYTES);
   const cipher = createCipheriv('aes-256-gcm', key, iv, { authTagLength: TAG_BYTES });
-  cipher.setAAD(AAD);
+  cipher.setAAD(aad);
   const ct = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const env: Envelope = {
     v: VERSION,
@@ -45,7 +49,7 @@ export function encryptEnvelope(key: Buffer, plaintext: Buffer): string {
   return JSON.stringify(env);
 }
 
-export function decryptEnvelope(key: Buffer, raw: string): Buffer {
+export function decryptEnvelope(key: Buffer, raw: string, aad: Buffer = AAD): Buffer {
   let env: Envelope;
   try {
     env = JSON.parse(raw) as Envelope;
@@ -76,7 +80,7 @@ export function decryptEnvelope(key: Buffer, raw: string): Buffer {
   }
   try {
     const decipher = createDecipheriv('aes-256-gcm', key, iv, { authTagLength: TAG_BYTES });
-    decipher.setAAD(AAD);
+    decipher.setAAD(aad);
     decipher.setAuthTag(tag);
     return Buffer.concat([decipher.update(ct), decipher.final()]);
   } catch {

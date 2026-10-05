@@ -1,5 +1,52 @@
 # Handoff: Perch
 
+## Update 2026-10-05: Mail-Workflow- und Audit-Meilenstein (Arbeits-Branch `feat/perch-mail-workflow`, Basis `560c6ae`)
+
+- **Abgrenzung:**
+  - Basis ist PR #5 `feat/perch-user-isolation` (`560c6ae`): committet, gepusht, review-freigegeben, CI grün; verifiziert 468 Tests + 9 Smoke.
+  - Dieser Meilenstein ist **uncommittet**, nicht gepusht und noch nicht unabhängig reviewt. Commit/Push/PR macht der Orchestrator; Merge und Deploy sind nicht autorisiert.
+  - Nicht kombiniert: der Operations-Schwester-Branch (Container/Backup) und der Lizenz-Branch (PR #3).
+- **Freigabe:** Fritz am 2026-10-05: erweiterte selbstgehostete Phase 1 („Continue implementing the remaining stuff“). Dieses Inkrement betrifft nur `PHASE1_REMAINING.md` §2.
+- **Implementiert** (Details, Speichervertrag, TDD-Nachweise: `docs/MAIL_WORKFLOW_MILESTONE.md`; Setup: `docs/SETUP.md` §4d):
+  - **Idempotenter Versand:**
+    - `mail_send` verlangt eine `requestId` (bewusster Bruch vor dem Release, dokumentiert). Schlüssel: Namespace + Akteur (Client-ID) + Konto + `requestId`.
+    - Ein atomarer Claim schreibt `pending` dauerhaft **vor** jedem Provider-Aufruf; danach gibt es genau einen Versuch und den Abschluss `accepted`/`rejected`/`indeterminate`.
+    - Gleicher Schlüssel mit gleichem Inhalt: das gespeicherte Ergebnis wird wiederholt, ohne Reply-Abruf, neues Zusammensetzen oder erneuten Versand. Anderer Inhalt: `idempotency_conflict` vor jeder I/O.
+    - `pending` nach Absturz, Kill oder Schreibfehler beim Abschluss bleibt für immer „unbekannt“ und wird nie erneut gesendet.
+    - Lässt sich nach einer Annahme das Ergebnis nicht speichern, lautet die Antwort `indeterminate`.
+    - Wechselt die Identität des Absenderkontos zwischen Claim und Versand (oder vor einer Wiederholung), schlägt das geschlossen fehl.
+  - **Neues MCP-Tool `mail_send_status`:** nur für Send-Grants, nur eigene Anfragen; Grant, Konto und Bindung werden vor der Antwort neu geprüft.
+  - **Ledger `mail-workflow.enc` pro Namespace:**
+    - Lock `mail-workflow.lock`; verschlüsselt mit einem HKDF-Unterschlüssel des Store-Schlüssels und eigenem AAD, Envelope-Algorithmus unverändert.
+    - Strikt validiert und begrenzt (1000 Send-Einträge, fail closed; Audit-Ring mit 2000 Einträgen).
+    - Fehlend, beschädigt, fremd, verlinkt, mit fehlendem oder ersetztem Schlüssel, bei verwaistem Lock oder Schreibfehler: fail closed, nie zurückgesetzt.
+    - Store-Schema v1 bleibt unverändert.
+  - **Audit ohne Inhalte:**
+    - Der gemeinsame Tool-Runner protokolliert jeden MCP-Tool-Aufruf mit erlaubten Feldern: Zeit, Namespace, Akteur, Operations-ID, Tool, Perch-Konto-ID/Provider, Ergebnis, Code.
+    - Schreib-Tools werden **vor** dem Provider-Aufruf protokolliert (fail closed). Lese-Ergebnisse werden zurückgehalten, wenn das Audit nicht geschrieben werden kann.
+    - `mail_send` protokolliert der Workflow selbst, atomar mit dem Eintrag. Alle übrigen Mail-Operationen protokolliert `MailService` selbst (auch direkte Aufrufe ohne MCP; Entwurf-`attempt` vor jedem Provider-Zugriff), ohne doppelte Runner-Einträge (Reparatur 2).
+    - Genaue Abdeckung und Lücken: Meilenstein-Doku §5.
+  - **Lokale CLI:** `perch audit list`, `perch mail-workflow list|resolve|init` (`prune` lehnt ab: benutzte `requestId`s werden nie vergessen), pro Namespace über `PERCH_USER`. `resolve` vermerkt nur ein menschlich geprüftes Ergebnis und sendet nie; es gibt keinen Retry-Knopf.
+- **Lokal getestet (nur Mocks):**
+  - `npm run check` auf Host-Node 26.7.0 **und** portablem Node **22.12.0**: typecheck/build fehlerfrei, `npm test` **539/539** (46 Dateien; vorher 468), smoke **10/10** (vorher 9). Stand nach Reparatur 2 (2026-10-05).
+  - Die 10 unabhängigen Prüf-Proben des Orchestrators (`perch-audit-independent-probes.mjs`, unverändert) laufen kompiliert auf Node 22.12.0 mit Offline-Guard: 10/10 PASS, 0 Netzwerkversuche.
+  - `npm audit --omit=dev`: 0 Befunde; `git diff HEAD --check`: sauber.
+  - Fünf Mutationsproben (Lock, Replay, Audit vor dem Schreiben, Status-Revalidierung, Abschluss-Fehler) wurden alle erkannt; die Quellen sind byte-identisch wiederhergestellt.
+- **Vorfall (Mutationsprobe M2):**
+  - Der Offline-Guard der Smoke-Tests blockierte DNS nicht. Ein absichtlich mutiertes gebautes CLI hat deshalb DNS-Anfragen für den reservierten, nicht existierenden Namen `smtp.invalid.example` an den System-Resolver geschickt: nur DNS, keine Socket-Verbindung, keine Zugangsdaten, kein Inhalt.
+  - Der Guard (nur Testcode) blockiert und protokolliert jetzt alle `node:dns`-APIs; die Probe beweist das.
+  - Die erneute Probe wurde im Prozess blockiert, und der Null-Versuche-Test schlug wie beabsichtigt fehl.
+- **Live verifiziert:** nichts.
+- **Grenzen** (Meilenstein-Doku §9):
+  - `pending` bleibt dauerhaft offen, bis ein Admin es auflöst;
+  - kein `prune`: ab 1000 Sends pro Namespace scheitern neue Sends geschlossen, bis ein sicherer Rollover gebaut ist;
+  - Upgrade-Schritt `perch mail-workflow init` nur für Namespaces, die nie einen Ledger hatten (Marker in `store.enc`); ein verlorener Ledger braucht ein Backup;
+  - ein Widerruf, der erst während des laufenden Provider-Aufrufs eintrifft, kann diesen nicht mehr stoppen;
+  - keine Provider-seitige Idempotenz und keine deterministische Message-ID.
+- **Weiter offen:** `PHASE1_REMAINING.md` §3–§5: Container, Backup und Migrationen (Operations-Schwester), WhatsApp, Live-Tests, kombinierte Integration mit Lizenz- und Operations-Branch. Phase 1 ist **nicht** abgeschlossen.
+
+---
+
 ## Update 2026-10-05: Nutzer-Isolations-Meilenstein (Delivery-Branch `feat/perch-user-isolation`, Basis `acc3eeb`)
 
 - **Abgrenzung:**
@@ -7,7 +54,7 @@
     - PR2 `feat/perch-email-connectors`;
     - PR3 `feat/perch-oss-license` (Schwester-Branch, hier nicht integriert);
     - PR4 `feat/perch-calendar-contacts` (`acc3eeb`).
-  - Dieser Meilenstein wurde im Worktree `/home/hermes/perch-users-work` unabhängig getestet und frisch review-freigegeben. Veröffentlichung erfolgt durch den Orchestrator; GitHub ist die Quelle für PR-/Merge-Status. Kein Merge oder Deploy ist autorisiert.
+  - Dieser Meilenstein wurde im Worktree `/home/hermes/perch-users-work` unabhängig getestet und frisch review-freigegeben. Inzwischen ist er als PR #5 (`560c6ae`) committet und gepusht, CI grün; GitHub ist die Quelle für PR-/Merge-Status. Kein Merge oder Deploy ist autorisiert.
 - **Freigabe:** Fritz hat am 2026-10-05 über den Orchestrator die erweiterte Phase 1 freigegeben, für dieses Inkrement nur admin-angelegte Nutzer-Isolation.
 - **Implementiert** (Details, TDD-Nachweise: `docs/USER_ISOLATION_MILESTONE.md`; Setup: `docs/SETUP.md` §4c):
   - Lokale Registry im verschlüsselten Root-Store (`users`, Default `[]`):
@@ -32,7 +79,7 @@
   - keine Token-Rotation, keine Reaktivierung, kein Löschbefehl;
   - ein beschädigter aktiver Namespace blockiert alle HTTP-Bearer-Tokens, auch das globale, bis er repariert oder der Nutzer entfernt ist. Nur lokales Root-stdio ohne Nutzer- und Client-Token-Selektor bleibt davon unabhängig.
 - **Weiter offen:** `docs/PHASE1_REMAINING.md` §2–§5:
-  - Audit und idempotentes Senden;
+  - Audit und idempotentes Senden (inzwischen auf `feat/perch-mail-workflow` umgesetzt, siehe oben);
   - Container, Backup und Migrationen;
   - WhatsApp;
   - Live-Tests;

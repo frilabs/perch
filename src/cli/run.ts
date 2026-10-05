@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { AuditLog } from '../audit/audit.js';
 import { createClientGrant, parseCapabilities, removeClientGrant } from '../auth/grants.js';
 import { loadHttpToken, resolveConfig, type PerchConfig } from '../config.js';
 import { createPerchContext } from '../context.js';
@@ -18,12 +19,23 @@ import {
 import { createGmailTokenProvider, gmailScopesFor, registerGmailAccount, removeGmailAccount } from '../mail/gmailAccounts.js';
 import { addImapAccount, removeImapAccount, verifyImapAccount } from '../mail/imapAccounts.js';
 import { IMAP_PRESETS } from '../mail/imapPresets.js';
+import { PRUNE_REFUSED, resolveSend } from '../mail/workflow.js';
+import {
+  ACCOUNT_ID_PATTERN,
+  initMailWorkflowLedger,
+  ledgerFilePath,
+  MAX_AUDIT_EVENTS,
+  MailWorkflowLedger,
+  OPERATION_ID_PATTERN,
+  SEND_STATES,
+  type Actor,
+} from '../mail/workflowLedger.js';
 import { generateHttpToken, startHttpServer, validateHttpToken } from '../mcp/http.js';
 import { createMcpServer } from '../mcp/server.js';
 import { registerMicrosoftAccount, removeMicrosoftAccount } from '../microsoft/accounts.js';
 import { runMicrosoftAuthorization, validateTenant } from '../microsoft/oauth.js';
 import { addNotionWorkspace, removeNotionWorkspace } from '../notion/notion.js';
-import { ensurePrivateDir, readPrivateFile, writePrivateFileAtomic, writePrivateFileExclusive } from '../secureFs.js';
+import { ensurePrivateDir, pathExists, readPrivateFile, writePrivateFileAtomic, writePrivateFileExclusive } from '../secureFs.js';
 import { CredentialStore, initStore, type ImapAccount, type StoreData } from '../store/credentialStore.js';
 import { createFetchTransport, Upstream, type UpstreamTransport } from '../upstream.js';
 import { NamespaceRouter } from '../users/namespaces.js';
@@ -71,10 +83,15 @@ Usage:
                       CAPS: read,draft,send (mail accounts); calendar_read,calendar_write,contacts_read (gprod accounts)
   perch client list | remove ID
   perch token rotate                           replace the HTTP bearer token file
+  perch audit list [--limit N] [--client ID] [--account ID]   body-free audit trail of the selected namespace
+  perch mail-workflow list [--state pending|accepted|rejected|indeterminate]   idempotent send records
+  perch mail-workflow resolve OPERATION_ID --outcome sent|not-sent   record a human-verified outcome (never sends)
+  perch mail-workflow init                     create a missing ledger for a store created before it existed
 
 Configuration is read from environment variables (see .env.example). Secrets are never
 accepted as command-line arguments. PERCH_USER=<user id> runs the account, client and
-serve --stdio commands inside that provisioned user's namespace (root namespace when unset).`;
+serve --stdio, audit and mail-workflow commands inside that provisioned user's namespace (root namespace
+when unset).`;
 
 const SECRET_FLAG = /^--?(token|pat|secret|client-secret|refresh-token|access-token|password|key|api-key)(=|$)/i;
 
@@ -155,6 +172,15 @@ async function cmdInit(config: PerchConfig, io: CliIo) {
   const r = await initStore({ dataDir: config.dataDir, keyFile: config.keyFile });
   io.stdout(`${r.createdKey ? 'Created' : 'Kept existing'} key file: ${config.keyFile}\n`);
   io.stdout(`${r.createdStore ? 'Created' : 'Kept existing'} encrypted store: ${path.join(config.dataDir, 'store.enc')}\n`);
+  const ledger = ledgerFilePath(config.dataDir);
+  if (r.createdStore) io.stdout(`Created mail workflow ledger: ${ledger}\n`);
+  else if (await pathExists(ledger)) io.stdout(`Kept existing mail workflow ledger: ${ledger}\n`);
+  else {
+    io.stdout(
+      `Mail workflow ledger is missing (${ledger}); mail tools fail closed until it is restored from backup, or, only if this ` +
+        'store predates it, created with: perch mail-workflow init\n',
+    );
+  }
   if (config.httpTokenEnv) {
     validateHttpToken(config.httpTokenEnv);
     io.stdout('HTTP token: provided via PERCH_HTTP_TOKEN (token file not touched)\n');
@@ -174,7 +200,7 @@ async function cmdServe(config: PerchConfig, io: CliIo, values: Record<string, u
   if (values.http) rootOnly(config, 'perch serve --http (it serves every user by token)');
   const root = await openRootStore(config);
   // One context per namespace: own store, upstream and access-token caches.
-  const factory = (store: CredentialStore) => createPerchContext(store, io.transport ?? createFetchTransport());
+  const factory = (store: CredentialStore, guard?: () => Promise<void>) => createPerchContext(store, io.transport ?? createFetchTransport(), undefined, guard);
   const router = new NamespaceRouter(factory(root), factory);
   if (values.stdio) {
     // Plain stdio is the read-only operator of the selected namespace (root, or PERCH_USER's);
@@ -557,6 +583,88 @@ async function cmdUser(config: PerchConfig, io: CliIo, sub: string | undefined, 
   );
 }
 
+const describeActor = (a: Actor) => (a.kind === 'client' ? `client ${a.clientId}` : a.kind === 'local_admin' ? 'local admin' : 'operator (read-only)');
+
+function optOne(values: Record<string, unknown>, name: string, pattern: RegExp, what: string): string | undefined {
+  const v = values[name];
+  const list = Array.isArray(v) ? v : v === undefined ? [] : [v];
+  if (list.length > 1 || (list.length === 1 && (typeof list[0] !== 'string' || !pattern.test(list[0])))) throw new UsageError(`--${name} must be one ${what}`);
+  return list[0] as string | undefined;
+}
+
+async function cmdAudit(config: PerchConfig, io: CliIo, sub: string | undefined, values: Record<string, unknown>) {
+  if (sub !== 'list') throw new UsageError('Usage: perch audit list [--limit N] [--client ID] [--account ID]');
+  let limit: number | undefined;
+  if (values.limit !== undefined) {
+    limit = Number(values.limit);
+    if (!/^\d+$/.test(String(values.limit)) || limit < 1 || limit > MAX_AUDIT_EVENTS) throw new UsageError(`--limit must be 1-${MAX_AUDIT_EVENTS}`);
+  }
+  const clientId = optOne(values, 'client', /^client-[a-f0-9]{8}$/, 'client id (client-…)');
+  const accountId = optOne(values, 'account', ACCOUNT_ID_PATTERN, 'account id');
+  const store = await openStore(config);
+  const { events, dropped, total } = await new AuditLog(new MailWorkflowLedger(store)).list({
+    ...(clientId ? { clientId } : {}),
+    ...(accountId ? { accountId } : {}),
+    ...(limit ? { limit } : {}),
+  });
+  const lines = [
+    `Audit events (namespace ${store.namespace}; oldest first; ${events.length} of ${total} shown` +
+      `${dropped ? `; ${dropped} older events were dropped (ring of ${MAX_AUDIT_EVENTS})` : ''}). No content, recipients or credentials are recorded:`,
+  ];
+  if (!events.length) lines.push('  (none)');
+  for (const e of events) {
+    const account = e.accountId ? `${e.accountId} (${e.provider})` : '-';
+    lines.push(`  ${e.at}  ${e.operationId}  ${e.type}  ${e.outcome}  ${describeActor(e.actor)}  ${account}${e.code ? `  ${e.code}` : ''}`);
+  }
+  io.stdout(`${lines.join('\n')}\n`);
+}
+
+async function cmdMailWorkflow(config: PerchConfig, io: CliIo, sub: string | undefined, rest: string[], values: Record<string, unknown>) {
+  if (sub === 'init') {
+    const store = await openStore(config);
+    if (!(await initMailWorkflowLedger(store))) {
+      throw new PerchError(`Mail workflow ledger ${ledgerFilePath(store.storePaths.dataDir)} already exists; refusing to overwrite it`, 'ledger_exists');
+    }
+    return io.stdout(`Created mail workflow ledger: ${ledgerFilePath(store.storePaths.dataDir)} (namespace ${store.namespace})\n`);
+  }
+  if (sub === 'list') {
+    const state = values.state;
+    if (state !== undefined && !(SEND_STATES as readonly unknown[]).includes(state)) throw new UsageError(`--state must be one of ${SEND_STATES.join(', ')}`);
+    const store = await openStore(config);
+    const sends = (await new MailWorkflowLedger(store).read()).sends.filter((r) => state === undefined || r.state === state);
+    const lines = [
+      `Send records (namespace ${store.namespace}). "accepted" = accepted by the provider, not proof of delivery; ` +
+        '"pending"/"indeterminate" = outcome unknown, never resent:',
+    ];
+    if (!sends.length) lines.push('  (none)');
+    for (const r of sends) {
+      lines.push(
+        `  ${r.operationId}  ${r.state}  ${r.accountId} (${r.provider})  ${describeActor(r.actor)}  created ${r.createdAt}` +
+          `${r.finalizedAt ? `  finalized ${r.finalizedAt}` : ''}${r.reason ? `  ${r.reason}` : ''}` +
+          `${r.resolution ? `  resolved: ${r.resolution.outcome === 'sent' ? 'sent' : 'not sent'} ${r.resolution.at}` : ''}`,
+      );
+    }
+    return io.stdout(`${lines.join('\n')}\n`);
+  }
+  if (sub === 'resolve') {
+    const op = rest[0];
+    if (!op || !OPERATION_ID_PATTERN.test(op)) throw new UsageError('Usage: perch mail-workflow resolve OPERATION_ID --outcome sent|not-sent');
+    if (values.outcome !== 'sent' && values.outcome !== 'not-sent') throw new UsageError('--outcome must be sent or not-sent (after checking the Sent folder)');
+    const outcome = values.outcome === 'sent' ? 'sent' : 'not_sent';
+    const store = await openStore(config);
+    await resolveSend(new MailWorkflowLedger(store), op, outcome);
+    return io.stdout(
+      `Recorded for ${op}: verified ${outcome === 'sent' ? 'sent' : 'not sent'}. Nothing was sent; the requestId stays used, so a client ` +
+        'must use a new requestId to send again.\n',
+    );
+  }
+  if (sub === 'prune') {
+    // Refused before opening anything: forgetting a requestId would allow a duplicate send.
+    throw new PerchError(PRUNE_REFUSED, 'prune_unsupported');
+  }
+  throw new UsageError('Usage: perch mail-workflow list|resolve|init');
+}
+
 async function cmdToken(config: PerchConfig, io: CliIo, sub: string | undefined) {
   rootOnly(config, 'perch token');
   if (sub !== 'rotate') throw new UsageError('Usage: perch token rotate');
@@ -602,6 +710,11 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         allow: { type: 'string' },
         account: { type: 'string', multiple: true },
         'token-file': { type: 'string' },
+        limit: { type: 'string' },
+        client: { type: 'string' },
+        state: { type: 'string' },
+        outcome: { type: 'string' },
+        before: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
       },
@@ -657,6 +770,12 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         return 0;
       case 'token':
         await cmdToken(config, io, sub);
+        return 0;
+      case 'audit':
+        await cmdAudit(config, io, sub, values);
+        return 0;
+      case 'mail-workflow':
+        await cmdMailWorkflow(config, io, sub, rest, values);
         return 0;
       default:
         throw new UsageError(`Unknown command: ${cmd}`);

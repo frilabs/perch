@@ -1,9 +1,11 @@
-import { assertMailCapability, type Principal } from '../auth/grants.js';
+import { actorOf, auditCode, AuditLog, outcomeOf, safeAccountId } from '../audit/audit.js';
+import { assertMailCapability, currentPrincipal, type Principal } from '../auth/grants.js';
 import { PerchError } from '../errors.js';
 import { fanOut, type FanOutResult } from '../fanout.js';
 import type { Capability, CredentialStore, GmailAccount, ImapAccount, MicrosoftAccount, StoreData } from '../store/credentialStore.js';
 import { composeForProvider, isMessageId, validateOutgoing, type ComposeInput } from './compose.js';
 import {
+  ACCEPTED_NOTE,
   DEFAULT_MAIL_MAX_BYTES,
   DEFAULT_MAIL_PAGE_SIZE,
   HARD_MAIL_MAX_BYTES,
@@ -11,8 +13,11 @@ import {
   type MailProvider,
   type MailProviderKind,
   type MailSummary,
+  type ReplyContext,
   type SendResult,
 } from './types.js';
+import { accountChanged, canonicalSendPayload, SendWorkflow, validateRequestId, viewOf, type SendView } from './workflow.js';
+import { MailWorkflowLedger, newOperationId, type SendReason } from './workflowLedger.js';
 
 export interface MailProviders {
   gmail: MailProvider<GmailAccount>;
@@ -39,11 +44,54 @@ export interface OutgoingRequest extends Omit<ComposeInput, 'subject'> {
   replyToMessageId?: string;
 }
 
+/** A send always carries the caller's idempotency key (see src/mail/workflow.ts). */
+export interface SendRequest extends OutgoingRequest {
+  requestId: string;
+}
+
+export type SendOutcome = SendResult &
+  MailProvenance & { from: string; operationId: string; requestState: SendView['requestState']; replayed: boolean; manualResolution?: 'sent' | 'not_sent' };
+
+const FINALIZE_FAILED_NOTE =
+  'The provider was called, but its outcome could not be recorded in the mail workflow ledger, so it must be treated as unknown. ' +
+  'Perch will not send this requestId again. Check the Sent folder before sending with a new requestId.';
+const USED_NOTE = ' This requestId is now used; to try again, use a new requestId.';
+
+/** "accepted" always carries the fixed not-delivered note; a rejection says the key is used up. */
+function liveDetail(r: SendResult): string {
+  if (r.status === 'accepted') return r.detail.startsWith(ACCEPTED_NOTE) ? r.detail : ACCEPTED_NOTE;
+  return r.status === 'rejected' ? r.detail + USED_NOTE : r.detail;
+}
+
 const RECONNECT: Record<MailProviderKind, (id: string, opt: string) => string> = {
   gmail: (id, opt) => `perch gmail remove ${id}, then perch gmail add --label <label> ${opt}`,
   microsoft: (id, opt) => `perch microsoft remove ${id}, then perch microsoft add --label <label> ${opt}`,
   imap: (id, opt) => `perch imap remove ${id}, then perch imap add ... ${opt}`,
 };
+
+/**
+ * Identity of the sender account that a send record is bound to. Excludes rotating OAuth refresh
+ * tokens; includes everything that changes when the account is removed and re-added or re-credentialed.
+ */
+function bindingParts(e: Entry): string[] {
+  const base = [e.kind, e.account.id, e.account.email.toLowerCase(), e.account.createdAt];
+  switch (e.kind) {
+    case 'gmail':
+      return [...base, e.account.clientId];
+    case 'microsoft':
+      return [...base, e.account.clientId, e.account.tenant];
+    case 'imap': {
+      const a = e.account;
+      return [...base, a.username, a.password, a.imap.host, String(a.imap.port), a.smtp.host, String(a.smtp.port), a.smtp.security];
+    }
+  }
+}
+
+function sameBinding(a: Entry, b: Entry): boolean {
+  const x = bindingParts(a);
+  const y = bindingParts(b);
+  return x.length === y.length && x.every((v, i) => v === y[i]);
+}
 
 function entries(data: StoreData): Entry[] {
   return [
@@ -61,21 +109,94 @@ function bounded(name: string, value: number | undefined, def: number, max: numb
 
 const provenance = (e: Entry): MailProvenance => ({ accountId: e.account.id, accountLabel: e.account.label, provider: e.kind });
 
+export interface MailServiceOptions {
+  /**
+   * Namespace guard (user still active, namespace paths/key/store intact). Set for user namespaces by
+   * NamespaceRouter; runs on every call and again right before a provider write.
+   */
+  guard?: () => Promise<void>;
+}
+
 /**
  * Provider-neutral mail operations. Authorization happens here, before any provider call:
+ * 0. the namespace guard runs and the principal is re-resolved from the store (a passed-in principal is
+ * never trusted: a revoked, replaced or narrowed client grant fails closed on direct calls too),
  * 1. the principal must hold the capability for that account (client grant; replying also needs
  * "read"), 2. the account must exist, 3. the stored provider grant must allow it (OAuth scopes /
  * IMAP opt-in).
  * The sender is always the explicitly chosen account; adapters never pick a From address.
  */
 export class MailService {
+  private readonly workflow: SendWorkflow;
+  private readonly audit: AuditLog;
+
+  /** `ledger` defaults to this namespace's mail workflow ledger; every send goes through it. */
   constructor(
     private readonly store: CredentialStore,
     private readonly providers: MailProviders,
-  ) {}
+    ledger: MailWorkflowLedger = new MailWorkflowLedger(store),
+    private readonly options: MailServiceOptions = {},
+  ) {
+    this.workflow = new SendWorkflow(ledger);
+    this.audit = new AuditLog(ledger);
+  }
 
   private provider(e: Entry): MailProvider<unknown> {
     return this.providers[e.kind] as MailProvider<unknown>;
+  }
+
+  /** Namespace guard, then the client grant as it is stored now. Every public method starts here. */
+  private async caller(principal: Principal): Promise<Principal> {
+    await this.options.guard?.();
+    return currentPrincipal(this.store, principal);
+  }
+
+  /**
+   * Body-free audit of one direct operation (the service is the audit boundary, also outside MCP; the MCP
+   * runner does not record mail tools again). After the namespace guard (a failing guard is not recorded:
+   * that namespace cannot be trusted to be written to) the grant is re-resolved from the store; a denial is
+   * recorded. A draft write records its "attempt" durably BEFORE any provider I/O (missing, corrupt, full or
+   * locked ledger: nothing is written). The outcome is recorded with fixed fields only (type, actor, Perch
+   * account id/provider, outcome, Perch error code); never ids of messages/attachments/drafts, queries,
+   * addresses or provider text. A read result is withheld if its record cannot be written.
+   */
+  private async audited<T>(type: string, stale: Principal, accountId: unknown, fn: (p: Principal) => Promise<T>, write = false): Promise<T> {
+    await this.options.guard?.();
+    let p: Principal;
+    try {
+      p = await currentPrincipal(this.store, stale);
+    } catch (err) {
+      await this.audit.record({ type, actor: actorOf(stale), accountId, outcome: outcomeOf(err), code: auditCode(err) });
+      throw err;
+    }
+    const base = { type, actor: actorOf(p), accountId, operationId: newOperationId() };
+    if (write) await this.audit.record({ ...base, outcome: 'attempt' });
+    let result: T;
+    try {
+      result = await fn(p);
+    } catch (err) {
+      await this.audit.record({ ...base, outcome: outcomeOf(err), code: auditCode(err) });
+      throw err;
+    }
+    try {
+      await this.audit.record({ ...base, outcome: 'ok' });
+    } catch (err) {
+      // A completed write cannot be undone (its attempt record exists): report it. A read is withheld.
+      if (write) process.stderr.write('perch: the outcome of a completed mail write could not be added to the audit ledger\n');
+      else throw new PerchError(`The result was withheld because its audit record could not be written (${auditCode(err)})`, 'audit_unavailable');
+    }
+    return result;
+  }
+
+  /**
+   * Re-validates a write right before its provider call (after awaits such as the reply lookup): namespace,
+   * current grant, capability (+ read for replies) and the account as stored now.
+   */
+  private async stillAllowed(principal: Principal, req: OutgoingRequest, cap: 'draft' | 'send'): Promise<Entry> {
+    const p = await this.caller(principal);
+    const e = await this.authorised(p, req.accountId, cap);
+    this.assertReplyReadable(p, req);
+    return e;
   }
 
   private async entry(accountId: string): Promise<Entry> {
@@ -94,7 +215,11 @@ export class MailService {
   }
 
   /** A client sees only the accounts named in its grant; the read-only operator sees all. */
-  async listAccounts(principal: Principal) {
+  async listAccounts(stale: Principal) {
+    return this.audited('mail_list_accounts', stale, undefined, async (principal) => this.visibleAccounts(principal));
+  }
+
+  private async visibleAccounts(principal: Principal) {
     const visible = (id: string) => principal.mailAccounts === 'all' || principal.mailAccounts.has(id);
     return entries(await this.store.read()).filter((e) => visible(e.account.id)).map((e) => {
       return {
@@ -107,6 +232,13 @@ export class MailService {
   }
 
   async search(
+    principal: Principal,
+    opts: { query?: string; accountId?: string; folder?: string; pageSize?: number; cursor?: string },
+  ): Promise<FanOutResult<MailSummary & { provider: MailProviderKind; accountId: string; accountLabel: string }>> {
+    return this.audited('mail_search', principal, opts?.accountId, (p) => this.searchAs(p, opts));
+  }
+
+  private async searchAs(
     principal: Principal,
     opts: { query?: string; accountId?: string; folder?: string; pageSize?: number; cursor?: string },
   ): Promise<FanOutResult<MailSummary & { provider: MailProviderKind; accountId: string; accountLabel: string }>> {
@@ -139,26 +271,34 @@ export class MailService {
   }
 
   async read(principal: Principal, opts: { accountId: string; messageId: string; maxBytes?: number }) {
-    const e = await this.authorised(principal, opts.accountId, 'read');
-    const maxBytes = bounded('maxBytes', opts.maxBytes, DEFAULT_MAIL_MAX_BYTES, HARD_MAIL_MAX_BYTES);
-    return { ...provenance(e), ...(await this.provider(e).read(e.account, opts.messageId, { maxBytes })) };
+    return this.audited('mail_read_message', principal, opts?.accountId, async (p) => {
+      const e = await this.authorised(p, opts.accountId, 'read');
+      const maxBytes = bounded('maxBytes', opts.maxBytes, DEFAULT_MAIL_MAX_BYTES, HARD_MAIL_MAX_BYTES);
+      return { ...provenance(e), ...(await this.provider(e).read(e.account, opts.messageId, { maxBytes })) };
+    });
   }
 
   async getAttachment(principal: Principal, opts: { accountId: string; messageId: string; attachmentId: string; maxBytes?: number }) {
-    const e = await this.authorised(principal, opts.accountId, 'read');
-    const maxBytes = bounded('maxBytes', opts.maxBytes, DEFAULT_MAIL_MAX_BYTES, HARD_MAIL_MAX_BYTES);
-    return { ...provenance(e), ...(await this.provider(e).getAttachment(e.account, opts.messageId, opts.attachmentId, { maxBytes })) };
+    return this.audited('mail_get_attachment', principal, opts?.accountId, async (p) => {
+      const e = await this.authorised(p, opts.accountId, 'read');
+      const maxBytes = bounded('maxBytes', opts.maxBytes, DEFAULT_MAIL_MAX_BYTES, HARD_MAIL_MAX_BYTES);
+      return { ...provenance(e), ...(await this.provider(e).getAttachment(e.account, opts.messageId, opts.attachmentId, { maxBytes })) };
+    });
+  }
+
+  /** Fetches what a reply needs from the original (provider read I/O). */
+  private async replyContext(e: Entry, req: OutgoingRequest): Promise<ReplyContext | undefined> {
+    return req.replyToMessageId ? this.provider(e).replyContext(e.account, req.replyToMessageId) : undefined;
   }
 
   /**
-   * Validates input, resolves reply threading and builds the MIME message. `mode` 'api' keeps the
+   * Validates input, applies reply threading and builds the MIME message. `mode` 'api' keeps the
    * Bcc header (API sends and every stored draft need it); 'smtp' drops it (Bcc is envelope-only).
    */
-  private async prepare(e: Entry, req: OutgoingRequest, mode: 'api' | 'smtp') {
+  private async compose(e: Entry, req: OutgoingRequest, mode: 'api' | 'smtp', ctx: ReplyContext | undefined) {
     let { subject, inReplyTo, references } = req;
     let threadId: string | undefined;
-    if (req.replyToMessageId) {
-      const ctx = await this.provider(e).replyContext(e.account, req.replyToMessageId);
+    if (ctx) {
       threadId = ctx.threadId;
       // Upstream headers are untrusted and often malformed: keep only well-formed ids. Caller-supplied
       // inReplyTo/references are not filtered here; validateOutgoing rejects them if malformed.
@@ -170,12 +310,23 @@ export class MailService {
       if (subject === undefined && ctx.subject !== undefined) subject = /^re:/i.test(ctx.subject) ? ctx.subject : `Re: ${ctx.subject}`;
     }
     if (subject === undefined) throw new PerchError('subject is required (or reply to a message)', 'bad_argument');
-    const { accountId: _a, replyToMessageId: _r, ...compose } = req;
+    const { accountId: _a, replyToMessageId: _r, requestId: _q, ...compose } = req as SendRequest;
     const validated = validateOutgoing(
       { ...compose, subject, ...(inReplyTo ? { inReplyTo } : {}), ...(references ? { references } : {}) },
       e.account.email,
     );
     return composeForProvider(validated, mode, threadId);
+  }
+
+  private async prepare(e: Entry, req: OutgoingRequest, mode: 'api' | 'smtp') {
+    return this.compose(e, req, mode, await this.replyContext(e, req));
+  }
+
+  /** Local validation of everything the caller sent, before any ledger write or provider I/O. */
+  private prevalidate(e: Entry, req: SendRequest): void {
+    const { accountId: _a, replyToMessageId, requestId: _q, ...compose } = req;
+    if (compose.subject === undefined && replyToMessageId === undefined) throw new PerchError('subject is required (or reply to a message)', 'bad_argument');
+    validateOutgoing({ ...compose, subject: compose.subject ?? '' }, e.account.email);
   }
 
   private assertProviderAllows(e: Entry, what: 'draft' | 'send') {
@@ -200,19 +351,152 @@ export class MailService {
   }
 
   async createDraft(principal: Principal, req: OutgoingRequest) {
-    const e = await this.authorised(principal, req.accountId, 'draft');
-    this.assertReplyReadable(principal, req);
+    return this.audited('mail_create_draft', principal, req?.accountId, (p) => this.draftAs(p, req), true);
+  }
+
+  private async draftAs(principal: Principal, req: OutgoingRequest) {
+    const e = await this.stillAllowed(principal, req, 'draft');
     this.assertProviderAllows(e, 'draft');
     // Drafts keep Bcc for every provider (IMAP drafts are APPENDed as complete messages).
     const mail = await this.prepare(e, req, 'api');
-    return { ...provenance(e), from: e.account.email, ...(await this.provider(e).createDraft(e.account, mail)) };
+    // The reply lookup awaited provider I/O: re-check everything before the provider write.
+    const current = await this.stillAllowed(principal, req, 'draft');
+    // The full sender identity (credentials, servers, re-added account), not just kind and address.
+    if (!sameBinding(e, current)) throw accountChanged();
+    this.assertProviderAllows(current, 'draft');
+    return { ...provenance(current), from: current.account.email, ...(await this.provider(current).createDraft(current.account, mail)) };
   }
 
-  async send(principal: Principal, req: OutgoingRequest): Promise<SendResult & MailProvenance & { from: string }> {
-    const e = await this.authorised(principal, req.accountId, 'send');
-    this.assertReplyReadable(principal, req);
+  /**
+   * Idempotent send (src/mail/workflow.ts). Order, all before any provider I/O: capability (+ read for
+   * replies), account, provider scope, requestId, local payload validation, then the atomic ledger claim.
+   * A repeated key with the same payload replays the stored result (no reply lookup, no recompose, no
+   * resubmission); a changed payload fails. Exactly one provider attempt per key, ever.
+   */
+  async send(stale: Principal, req: SendRequest): Promise<SendOutcome> {
+    const actor = actorOf(stale);
+    let principal: Principal;
+    let e: Entry;
+    let ids: { key: string; operationId: string };
+    let fp: string;
+    let binding: string;
+    try {
+      principal = await this.caller(stale);
+      e = await this.authorised(principal, req?.accountId, 'send');
+      this.assertReplyReadable(principal, req);
+      this.assertProviderAllows(e, 'send');
+      const requestId = validateRequestId(req.requestId);
+      this.prevalidate(e, req);
+      ids = await this.workflow.ids(actor, e.account.id, requestId);
+      fp = await this.workflow.fingerprint(ids.key, canonicalSendPayload(req));
+      binding = await this.workflow.binding(bindingParts(e));
+    } catch (err) {
+      const accountId = safeAccountId(req?.accountId);
+      await this.audit.record({ type: 'mail_send', actor, accountId, outcome: outcomeOf(err), code: auditCode(err) });
+      throw err;
+    }
+    const claim = await this.workflow.claim({ key: ids.key, fp, binding, operationId: ids.operationId, accountId: e.account.id, provider: e.kind, actor });
+    const head = { ...provenance(e), from: e.account.email };
+    if (claim.kind === 'existing') {
+      const { createdAt: _c, finalizedAt: _f, ...view } = viewOf(claim.record);
+      return { ...head, ...view, replayed: true };
+    }
+
+    // Claimed: the durable pending record exists. From here on nothing escapes without finalizing.
+    const { result, reason } = await this.attempt(principal, e, req, binding).catch(
+      (): { result: SendResult; reason: SendReason } => ({
+        result: { status: 'indeterminate', detail: 'The send failed unexpectedly; the outcome is unknown.' },
+        reason: 'adapter_error',
+      }),
+    );
+    const finalState = result.status;
+    const recorded = await this.workflow.finalize(ids.key, claim.attempt, finalState, reason, result.providerMessageId);
+    if (!recorded) {
+      return { ...head, status: 'indeterminate', detail: FINALIZE_FAILED_NOTE, operationId: ids.operationId, requestState: 'pending', replayed: false };
+    }
+    return {
+      ...head,
+      ...result,
+      detail: liveDetail(result),
+      operationId: ids.operationId,
+      requestState: finalState,
+      replayed: false,
+    };
+  }
+
+  /**
+   * The single attempt of a claimed send. Everything before the provider call that fails is "rejected"
+   * (not submitted): reply lookup, composing, or a sender account whose identity changed since the claim.
+   */
+  private async attempt(principal: Principal, e: Entry, req: SendRequest, binding: string): Promise<{ result: SendResult; reason: SendReason }> {
+    const notSent = (detail: string, reason: SendReason) => ({ result: { status: 'rejected' as const, detail: `Not sent: ${detail}` }, reason });
+    const message = (err: unknown, fallback: string) => (err instanceof PerchError ? err.message : fallback);
+    // Namespace, grant, capability (+ read for replies) as stored now; failing it is "not submitted".
+    const authorization = async () => {
+      try {
+        await this.stillAllowed(principal, req, 'send');
+        return undefined;
+      } catch (err) {
+        return notSent(message(err, 'the request is no longer authorised'), 'not_submitted_authorization');
+      }
+    };
+    const denied = await authorization();
+    if (denied) return denied;
+    let ctx: ReplyContext | undefined;
+    try {
+      ctx = await this.replyContext(e, req);
+    } catch (err) {
+      return notSent(`the message to reply to could not be read (${message(err, 'error')})`, 'not_submitted_reply_context');
+    }
+    let mail: Awaited<ReturnType<MailService['compose']>>;
+    try {
+      mail = await this.compose(e, req, e.kind === 'imap' ? 'smtp' : 'api', ctx);
+    } catch (err) {
+      return notSent(message(err, 'the message could not be built'), 'not_submitted_compose');
+    }
+    // Immediately before submission (the reply lookup and composing awaited): authorization again, the
+    // sender identity binding, and the provider grant of the account as stored now.
+    const deniedNow = await authorization();
+    if (deniedNow) return deniedNow;
+    const current = await this.entry(e.account.id).catch(() => undefined);
+    if (!current || (await this.workflow.binding(bindingParts(current))) !== binding) {
+      return notSent(accountChanged().message, 'not_submitted_account_changed');
+    }
+    try {
+      this.assertProviderAllows(current, 'send');
+    } catch (err) {
+      return notSent(message(err, 'the provider grant no longer allows sending'), 'not_submitted_provider_precheck');
+    }
+    try {
+      const result = await this.provider(current).send(current.account, mail);
+      return { result, reason: result.status === 'accepted' ? 'provider_accepted' : result.status === 'rejected' ? 'provider_rejected' : 'provider_unknown' };
+    } catch (err) {
+      // Adapters throw PerchError only before the request reaches the transport (scope, token, size,
+      // validation). Anything else may have happened after submission: unknown, never retried.
+      if (err instanceof PerchError) return notSent(err.message, 'not_submitted_provider_precheck');
+      return { result: { status: 'indeterminate', detail: 'The send failed unexpectedly after it may have reached the provider; the outcome is unknown.' }, reason: 'adapter_error' };
+    }
+  }
+
+  /**
+   * Current state of this client's own send (same actor, account and requestId). Re-checks the namespace,
+   * the stored grant's "send" capability, the account, its provider send permission and its identity
+   * binding before revealing anything; another client's or namespace's requests are simply not found
+   * (they live under other keys or ledgers). The view holds no reply-derived data (no subject, thread or
+   * message ids of the original), so "read" is not required.
+   */
+  async sendStatus(stale: Principal, opts: { accountId: string; requestId: string }): Promise<Omit<SendOutcome, 'replayed'> & { createdAt: string; finalizedAt?: string }> {
+    return this.audited('mail_send_status', stale, opts?.accountId, (p) => this.statusAs(p, opts));
+  }
+
+  private async statusAs(principal: Principal, opts: { accountId: string; requestId: string }): Promise<Omit<SendOutcome, 'replayed'> & { createdAt: string; finalizedAt?: string }> {
+    const e = await this.authorised(principal, opts?.accountId, 'send');
     this.assertProviderAllows(e, 'send');
-    const mail = await this.prepare(e, req, e.kind === 'imap' ? 'smtp' : 'api');
-    return { ...provenance(e), from: e.account.email, ...(await this.provider(e).send(e.account, mail)) };
+    const requestId = validateRequestId(opts.requestId);
+    const { key } = await this.workflow.ids(actorOf(principal), e.account.id, requestId);
+    const record = await this.workflow.lookup(key);
+    if (!record) throw new PerchError('No send with this requestId from this client and account', 'unknown_request');
+    if (record.binding !== (await this.workflow.binding(bindingParts(e)))) throw accountChanged();
+    return { ...provenance(e), from: e.account.email, ...viewOf(record) };
   }
 }
