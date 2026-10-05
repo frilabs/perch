@@ -1,5 +1,8 @@
 import { GoogleTokenProvider } from './google/accounts.js';
+import { CalendarService } from './google/calendar.js';
+import { ContactsService } from './google/contacts.js';
 import { DriveService } from './google/drive.js';
+import { createProductivityTokenProvider } from './google/productivity.js';
 import { createMailProviders } from './mail/providers.js';
 import { MailService, type MailProviders } from './mail/service.js';
 import { NotionService } from './notion/notion.js';
@@ -13,6 +16,8 @@ export interface PerchContext {
   drive: DriveService;
   notion: NotionService;
   mail: MailService;
+  calendar: CalendarService;
+  contacts: ContactsService;
 }
 
 /**
@@ -26,11 +31,15 @@ export function createPerchContext(
 ): PerchContext {
   const upstream = new Upstream(transport);
   const tokens = new GoogleTokenProvider(store, upstream);
+  // One token provider for Calendar and Contacts: they share the account's single grant.
+  const productivityTokens = createProductivityTokenProvider(store, upstream);
   return {
     store,
     upstream,
     drive: new DriveService(store, upstream, tokens),
     notion: new NotionService(store, upstream),
     mail: new MailService(store, mailProviders ?? createMailProviders(store, upstream)),
+    calendar: new CalendarService(store, upstream, productivityTokens),
+    contacts: new ContactsService(store, upstream, productivityTokens),
   };
 }

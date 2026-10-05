@@ -205,14 +205,49 @@ perch client remove client-1a2b3c4d     # wirkt ab dem nächsten Tool-Aufruf, au
 - **Token:** 256 Bit, landet nur in der neuen `0600`-Datei und wird nie ausgegeben. Die DB speichert nur den SHA-256-Hash.
 - **HTTP:** das Client-Token statt des globalen Tokens als Bearer verwenden. Beispiel: `TOKEN="$(ssh homeserver 'cat ~/.config/perch/clients/laptop.token')"`, dann `claude mcp add ... --header "Authorization: Bearer ${TOKEN}"`, wie in Abschnitt 6.
 - **stdio:** `PERCH_CLIENT_TOKEN_FILE=~/.config/perch/clients/laptop.token perch serve --stdio`.
-- **Wirkung:** Client-Grants sind **nur für Mail** und nur für die gelisteten Konto-IDs.
+- **Wirkung:** Client-Grants mit Mail-Capabilities gelten **nur für Mail** und nur für die gelisteten Konto-IDs (Calendar/Contacts-Grants: Abschnitt 4b).
   - Keine Drive- oder Notion-Tools und keine Drive/Notion-Metadaten. `perch_list_accounts` zeigt nur `mail` (die gewährten Konten) und `connection`.
   - Lese-Tools (`mail_search`, `mail_read_message`, `mail_get_attachment`) gibt es nur mit `read`, `mail_create_draft` nur mit `draft`, `mail_send` nur mit `send`.
   - Antworten mit `replyToMessageId` lesen die Originalmail und brauchen deshalb zusätzlich `read`.
   - Andere Konten sind unsichtbar. Eine nicht gewährte und eine nicht existierende Konto-ID liefern dieselbe Ablehnung.
 - **Widerruf und Einschränkung:** Vor **jedem** Tool-Aufruf liest Perch den Grant neu aus dem Store (Grant-ID und Token-Hash). `perch client remove` oder ein eingeschränkter Grant gilt damit sofort, auch für eine laufende stdio-Session. Der Aufruf scheitert mit `grant_revoked` bzw. `capability_denied`, bevor ein Provider kontaktiert wird. Über HTTP wird ein entferntes Token zusätzlich mit `401` abgewiesen. Die Tool-Liste einer laufenden stdio-Session wird nicht aktualisiert.
-- **Betreiber:** Das globale HTTP-Token und `perch serve --stdio` ohne Client-Token behalten alle Read-only-Tools (Drive, Notion, Mail) für alle Konten, wie bisher.
+- **Betreiber:** Das globale HTTP-Token und `perch serve --stdio` ohne Client-Token behalten alle Read-only-Tools (Drive, Notion, Mail, seit dem Productivity-Meilenstein auch Calendar/Contacts lesend) für alle Konten. Schreib-Tools gibt es dort nie.
 - **Grenze:** Das ist **keine Mehrbenutzer-Isolation.** Alle Clients handeln für den einen Betreiber des Stores. Perch nicht als geteilten Mehrbenutzerdienst betreiben.
+
+## 4b. Google Calendar und Contacts verbinden (Productivity-Meilenstein)
+
+Spezifikation und Testnachweise: `docs/GOOGLE_PRODUCTIVITY_MILESTONE.md`. **Nichts davon ist live verifiziert.** Getestet wurde nur gegen Mocks.
+
+1. Im selben Google-Cloud-Projekt die **Google Calendar API** und/oder die **People API** aktivieren.
+2. Im Consent Screen die Scopes eintragen: `openid`, `email` (bzw. `.../auth/userinfo.email`), `.../auth/calendar.readonly`, `.../auth/contacts.readonly` und nur bei Bedarf `.../auth/calendar.events.owned`. Testnutzer eintragen; im Testing-Status laufen Refresh-Tokens nach 7 Tagen ab.
+3. Konto verbinden. Das ist ein **eigener Grant**, getrennt von Drive und Gmail; dafür ist weder eine Drive- noch eine Gmail-Freigabe nötig. Der Desktop-Client aus `PERCH_GOOGLE_CLIENT_FILE` wird wiederverwendet. `--services` ist Pflicht und wählt die Dienste ausdrücklich:
+
+```bash
+perch google-productivity add --label "Privat" --services calendar            # calendar.readonly
+perch google-productivity add --label "Privat" --services contacts            # contacts.readonly
+perch google-productivity add --label "Privat" --services calendar,contacts --allow-calendar-write
+                                                                               # + calendar.events.owned
+perch google-productivity list
+perch google-productivity remove gprod-1a2b3c4d [--revoke]
+```
+
+- Perch prüft nach dem Consent: Refresh-Token vorhanden, jeder angefragte Scope gewährt (ein entferntes Häkchen bricht `add` ab), E-Mail über den festen Endpunkt `https://openidconnect.googleapis.com/v1/userinfo` mit `email_verified: true`. Ein zweiter Grant für dasselbe Google-Konto (`sub`) wird abgelehnt.
+- **Schreiben** braucht drei Freigaben: `--allow-calendar-write` beim Verbinden, den von Google tatsächlich gewährten Scope `calendar.events.owned` (zusätzlich beim Token-Refresh erneut geprüft) und einen Client-Grant mit `calendar_write`.
+- **Client-Grants** für Calendar/Contacts gelten nur für `gprod-…`-Konten und geben keinen Mail-Zugriff:
+
+```bash
+perch client add --label "Laptop Kalender" --allow calendar_read,calendar_write --account gprod-1a2b3c4d \
+  --token-file ~/.config/perch/clients/calendar.token
+perch client add --label "Kontakte" --allow contacts_read --account gprod-1a2b3c4d
+```
+
+  `calendar_read` → `calendar_list_calendars`, `calendar_list_events`, `calendar_get_event`; `contacts_read` → `contacts_list`, `contacts_get`; `calendar_write` → `calendar_create_event`, und zusammen mit `calendar_read` auch `calendar_update_event`. Mail-Capabilities (`read`, `draft`, `send`) gelten weiterhin nur für Mail-Konten; ein Grant, dessen Capabilities nicht zu den Konten passen, wird abgelehnt.
+- **Was Perch schreibt:** nur private Termine im eigenen Kalender. Keine Teilnehmer, Einladungen, Benachrichtigungen an andere (`sendUpdates=none`), Konferenzen, Anhänge oder Serien. Änderungen nur an Terminen ohne Gäste, die man selbst organisiert, mit `etag` (If-Match). Details: Meilenstein-Doku §5.
+  - **Sichtbarkeit:** nur `private` oder `confidential`. Beim Anlegen sendet Perch immer ausdrücklich `private`, wenn nichts angegeben ist. `default` erbt die Freigabe des Kalenders, die öffentlich sein kann; Perch lehnt `default` und `public` ab.
+  - **Erinnerungen:** nur Popup-Erinnerungen. Perch nutzt nie die Standard-Erinnerungen des Kalenders, weil diese E-Mails sein können: `useDefault: true` wird abgelehnt; ohne Angabe sendet Perch `{useDefault: false, overrides: []}`.
+  - **Ändern:** Ist ein bestehender Termin öffentlich, hat er `default`-Sichtbarkeit oder Standard- bzw. E-Mail-Erinnerungen, setzt Perch im **selben** PATCH `visibility: "private"` und behält nur die Popup-Erinnerungen. Ein öffentlicher Termin wird beim Ändern also privat.
+- **Wiederholen:** `calendar_create_event` braucht eine stabile `requestId`. Bei `indeterminate` (Ausgang unbekannt) dieselbe `requestId` und dieselbe `calendarId` erneut senden: Der Termin entsteht dann höchstens einmal, sonst kommt `conflict`. Perch wiederholt nie selbst.
+- **Widerruf:** <https://myaccount.google.com/permissions> oder `remove --revoke`.
 
 ## 5. Konten anzeigen, trennen, widerrufen
 
@@ -318,7 +353,7 @@ Token wechseln:
 
 | Tool | Hinweise |
 | --- | --- |
-| `perch_list_accounts` | IDs, Labels, E-Mail bzw. Token-Eigentümer, keine Secrets. Für Client-Grants nur die gewährten Mail-Konten, keine Google/Notion-Einträge |
+| `perch_list_accounts` | IDs, Labels, E-Mail bzw. Token-Eigentümer, keine Secrets. Für Client-Grants nur die gewährten Konten der gewährten Dienstfamilien (`mail` und/oder `googleProductivity`), keine Drive/Notion-Einträge |
 | `drive_search`, `drive_list_files` | `accountId` optional, ohne Angabe über alle Konten. `nextCursor`/`hasMore`, `partial`, `errors[]`, `incompleteSources` |
 | `drive_get_file`, `drive_read_file`, `drive_download_file`, `drive_export_file` | `maxBytes`: Default 48 KiB, explizit bis 10 MiB. Nur Text oder Base64, kein Schreiben ins Dateisystem |
 | `notion_search` | **Nur Titelsuche** über Seiten und Data Sources, keine Volltextsuche, eventuell unvollständig |
@@ -329,6 +364,14 @@ Token wechseln:
 | `mail_get_attachment` | Base64, über `maxBytes` abgelehnt (nie gekürzt) |
 | `mail_create_draft` | nur mit Client-Grant `draft` und Provider-Freigabe. Mit `replyToMessageId` zusätzlich `read`. Microsoft Graph: höchstens 4 000 000 Byte Base64-MIME pro Request (`message_too_large`) |
 | `mail_send` | nur mit Client-Grant `send` und Provider-Freigabe. Absender ist immer das gewählte Konto. Ergebnis `accepted` (vom Provider angenommen, **keine Zustellbestätigung**), `rejected` (nicht gesendet) oder `indeterminate` (Ausgang unbekannt, kein automatischer Retry: vor erneutem Senden „Gesendet“ prüfen). Mit `replyToMessageId` zusätzlich `read`. Anhänge nur als Base64, max. 10 MiB gesamt. Über HTTP max. 16 MiB Request (nur für Schreib-Clients). Microsoft Graph: lokal abgelehnt über 4 000 000 Byte Base64-MIME (ca. 2,2 MB Anhänge), laut Graph-Doku „limited to 4 MB“ |
+
+| `calendar_list_calendars` | Kalender aller lesbaren Calendar-Konten oder eines Kontos, mit Herkunft und Cursor |
+| `calendar_list_events` | Primärkalender aller Konten oder eine `calendarId` eines Kontos. Serien als Einzeltermine, pro Konto nach Start sortiert, Default ab jetzt. Ganztägig: `start.date`/`end.date` (Ende exklusiv, `endExclusive`), sonst `dateTime` mit Offset und ggf. `timeZone`. Beschreibung bis 8192 Zeichen |
+| `calendar_get_event` | Ein Termin inklusive `etag` |
+| `contacts_list` | Alle Kontakte seitenweise (keine Suche), nur Kontaktquellen, `personFields` aus einer Allowlist |
+| `contacts_get` | Ein Kontakt per `people/c…`. Profile fremder Google-Konten sind nicht abrufbar |
+| `calendar_create_event` | Nur mit Client-Grant `calendar_write` und Provider-Freigabe. Private Termine (`private`/`confidential`, ohne Angabe `private`) ohne Gäste/Benachrichtigungen an andere, nur Popup-Erinnerungen; `requestId` macht Wiederholungen idempotent. Ergebnis `created`, `conflict`, `rejected` oder `indeterminate` |
+| `calendar_update_event` | Nur mit `calendar_write` + `calendar_read`. PATCH mit `If-Match: etag`, `sendUpdates=none`, nur eigene Termine ohne Gäste und ohne Serie. Das Ergebnis ist immer privat und nur mit Popup-Erinnerungen (wird im selben PATCH gesetzt). Ergebnis `updated`, `precondition_failed`, `rejected` oder `indeterminate` |
 
 ### Ausgabegröße und Client-Limits
 
@@ -379,4 +422,7 @@ Vom Orchestrator am 2026-10-05 abgerufen und bestätigt. Das ist **dokumentation
 - Graph Berechtigungen: <https://learn.microsoft.com/en-us/graph/permissions-reference>
 - Microsoft Auth-Code-Flow mit PKCE: <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow>
 - GMX IMAP/SMTP: <https://hilfe.gmx.net/pop-imap/imap/imap-serverdaten.html>, <https://support.gmx.com/pop-imap/imap/server.html>
+- Google Calendar Scopes: <https://developers.google.com/workspace/calendar/api/auth>; Events insert/list/get/patch: <https://developers.google.com/workspace/calendar/api/v3/reference/events/insert> (bzw. `/list`, `/get`, `/patch`); ETags: <https://developers.google.com/workspace/calendar/api/guides/version-resources>; Fehler: <https://developers.google.com/workspace/calendar/api/guides/errors>; calendarList: <https://developers.google.com/workspace/calendar/api/v3/reference/calendarList/list>
+- People API: <https://developers.google.com/people/api/rest/v1/people.connections/list>, <https://developers.google.com/people/api/rest/v1/people/get>
+- OpenID Connect (Scopes `openid email`, `sub`, `email_verified`, userinfo): <https://developers.google.com/identity/openid-connect/openid-connect>
 - imapflow (`download` mit `maxBytes`): <https://imapflow.com/docs/api/imapflow-client/>. nodemailer SMTP/TLS: <https://nodemailer.com/smtp>

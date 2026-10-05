@@ -1,10 +1,14 @@
 // Smoke tests of the BUILT artifact (dist/cli.js) with a freshly initialised store.
-// No upstream (Google/Notion/Gmail/Graph/IMAP/SMTP) is contacted: the only mail account is a dummy
-// IMAP entry seeded directly into the store, and every mail call below is denied before any I/O.
+// No upstream (Google/Notion/Gmail/Graph/IMAP/SMTP/Calendar/People) is contacted: the only accounts are
+// dummy entries seeded directly into the store, and every mail/calendar call below is denied before any I/O.
+// Every child process additionally runs under the test-only offline guard (test/smoke/offlineGuard.mjs,
+// preloaded with --import): its fetch and outbound sockets are blocked and logged. The suite first proves
+// the guard is active in a child and finally asserts that the smoke run itself made zero network attempts.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -12,12 +16,17 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CredentialStore } from '../../src/store/credentialStore.js';
 import { dummySecret, makeTempDirs, type TempDirs } from '../support/fixtures.js';
 
-/** Read-only tool count (Drive/Notion 14 + mail read 3). Write tools need a client grant. */
-const READ_ONLY_TOOLS = 17;
+/** Read-only tool count (Drive/Notion 14 + mail read 3 + Calendar read 3 + Contacts read 2). Write tools need a client grant. */
+const READ_ONLY_TOOLS = 22;
 
 const CLI = path.resolve('dist/cli.js');
+const GUARD = pathToFileURL(path.resolve('test/smoke/offlineGuard.mjs')).href;
 let dirs: TempDirs;
 let env: Record<string, string>;
+let guardLog: string;
+
+const guardAttempts = async (file: string) =>
+  existsSync(file) ? (await readFile(file, 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l) as { kind: string; target: string }) : [];
 
 const text = (r: Awaited<ReturnType<Client['callTool']>>) => (r.content as Array<{ text: string }>)[0]!.text;
 
@@ -30,7 +39,36 @@ beforeAll(async () => {
     PERCH_DATA_DIR: dirs.dataDir,
     PERCH_KEY_FILE: dirs.keyFile,
     PERCH_HTTP_TOKEN_FILE: dirs.tokenFile,
+    // Network guard (test-only preload, works on every supported Node version): even a regression that
+    // let a call past authorization cannot reach Google or anything else; the attempt is logged instead.
+    NODE_OPTIONS: `--import=${GUARD}`,
+    PERCH_SMOKE_GUARD_LOG: '',
   };
+  // Prove the guard is active before any child touches the store: a probe child under the same options
+  // tries a token request and a raw TLS connect to Google. Both must be blocked and logged.
+  const probeLog = path.join(dirs.root, 'guard-probe.log');
+  const probe = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      `const tls = require('node:tls');
+       const out = { fetchName: globalThis.fetch.name };
+       fetch('https://oauth2.googleapis.com/token', { method: 'POST', body: 'grant_type=refresh_token' })
+         .then(() => { out.fetch = 'SENT'; }, (e) => { out.fetch = e.message; })
+         .then(() => { try { tls.connect(443, 'oauth2.googleapis.com'); out.tls = 'SENT'; } catch (e) { out.tls = e.message; } })
+         .then(() => console.log(JSON.stringify(out)));`,
+    ],
+    { env: { ...env, PERCH_SMOKE_GUARD_LOG: probeLog }, encoding: 'utf8', timeout: 15_000 },
+  );
+  expect(probe.status, probe.stderr).toBe(0);
+  const out = JSON.parse(probe.stdout);
+  expect(out.fetchName, 'offline guard not loaded in the child').toBe('perchSmokeOfflineFetch');
+  expect(out.fetch).toMatch(/offline guard: blocked fetch to https:\/\/oauth2\.googleapis\.com\/token/);
+  expect(out.tls).toMatch(/offline guard: blocked socket connect/);
+  expect((await guardAttempts(probeLog)).map((a) => a.kind)).toEqual(['fetch', 'connect']);
+  // From here on every child logs blocked attempts here; the last test asserts there were none.
+  guardLog = path.join(dirs.root, 'guard.log');
+  env.PERCH_SMOKE_GUARD_LOG = guardLog;
   const init = spawnSync(process.execPath, [CLI, 'init'], { env, encoding: 'utf8' });
   expect(init.status, init.stderr).toBe(0);
 });
@@ -199,5 +237,98 @@ describe('built artifact', () => {
       expect(text(r), name).toMatch(/revoked/i);
     }
     await client.close();
+  });
+
+  it('serves a Calendar client grant over stdio: capability-specific tools, no mail, denial before I/O, revocation', async () => {
+    const store = await CredentialStore.open({ dataDir: dirs.dataDir, keyFile: dirs.keyFile });
+    const now = new Date().toISOString();
+    await store.update((d) => {
+      for (const id of ['gprod-0000000a', 'gprod-0000000b']) {
+        d.googleProductivity.push({
+          id,
+          label: `Dummy ${id}`,
+          email: `${id}@example.test`,
+          sub: `1${id.slice(-2)}`,
+          clientId: dummySecret('C'),
+          clientSecret: dummySecret('S'),
+          refreshToken: dummySecret('RT'),
+          scopes: ['openid', 'https://www.googleapis.com/auth/userinfo.email', 'https://www.googleapis.com/auth/calendar.readonly', 'https://www.googleapis.com/auth/calendar.events.owned'],
+          services: ['calendar'],
+          allowCalendarWrite: true,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    });
+    const tokenFile = path.join(dirs.root, 'config', 'clients', 'calendar.token');
+    const add = spawnSync(
+      process.execPath,
+      [CLI, 'client', 'add', '--label', 'Cal', '--allow', 'calendar_read,calendar_write', '--account', 'gprod-0000000a', '--token-file', tokenFile],
+      { env, encoding: 'utf8' },
+    );
+    expect(add.status, add.stderr).toBe(0);
+    const grantId = (await store.read()).clients.find((c) => c.label === 'Cal')!.id;
+
+    const client = new Client({ name: 'smoke-calendar', version: '0.0.0' });
+    await client.connect(
+      new StdioClientTransport({ command: process.execPath, args: [CLI, 'serve', '--stdio'], env: { ...env, PERCH_CLIENT_TOKEN_FILE: tokenFile }, stderr: 'pipe' }),
+    );
+    const names = (await client.listTools()).tools.map((t) => t.name).sort();
+    expect(names).toEqual(['calendar_create_event', 'calendar_get_event', 'calendar_list_calendars', 'calendar_list_events', 'calendar_update_event', 'perch_list_accounts']);
+    const accounts = JSON.parse(text(await client.callTool({ name: 'perch_list_accounts', arguments: {} })));
+    expect(Object.keys(accounts).sort()).toEqual(['connection', 'googleProductivity']);
+    expect(accounts.googleProductivity.map((a: { accountId: string }) => a.accountId)).toEqual(['gprod-0000000a']);
+    const event = { requestId: 'smoke-req-0001', summary: 's', start: { date: '2026-10-09' }, end: { date: '2026-10-10' } };
+    const other = await client.callTool({ name: 'calendar_create_event', arguments: { accountId: 'gprod-0000000b', ...event } });
+    expect(other.isError).toBe(true);
+    expect(text(other)).toMatch(/not granted/i);
+    const invite = await client.callTool({ name: 'calendar_create_event', arguments: { accountId: 'gprod-0000000a', ...event, attendees: [{ email: 'x@example.test' }] } });
+    expect(invite.isError).toBe(true);
+    expect(text(invite)).toMatch(/attendees is not supported/i);
+    const mail = await client.callTool({ name: 'mail_search', arguments: {} }).catch(() => ({ isError: true }));
+    expect(mail.isError).toBe(true);
+
+    await store.update((d) => {
+      d.clients.find((c) => c.id === grantId)!.capabilities = ['calendar_read'];
+    });
+    const narrowed = await client.callTool({ name: 'calendar_create_event', arguments: { accountId: 'gprod-0000000a', ...event } });
+    expect(narrowed.isError).toBe(true);
+    expect(text(narrowed)).toMatch(/not granted/i);
+
+    const remove = spawnSync(process.execPath, [CLI, 'client', 'remove', grantId], { env, encoding: 'utf8' });
+    expect(remove.status, remove.stderr).toBe(0);
+    for (const [name, args] of [
+      ['perch_list_accounts', {}],
+      ['calendar_list_events', {}],
+      ['calendar_create_event', { accountId: 'gprod-0000000a', ...event }],
+    ] as const) {
+      const r = await client.callTool({ name, arguments: args });
+      expect(r.isError, name).toBe(true);
+      expect(text(r), name).toMatch(/revoked/i);
+    }
+    await client.close();
+  });
+
+  it('keeps a mail-only client free of Calendar/Contacts tools in the built artifact', async () => {
+    const tokenFile = path.join(dirs.root, 'config', 'clients', 'mailonly.token');
+    const add = spawnSync(process.execPath, [CLI, 'client', 'add', '--label', 'MailOnly', '--allow', 'read', '--account', 'imap-0000000a', '--token-file', tokenFile], {
+      env,
+      encoding: 'utf8',
+    });
+    expect(add.status, add.stderr).toBe(0);
+    const client = new Client({ name: 'smoke-mailonly', version: '0.0.0' });
+    await client.connect(
+      new StdioClientTransport({ command: process.execPath, args: [CLI, 'serve', '--stdio'], env: { ...env, PERCH_CLIENT_TOKEN_FILE: tokenFile }, stderr: 'pipe' }),
+    );
+    const names = (await client.listTools()).tools.map((t) => t.name).sort();
+    expect(names).toEqual(['mail_get_attachment', 'mail_read_message', 'mail_search', 'perch_list_accounts']);
+    const listed = text(await client.callTool({ name: 'perch_list_accounts', arguments: {} }));
+    expect(listed).not.toMatch(/gprod-|googleProductivity/);
+    await client.close();
+  });
+
+  // Runs last (tests in a file run in order): no child process attempted any network connection.
+  it('made zero network attempts in all child processes (offline guard log is empty)', async () => {
+    expect(await guardAttempts(guardLog)).toEqual([]);
   });
 });
