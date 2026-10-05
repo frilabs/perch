@@ -20,8 +20,9 @@ import {
  * an explicit local client grant, and only for the accounts listed in that grant. Mail capabilities
  * apply to mail accounts only; calendar/contacts capabilities to Google productivity accounts only.
  *
- * This is NOT multi-user isolation: every principal acts for the one operator who owns the
- * credential store. Grants narrow what a client may do; they do not separate users.
+ * A principal always acts inside ONE namespace (the store it was resolved from): grants narrow what a
+ * client may do there. Separation between users is the namespace model (src/users/): every user has
+ * its own store, key and context, and tokens resolve to exactly one namespace.
  */
 export interface Principal {
   kind: 'operator_readonly' | 'client';

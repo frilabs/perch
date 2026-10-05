@@ -216,7 +216,7 @@ type WriteOutcome = { ok: true; body: Buffer } | { ok: false; status: number; me
 /** Splits `<base64url timeMin>.<fan-out cursor>`; an explicit timeMin must match the cursor's. */
 function splitEventsCursor(cursor: string | undefined, explicit: string | undefined): { timeMin: string; inner?: string } {
   if (!cursor) return { timeMin: explicit ?? new Date().toISOString() };
-  const m = /^([A-Za-z0-9_-]{1,200})\.([A-Za-z0-9_-]+)$/.exec(cursor);
+  const m = /^([A-Za-z0-9_-]{1,200})\.([A-Za-z0-9_~-]+)$/.exec(cursor);
   const timeMin = m ? Buffer.from(m[1]!, 'base64url').toString('utf8') : '';
   if (!m || (explicit !== undefined && explicit !== timeMin)) throw new PerchError('Cursor does not belong to this query; repeat the same arguments', 'bad_cursor');
   return { timeMin, inner: m[2]! };
@@ -257,6 +257,7 @@ export class CalendarService {
       kind: 'calendars',
       queryKey: { s: pageSize, a: opts.accountId ?? '*' },
       sources: targets.map((a) => ({ id: a.id, label: a.label })),
+      seal: this.store,
       ...(opts.cursor ? { cursor: opts.cursor } : {}),
       fetchPage: async (source, cursor) => {
         const account = byId.get(source.id)!;
@@ -294,6 +295,7 @@ export class CalendarService {
       // timeMin is part of the query: a default "now" is fixed into the cursor's first page.
       queryKey: { c: calendarId, a: opts.accountId ?? '*', s: pageSize, q: opts.query ?? '', tz: opts.timeZone ?? '', min: timeMin, max: opts.timeMax ?? '' },
       sources: targets.map((a) => ({ id: a.id, label: a.label })),
+      seal: this.store,
       ...(inner ? { cursor: inner } : {}),
       fetchPage: async (source, cursor) => {
         const account = byId.get(source.id)!;

@@ -124,6 +124,7 @@ export class MailService {
       kind: 'mail',
       queryKey: { q: opts.query ?? '', f: opts.folder ?? '', s: pageSize, a: opts.accountId ?? '*' },
       sources: targets.map((e) => ({ id: e.account.id, label: e.account.label })),
+      seal: this.store,
       ...(opts.cursor ? { cursor: opts.cursor } : {}),
       fetchPage: async (source, cursor) => {
         const e = byId.get(source.id)!;

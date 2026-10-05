@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { lstat, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
@@ -120,6 +121,26 @@ const ClientGrantSchema = z.object({
   createdAt: z.string(),
 });
 
+/** Upper bound on registry entries (active and removed: ids are never reused, entries never deleted). */
+export const MAX_USERS = 100;
+export const USER_ID_PATTERN = /^user-[a-f0-9]{16}$/;
+/** Namespace of the legacy store at the configured data dir: the local operator. */
+export const ROOT_NAMESPACE = 'root';
+
+/**
+ * Admin-provisioned user (root store only). The user's credentials live in a physically separate store
+ * and key (see src/users/registry.ts); the registry holds membership and the SHA-256 of the user's
+ * read-only token, never the token.
+ */
+const UserSchema = z.object({
+  id: z.string().regex(USER_ID_PATTERN),
+  label: z.string().min(1).max(100),
+  status: z.enum(['active', 'removed']),
+  readTokenSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  createdAt: z.string(),
+  removedAt: z.string().optional(),
+});
+
 const StoreDataSchema = z.object({
   version: z.literal(1),
   google: z.array(GoogleAccountSchema),
@@ -131,6 +152,12 @@ const StoreDataSchema = z.object({
   clients: z.array(ClientGrantSchema).default([]),
   // Added by the Google productivity milestone.
   googleProductivity: z.array(GoogleProductivityAccountSchema).default([]),
+  // Added by the user-isolation milestone (root store only; must stay empty in user stores).
+  users: z
+    .array(UserSchema)
+    .max(MAX_USERS)
+    .default([])
+    .refine((users) => new Set(users.map((u) => u.id)).size === users.length, 'duplicate user id'),
 });
 
 export type GoogleAccount = z.infer<typeof GoogleAccountSchema>;
@@ -140,6 +167,7 @@ export type MicrosoftAccount = z.infer<typeof MicrosoftAccountSchema>;
 export type ImapAccount = z.infer<typeof ImapAccountSchema>;
 export type GoogleProductivityAccount = z.infer<typeof GoogleProductivityAccountSchema>;
 export type ClientGrant = z.infer<typeof ClientGrantSchema>;
+export type UserRecord = z.infer<typeof UserSchema>;
 export type Capability = (typeof CAPABILITIES)[number];
 export type MailCapability = (typeof MAIL_CAPABILITIES)[number];
 export type ProductivityCapability = (typeof PRODUCTIVITY_CAPABILITIES)[number];
@@ -153,7 +181,7 @@ export interface StorePaths {
 export const storeFilePath = (dataDir: string) => path.join(dataDir, 'store.enc');
 const lockFilePath = (dataDir: string) => path.join(dataDir, 'store.lock');
 
-const emptyData = (): StoreData => ({ version: 1, google: [], notion: [], gmail: [], microsoft: [], imap: [], clients: [], googleProductivity: [] });
+const emptyData = (): StoreData => ({ version: 1, google: [], notion: [], gmail: [], microsoft: [], imap: [], clients: [], googleProductivity: [], users: [] });
 
 async function realpathOrResolve(p: string): Promise<string> {
   // Resolve the deepest existing ancestor so symlinked parents cannot hide containment.
@@ -172,11 +200,14 @@ async function realpathOrResolve(p: string): Promise<string> {
   }
 }
 
+/** True if `inner` is `outer` or lies below it (after resolving symlinked ancestors). */
+export async function isWithin(outer: string, inner: string): Promise<boolean> {
+  const rel = path.relative(await realpathOrResolve(outer), await realpathOrResolve(inner));
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
 async function assertKeyOutsideDataDir(paths: StorePaths): Promise<void> {
-  const data = await realpathOrResolve(paths.dataDir);
-  const key = await realpathOrResolve(paths.keyFile);
-  const rel = path.relative(data, key);
-  if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+  if (await isWithin(paths.dataDir, paths.keyFile)) {
     throw new PerchError('The key file must live outside the data directory (set PERCH_KEY_FILE)', 'insecure_path');
   }
 }
@@ -226,6 +257,19 @@ export async function initStore(paths: StorePaths): Promise<{ createdKey: boolea
   });
 }
 
+/**
+ * Opaque pagination cursors are sealed with a MAC keyed per store (namespace): a cursor issued by one
+ * namespace, or for another query kind/account/parent, or edited by the caller, is rejected before any
+ * provider request. Format: base64url(payload) "~" base64url(HMAC-SHA256 truncated to 128 bits).
+ */
+export interface CursorSeal {
+  sealCursor(kind: string, payload: string): string;
+  openCursor(kind: string, cursor: string): string;
+}
+
+const CURSOR_MAC_CHARS = 22;
+const badCursor = () => new PerchError('Invalid cursor: it does not belong to this query, account or connection; repeat the same arguments', 'bad_cursor');
+
 interface CacheStamp {
   ino: number;
   size: number;
@@ -233,17 +277,29 @@ interface CacheStamp {
   ctimeMs: number;
 }
 
-export class CredentialStore {
+export class CredentialStore implements CursorSeal {
   private cache: { stamp: CacheStamp; data: StoreData } | null = null;
   private queue: Promise<unknown> = Promise.resolve();
+  private readonly cursorKey: Buffer;
 
   private constructor(
     private readonly paths: StorePaths,
     private readonly key: Buffer,
-  ) {}
+    /** 'root' for the operator store, otherwise the owning user id. Never derived from caller input. */
+    readonly namespace: string,
+  ) {
+    this.cursorKey = createHmac('sha256', key).update(`perch-cursor-v1\u0000${namespace}`).digest();
+  }
 
-  /** Opens an initialised store. Never creates keys or files. */
-  static async open(paths: StorePaths): Promise<CredentialStore> {
+  get storePaths(): StorePaths {
+    return { ...this.paths };
+  }
+
+  /**
+   * Opens an initialised store. Never creates keys or files. `namespace` is set by the caller that chose
+   * the paths (root for the configured store, the user id for a provisioned user's store).
+   */
+  static async open(paths: StorePaths, opts: { namespace?: string } = {}): Promise<CredentialStore> {
     await assertKeyOutsideDataDir(paths);
     const storeFile = storeFilePath(paths.dataDir);
     const hasStore = await pathExists(storeFile);
@@ -257,9 +313,42 @@ export class CredentialStore {
     if (!hasStore || !hasKey) throw new PerchError('Perch is not initialised. Run: perch init', 'not_initialised');
     const dirStat = await lstat(paths.dataDir);
     if (dirStat.isSymbolicLink()) throw new PerchError(`Refusing symlinked directory: ${paths.dataDir}`, 'insecure_path');
-    const store = new CredentialStore(paths, parseKey(await readPrivateFile(paths.keyFile)));
+    const store = new CredentialStore(paths, parseKey(await readPrivateFile(paths.keyFile)), opts.namespace ?? ROOT_NAMESPACE);
     await store.read();
     return store;
+  }
+
+  /** Fails closed if the key file was removed, replaced or made insecure since the store was opened. */
+  async assertKeyUnchanged(): Promise<void> {
+    let current: Buffer;
+    try {
+      current = parseKey(await readPrivateFile(this.paths.keyFile));
+    } catch (err) {
+      if (err instanceof PerchError && err.code === 'not_found') {
+        throw new PerchError(`Key file is missing (${this.paths.keyFile}). Restore the key from backup.`, 'key_missing');
+      }
+      throw err;
+    }
+    if (current.length !== this.key.length || !timingSafeEqual(current, this.key)) {
+      throw new PerchError(`Key file ${this.paths.keyFile} changed since the store was opened; refusing to continue`, 'wrong_key');
+    }
+  }
+
+  private cursorMac(kind: string, body: string): string {
+    return createHmac('sha256', this.cursorKey).update(`${kind}\u0000${body}`).digest('base64url').slice(0, CURSOR_MAC_CHARS);
+  }
+
+  sealCursor(kind: string, payload: string): string {
+    const body = Buffer.from(payload, 'utf8').toString('base64url');
+    return `${body}~${this.cursorMac(kind, body)}`;
+  }
+
+  openCursor(kind: string, cursor: string): string {
+    const m = /^([A-Za-z0-9_-]{1,32768})~([A-Za-z0-9_-]{22})$/.exec(cursor);
+    if (!m) throw badCursor();
+    const expected = Buffer.from(this.cursorMac(kind, m[1]!));
+    if (!timingSafeEqual(expected, Buffer.from(m[2]!))) throw badCursor();
+    return Buffer.from(m[1]!, 'base64url').toString('utf8');
   }
 
   /** Returns current data, re-decrypting only when the file on disk changed. */

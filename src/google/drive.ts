@@ -163,6 +163,7 @@ export class DriveService {
       kind: 'drive',
       queryKey: { q, pageSize, accountId: input.accountId ?? null },
       sources: accounts,
+      seal: this.store,
       cursor: input.cursor,
       fetchPage: async (source, pageToken) => {
         const a = accounts.find((x) => x.id === source.id)!;
