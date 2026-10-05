@@ -322,7 +322,7 @@ describe('client grants are owned by their namespace [MOCK upstreams]', () => {
 
     const m = await http(mailA.token);
     const tools = (await m.listTools()).tools.map((t) => t.name).sort();
-    expect(tools).toEqual(['mail_create_draft', 'mail_get_attachment', 'mail_read_message', 'mail_search', 'mail_send', 'perch_list_accounts']);
+    expect(tools).toEqual(['mail_create_draft', 'mail_get_attachment', 'mail_read_message', 'mail_search', 'mail_send', 'mail_send_status', 'perch_list_accounts']);
     const listed = await call(m, 'perch_list_accounts');
     expect(Object.keys(listed.json).sort()).toEqual(['connection', 'mail']);
     expect(listed.json.connection).toMatchObject({ kind: 'client', user: A.id });
@@ -330,9 +330,9 @@ describe('client grants are owned by their namespace [MOCK upstreams]', () => {
     const used = await ioOf(async () => {
       const draft = await call(m, 'mail_create_draft', { accountId: IDS.imap, to: ['x@example.test'], subject: 'Draft A', text: 'Hello from A' });
       expect(draft.isError, draft.text).toBe(false);
-      const sent = await call(m, 'mail_send', { accountId: IDS.imap, to: ['x@example.test'], subject: 'Send A', text: 'Hello from A' });
+      const sent = await call(m, 'mail_send', { requestId: 'iso-send-0001', accountId: IDS.imap, to: ['x@example.test'], subject: 'Send A', text: 'Hello from A' });
       expect(sent.json).toMatchObject({ status: 'accepted', accountId: IDS.imap });
-      const gsent = await call(m, 'mail_send', { accountId: IDS.gmail, to: ['x@example.test'], subject: 'Gmail send A', text: 'Hello from A' });
+      const gsent = await call(m, 'mail_send', { requestId: 'iso-send-0002', accountId: IDS.gmail, to: ['x@example.test'], subject: 'Gmail send A', text: 'Hello from A' });
       expect(gsent.json, gsent.text).toMatchObject({ status: 'accepted', accountId: IDS.gmail });
     });
     expect(used.length).toBeGreaterThan(0);
@@ -372,7 +372,7 @@ describe('client grants are owned by their namespace [MOCK upstreams]', () => {
     // B's client with the same account id sends from B's account only.
     const mb = await http(mailB.token);
     const bUsed = await ioOf(async () => {
-      expect((await call(mb, 'mail_send', { accountId: IDS.imap, to: ['x@example.test'], subject: 'Send B', text: 'Hello from B' })).json).toMatchObject({ status: 'accepted' });
+      expect((await call(mb, 'mail_send', { requestId: 'iso-send-0003', accountId: IDS.imap, to: ['x@example.test'], subject: 'Send B', text: 'Hello from B' })).json).toMatchObject({ status: 'accepted' });
     });
     expect(bUsed.filter((u) => !u.startsWith('B '))).toEqual([]);
     expect(B.world.smtpSent.join()).toContain('Send B');
@@ -384,7 +384,7 @@ describe('client grants are owned by their namespace [MOCK upstreams]', () => {
     const rootMail = await grant(rootStore, ['read', 'send'], [IDS.imap]);
     const c = await http(rootMail.token);
     const used = await ioOf(async () => {
-      expect((await call(c, 'mail_send', { accountId: IDS.imap, to: ['x@example.test'], subject: 'Send ROOT', text: 'x' })).json).toMatchObject({ status: 'accepted' });
+      expect((await call(c, 'mail_send', { requestId: 'iso-send-0004', accountId: IDS.imap, to: ['x@example.test'], subject: 'Send ROOT', text: 'x' })).json).toMatchObject({ status: 'accepted' });
     });
     expect(used.filter((u) => !u.startsWith('ROOT '))).toEqual([]);
     expect(A.world.smtpSent).toEqual([]);
@@ -424,7 +424,7 @@ describe('membership and grant revocation [MOCK upstreams]', () => {
         [mail, 'perch_list_accounts', {}],
         [mail, 'mail_read_message', { accountId: IDS.imap, messageId: 'imap:SU5CT1g:1:7' }],
         [mail, 'mail_create_draft', { accountId: IDS.imap, to: ['x@example.test'], subject: 's', text: 't' }],
-        [mail, 'mail_send', { accountId: IDS.imap, to: ['x@example.test'], subject: 's', text: 't' }],
+        [mail, 'mail_send', { requestId: 'iso-send-0005', accountId: IDS.imap, to: ['x@example.test'], subject: 's', text: 't' }],
         [cal, 'calendar_create_event', { accountId: IDS.gprod, requestId: 'req-after-removal', summary: 's', start: { date: '2026-10-09' }, end: { date: '2026-10-10' } }],
         [cal, 'calendar_update_event', { accountId: IDS.gprod, calendarId: 'primary', eventId: 'evta00001', etag: '"1"', summary: 'x' }],
       ] as const) {
@@ -445,13 +445,13 @@ describe('membership and grant revocation [MOCK upstreams]', () => {
   it('client revocation and narrowing still apply inside a user namespace (persistent session)', async () => {
     const g = await grant(A.store, ['read', 'send'], [IDS.imap, IDS.gmail]);
     const c = await persistent(g.token);
-    expect((await call(c, 'mail_send', { accountId: IDS.imap, to: ['x@example.test'], subject: 's', text: 't' })).isError).toBe(false);
+    expect((await call(c, 'mail_send', { requestId: 'iso-send-0006', accountId: IDS.imap, to: ['x@example.test'], subject: 's', text: 't' })).isError).toBe(false);
     // Narrow: same token hash, send removed.
     await A.store.update((d) => {
       d.clients[0]!.capabilities = ['read'];
     });
     const narrowed = await ioOf(async () => {
-      const r = await call(c, 'mail_send', { accountId: IDS.imap, to: ['x@example.test'], subject: 's2', text: 't' });
+      const r = await call(c, 'mail_send', { requestId: 'iso-send-0007', accountId: IDS.imap, to: ['x@example.test'], subject: 's2', text: 't' });
       expect(r.isError).toBe(true);
       expect(r.text).toMatch(/not granted/i);
     });

@@ -17,10 +17,17 @@ Der Funktionsumfang bleibt unverändert.
 
 **Nachtrag 2026-10-05 (Productivity-Meilenstein):** `docs/GOOGLE_PRODUCTIVITY_MILESTONE.md` ergänzt Google Calendar (lesen, private Termine anlegen/ändern) und Contacts (lesen) mit eigenem OAuth-Grant und den Client-Capabilities `calendar_read`, `calendar_write`, `contacts_read`. Neue feste Origins: `people.googleapis.com`, `openidconnect.googleapis.com` (Calendar läuft über `www.googleapis.com`). Schreibrouten nur mit dem Tag `calendar_write`. Die Drive/Notion-Kriterien gelten unverändert; der Betreiber bleibt read-only.
 
-**Nachtrag 2026-10-05 (Nutzer-Isolations-Meilenstein, uncommittet):** `docs/USER_ISOLATION_MILESTONE.md` ergänzt admin-angelegte Nutzer.
+**Nachtrag 2026-10-05 (Nutzer-Isolations-Meilenstein, PR #5 `560c6ae`, gepusht, CI grün):** `docs/USER_ISOLATION_MILESTONE.md` ergänzt admin-angelegte Nutzer.
 - Jeder Nutzer bekommt einen eigenen Store und Schlüssel, einen eigenen Kontext, ein Read-only-Token und eigene Client-Grants.
 - Der bisherige Store ist der Root-Namespace des Betreibers und bleibt unverändert. Das globale Token bleibt read-only und auf Root beschränkt.
 - Cursor sind jetzt pro Namespace versiegelt (HMAC). Ältere Cursor werden abgelehnt.
+
+**Nachtrag 2026-10-05 (Mail-Workflow- und Audit-Meilenstein, Branch `feat/perch-mail-workflow`, uncommittet):** `docs/MAIL_WORKFLOW_MILESTONE.md`.
+- `mail_send` verlangt jetzt eine `requestId` (bewusster Bruch vor dem Release). Wiederholte oder parallele Aufrufe mit gleichem Schlüssel und Inhalt senden genau einmal; anderer Inhalt unter demselben Schlüssel scheitert vor jeder Provider-I/O.
+- Ein unterbrochener Versand bleibt dauerhaft „unbekannt“ und wird nie automatisch erneut gesendet.
+- Neues Status-Tool `mail_send_status` (nur für Send-Grants, nur eigene Anfragen).
+- Jeder MCP-Tool-Aufruf wird ohne Inhalte auditiert, im verschlüsselten Ledger `mail-workflow.enc` pro Namespace (Unterschlüssel des Store-Schlüssels, eigenes Lock `mail-workflow.lock`). Schreibende Tools werden vor dem Provider-Aufruf protokolliert (fail closed). Einsicht nur lokal: `perch audit list`.
+- Das Store-Schema (Version 1) und der Krypto-Algorithmus bleiben unverändert.
 
 **Sicherheitsmodell nach dem Review vom 2026-10-05:** Das globale Token und stdio ohne Client-Token bleiben der Read-only-Betreiber mit allen bisherigen Tools. Client-Grants sind ausschließlich für Mail: keine Drive/Notion-Tools oder -Metadaten, nur die benannten Konto-IDs, Tools nur gemäß `read`/`draft`/`send`. Der Grant wird vor jedem Tool-Aufruf neu aus dem Store aufgelöst (stdio und HTTP); Widerruf oder Einschränkung schlagen ohne Provider-Aufruf fehl. Details: `docs/EMAIL_MILESTONE.md` §2.
 

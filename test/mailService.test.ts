@@ -116,7 +116,8 @@ async function client(capabilities: Array<'read' | 'draft' | 'send'>, accountIds
   return (await principalForClientToken(store, token))!;
 }
 
-const outgoing = { to: ['friend@example.test'], subject: 'Hi', text: 'Body' };
+// requestId: the idempotency key every send needs (mail workflow milestone); drafts ignore it.
+const outgoing = { to: ['friend@example.test'], subject: 'Hi', text: 'Body', requestId: 'mail-service-test-0001' };
 
 describe('MailService [MOCK providers]', () => {
   it('lists accounts with provenance and what this principal may do', async () => {
@@ -210,7 +211,7 @@ describe('MailService [MOCK providers]', () => {
 });
 
 describe('reply context needs "read" [MOCK providers]', () => {
-  const reply = { accountId: 'imap-0000000b', to: ['me-attacker@example.test'], text: 'x', replyToMessageId: 'imap:SU5CT1g:1:7' };
+  const reply = { accountId: 'imap-0000000b', to: ['me-attacker@example.test'], text: 'x', replyToMessageId: 'imap:SU5CT1g:1:7', requestId: 'mail-service-reply-0001' };
 
   it('denies a send-only grant before any provider I/O (no subject leak through "Re: …")', async () => {
     const p = await client(['send'], ['imap-0000000b']);
