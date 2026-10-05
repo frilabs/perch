@@ -2,9 +2,9 @@
   "name": "perch",
   "version": "0.1.0",
   "private": true,
-  "description": "Read-only multi-account Google Drive + multi-workspace Notion MCP server",
+  "description": "Self-hosted MCP connector gateway: read-only multi-account Google Drive and Notion, plus Gmail, Microsoft Graph and IMAP/SMTP mail (search, read, attachments; drafts and send only via explicit per-client grants)",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "engines": {
     "node": ">=22.12.0"
   },
@@ -12,14 +12,17 @@
     "perch": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "smoke": "npm run build && vitest run --config vitest.smoke.config.ts",
-    "check": "npm run typecheck && npm test && npm run smoke"
+    "check": "npm run typecheck && npm test && npm run smoke && npm run licenses:check",
+    "licenses:check": "node scripts/licenses.mjs check",
+    "licenses:generate": "node scripts/licenses.mjs generate"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.0",
