@@ -40,7 +40,7 @@ const RECONNECT_CODES = new Set(['invalid_grant', 'interaction_required', 'conse
  * cannot be persisted (the new access token is then neither cached nor returned).
  */
 export class RefreshingTokenProvider<A extends RefreshableAccount> {
-  private cache = new Map<string, { token: string; expiresAt: number; rtHash: string }>();
+  private cache = new Map<string, { token: string; expiresAt: number; rtHash: string; scopes?: string[] }>();
   private inflight = new Map<string, Promise<string>>();
 
   constructor(
@@ -63,6 +63,14 @@ export class RefreshingTokenProvider<A extends RefreshableAccount> {
       this.inflight.set(key, p);
     }
     return p;
+  }
+
+  /**
+   * Scopes the provider reported with the currently cached access token (refresh responses carry
+   * `scope`), or undefined when unknown. Lets callers fail closed when a scope was revoked upstream.
+   */
+  lastGrantedScopes(accountId: string): string[] | undefined {
+    return this.cache.get(accountId)?.scopes;
   }
 
   /** Drops the cached access token (e.g. after the provider answered 401). */
@@ -124,6 +132,7 @@ export class RefreshingTokenProvider<A extends RefreshableAccount> {
       token: tok.access_token,
       expiresAt: this.now() + (tok.expires_in ?? 0) * 1000,
       rtHash: currentHash,
+      ...(typeof tok.scope === 'string' ? { scopes: tok.scope.split(/\s+/).filter(Boolean) } : {}),
     });
     return tok.access_token;
   }

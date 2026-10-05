@@ -8,6 +8,13 @@ import { createPerchContext } from '../context.js';
 import { PerchError, safeMessage } from '../errors.js';
 import { registerGoogleAccount, removeGoogleAccount } from '../google/accounts.js';
 import { DEFAULT_AUTH_TIMEOUT_MS, MAX_AUTH_TIMEOUT_MS, parseClientFile, runLoopbackAuthorization } from '../google/oauth.js';
+import {
+  parseServices,
+  productivityScopesFor,
+  registerProductivityAccount,
+  removeProductivityAccount,
+  runProductivityAuthorization,
+} from '../google/productivity.js';
 import { createGmailTokenProvider, gmailScopesFor, registerGmailAccount, removeGmailAccount } from '../mail/gmailAccounts.js';
 import { addImapAccount, removeImapAccount, verifyImapAccount } from '../mail/imapAccounts.js';
 import { IMAP_PRESETS } from '../mail/imapPresets.js';
@@ -33,7 +40,7 @@ export interface CliIo {
   imapVerify?: (account: ImapAccount) => Promise<void>;
 }
 
-const USAGE = `perch ${PERCH_VERSION} - Google Drive + Notion + mail MCP server (read-only unless a client grant allows more)
+const USAGE = `perch ${PERCH_VERSION} - Google Drive + Notion + mail + Calendar/Contacts MCP server (read-only unless a client grant allows more)
 
 Usage:
   perch init                                   create key, encrypted store and HTTP token (if missing)
@@ -53,7 +60,11 @@ Usage:
                  [--imap-host H --imap-port N --smtp-host H --smtp-port N --smtp-security tls|starttls]
                  [--allow-drafts] [--allow-send] [--drafts-mailbox NAME]   password via masked prompt
   perch imap presets | list | remove ID
-  perch client add --label NAME --allow read,draft,send --account ID [--account ID ...] [--token-file PATH]
+  perch google-productivity add --label NAME --services calendar,contacts [--allow-calendar-write]
+                      [--port N] [--timeout SECONDS] [--login-hint EMAIL]
+  perch google-productivity list | remove ID [--revoke]
+  perch client add --label NAME --allow CAPS --account ID [--account ID ...] [--token-file PATH]
+                      CAPS: read,draft,send (mail accounts); calendar_read,calendar_write,contacts_read (gprod accounts)
   perch client list | remove ID
   perch token rotate                           replace the HTTP bearer token file
 
@@ -72,7 +83,16 @@ async function openStore(config: PerchConfig) {
   return CredentialStore.open({ dataDir: config.dataDir, keyFile: config.keyFile });
 }
 
-type AccountSection = 'all' | 'google' | 'notion' | 'gmail' | 'microsoft' | 'imap';
+type AccountSection = 'all' | 'google' | 'notion' | 'gmail' | 'microsoft' | 'imap' | 'productivity';
+
+function formatProductivity(data: StoreData): string[] {
+  const lines = ['Google Calendar/Contacts accounts:'];
+  if (!data.googleProductivity.length) lines.push('  (none)');
+  for (const a of data.googleProductivity) {
+    lines.push(`  ${a.id}  "${a.label}"  ${a.email}  ${a.services.join(',')}${a.allowCalendarWrite ? ' (calendar write)' : ' (read-only)'}  connected ${a.createdAt}`);
+  }
+  return lines;
+}
 
 function formatMail(data: StoreData, which: AccountSection): string[] {
   const rows = [
@@ -96,6 +116,7 @@ function formatMail(data: StoreData, which: AccountSection): string[] {
 
 function formatAccounts(data: StoreData, which: AccountSection): string {
   if (which === 'gmail' || which === 'microsoft' || which === 'imap') return `${formatMail(data, which).join('\n')}\n`;
+  if (which === 'productivity') return `${formatProductivity(data).join('\n')}\n`;
   const lines: string[] = [];
   if (which !== 'notion') {
     lines.push('Google accounts:');
@@ -110,7 +131,7 @@ function formatAccounts(data: StoreData, which: AccountSection): string {
       lines.push(`  ${w.id}  "${w.label}"${owner}  connected ${w.createdAt}`);
     }
   }
-  if (which === 'all') lines.push(...formatMail(data, 'all'));
+  if (which === 'all') lines.push(...formatMail(data, 'all'), ...formatProductivity(data));
   return `${lines.join('\n')}\n`;
 }
 
@@ -348,6 +369,45 @@ async function cmdMicrosoft(config: PerchConfig, io: CliIo, sub: string | undefi
   io.stdout(`Connected Microsoft account ${account.id} (${account.email}) as "${account.label}" (${describeOptIns(values)}).\n`);
 }
 
+async function cmdProductivity(config: PerchConfig, io: CliIo, sub: string | undefined, rest: string[], values: Record<string, unknown>) {
+  const upstream = new Upstream(io.transport ?? createFetchTransport());
+  const store = await openStore(config);
+  if (sub === 'list') return io.stdout(formatAccounts(await store.read(), 'productivity'));
+  if (sub === 'remove') {
+    const id = rest[0];
+    if (!id) throw new UsageError('Usage: perch google-productivity remove ID [--revoke]');
+    const r = await removeProductivityAccount(store, upstream, id, { revoke: Boolean(values.revoke) });
+    io.stdout(`Removed ${id} locally.${r.revoked ? ' The grant was revoked at Google.' : ''}\n`);
+    if (!values.revoke) io.stdout('The Google grant is still valid; revoke it at https://myaccount.google.com/permissions or rerun with --revoke.\n');
+    return;
+  }
+  if (sub !== 'add') throw new UsageError('Usage: perch google-productivity add|list|remove');
+  if (typeof values.label !== 'string') throw new UsageError('--label is required');
+  if (typeof values.services !== 'string') throw new UsageError('--services is required: calendar, contacts or calendar,contacts');
+  const services = parseServices(values.services.split(','));
+  const allowCalendarWrite = Boolean(values['allow-calendar-write']);
+  productivityScopesFor({ services, allowCalendarWrite });
+  const { port, timeoutMs } = oauthTiming(values);
+  if (!config.googleClientFile) {
+    throw new PerchError('Set PERCH_GOOGLE_CLIENT_FILE to the JSON of your Google "Desktop app" OAuth client', 'bad_config');
+  }
+  const client = parseClientFile((await readPrivateFile(config.googleClientFile)).toString('utf8'));
+  const what = services.map((s) => (s === 'calendar' && allowCalendarWrite ? 'calendar (read + write own events)' : `${s} (read-only)`)).join(', ');
+  const grant = await runProductivityAuthorization({
+    client,
+    upstream,
+    services,
+    allowCalendarWrite,
+    port,
+    timeoutMs,
+    ...(typeof values['login-hint'] === 'string' ? { loginHint: values['login-hint'] } : {}),
+    onAuthUrl: (url) => printAuthUrl(io, `Google ${what} access`, url, timeoutMs),
+  });
+  const account = await registerProductivityAccount(store, upstream, { label: values.label, client, grant, services, allowCalendarWrite });
+  io.stdout(`Connected Google account ${account.id} (${account.email}) as "${account.label}" for ${what}.\n`);
+  if (allowCalendarWrite) io.stdout(`Calendar writes additionally need a client grant: perch client add --allow calendar_read,calendar_write --account ${account.id}\n`);
+}
+
 function optPort(values: Record<string, unknown>, name: string): number | undefined {
   const v = values[name];
   if (v === undefined) return undefined;
@@ -428,7 +488,9 @@ async function cmdClient(config: PerchConfig, io: CliIo, sub: string | undefined
   }
   if (sub !== 'add') throw new UsageError('Usage: perch client add|list|remove');
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
-  if (typeof values.allow !== 'string') throw new UsageError('--allow is required (comma separated: read,draft,send)');
+  if (typeof values.allow !== 'string') {
+    throw new UsageError('--allow is required (comma separated: read,draft,send for mail; calendar_read,calendar_write,contacts_read for gprod accounts)');
+  }
   const accounts = (values.account as string[] | undefined) ?? [];
   if (!accounts.length) throw new UsageError('--account is required (repeat for several accounts)');
   const capabilities = parseCapabilities(values.allow.split(','));
@@ -474,6 +536,8 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         revoke: { type: 'boolean' },
         'allow-send': { type: 'boolean' },
         'allow-drafts': { type: 'boolean' },
+        'allow-calendar-write': { type: 'boolean' },
+        services: { type: 'string' },
         'redirect-host': { type: 'string' },
         email: { type: 'string' },
         username: { type: 'string' },
@@ -530,6 +594,9 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         return 0;
       case 'imap':
         await cmdImap(config, io, sub, rest, values);
+        return 0;
+      case 'google-productivity':
+        await cmdProductivity(config, io, sub, rest, values);
         return 0;
       case 'client':
         await cmdClient(config, io, sub, rest, values);

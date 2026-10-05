@@ -3,12 +3,22 @@ import path from 'node:path';
 import { PerchError } from '../errors.js';
 import { newAccountId, validateLabel } from '../ids.js';
 import { ensurePrivateDir, writePrivateFileExclusive } from '../secureFs.js';
-import { CAPABILITIES, type Capability, type ClientGrant, type CredentialStore, type StoreData } from '../store/credentialStore.js';
+import {
+  CAPABILITIES,
+  MAIL_CAPABILITIES,
+  PRODUCTIVITY_CAPABILITIES,
+  type Capability,
+  type ClientGrant,
+  type CredentialStore,
+  type ProductivityCapability,
+  type StoreData,
+} from '../store/credentialStore.js';
 
 /**
  * Who is calling the MCP server. The global HTTP bearer token (and plain stdio) map to the
- * single operator in READ-ONLY mode. Draft/send are only ever available through an explicit
- * local client grant, and only for the mail accounts listed in that grant.
+ * single operator in READ-ONLY mode. Draft/send and calendar writes are only ever available through
+ * an explicit local client grant, and only for the accounts listed in that grant. Mail capabilities
+ * apply to mail accounts only; calendar/contacts capabilities to Google productivity accounts only.
  *
  * This is NOT multi-user isolation: every principal acts for the one operator who owns the
  * credential store. Grants narrow what a client may do; they do not separate users.
@@ -22,18 +32,30 @@ export interface Principal {
   capabilities: ReadonlySet<Capability>;
   /** Mail accounts this principal may use; 'all' only for the read-only operator principal. */
   mailAccounts: ReadonlySet<string> | 'all';
+  /** Google productivity (Calendar/Contacts) accounts; 'all' only for the read-only operator. */
+  productivityAccounts: ReadonlySet<string> | 'all';
 }
 
 export const READONLY_PRINCIPAL: Principal = Object.freeze({
   kind: 'operator_readonly',
-  capabilities: new Set<Capability>(['read']),
+  capabilities: new Set<Capability>(['read', 'calendar_read', 'contacts_read']),
   mailAccounts: 'all',
+  productivityAccounts: 'all',
 }) as Principal;
+
+const PRODUCTIVITY_PREFIX = 'gprod-';
+export const isProductivityAccountId = (id: string) => id.startsWith(PRODUCTIVITY_PREFIX);
+const isMailCap = (c: Capability) => (MAIL_CAPABILITIES as readonly string[]).includes(c);
+const isProductivityCap = (c: Capability) => (PRODUCTIVITY_CAPABILITIES as readonly string[]).includes(c);
 
 export const tokenSha256 = (token: string) => createHash('sha256').update(token, 'utf8').digest('hex');
 
 export function mailAccountIds(data: StoreData): string[] {
   return [...data.gmail, ...data.microsoft, ...data.imap].map((a) => a.id);
+}
+
+export function productivityAccountIds(data: StoreData): string[] {
+  return data.googleProductivity.map((a) => a.id);
 }
 
 export function principalFromGrant(grant: ClientGrant): Principal {
@@ -43,12 +65,35 @@ export function principalFromGrant(grant: ClientGrant): Principal {
     clientLabel: grant.label,
     tokenSha256: grant.tokenSha256,
     capabilities: new Set(grant.capabilities),
-    mailAccounts: new Set(grant.accountIds),
+    mailAccounts: new Set(grant.accountIds.filter((id) => !isProductivityAccountId(id))),
+    productivityAccounts: new Set(grant.accountIds.filter(isProductivityAccountId)),
   };
 }
 
 export function hasWriteCapability(p: Principal): boolean {
   return p.capabilities.has('draft') || p.capabilities.has('send');
+}
+
+export function hasMailCapability(p: Principal): boolean {
+  return [...p.capabilities].some(isMailCap);
+}
+
+export function hasProductivityCapability(p: Principal): boolean {
+  return [...p.capabilities].some(isProductivityCap);
+}
+
+/** Throws unless the principal holds `cap` for the Google productivity account `accountId`. */
+export function assertProductivityCapability(p: Principal, accountId: string, cap: ProductivityCapability): void {
+  if (p.kind === 'operator_readonly' && cap === 'calendar_write') {
+    throw new PerchError(
+      'This connection is read-only (global token or default stdio). Calendar writes need a client grant: perch client add --allow calendar_write',
+      'capability_denied',
+    );
+  }
+  const accountOk = p.productivityAccounts === 'all' || p.productivityAccounts.has(accountId);
+  if (!p.capabilities.has(cap) || !accountOk) {
+    throw new PerchError(`Capability "${cap}" is not granted to this client for account ${accountId}`, 'capability_denied');
+  }
 }
 
 /** Throws unless the principal holds `cap` for `accountId`. Provider scopes are checked separately. */
@@ -60,7 +105,7 @@ export function assertMailCapability(p: Principal, accountId: string, cap: Capab
     );
   }
   const accountOk = p.mailAccounts === 'all' || p.mailAccounts.has(accountId);
-  if (!p.capabilities.has(cap) || !accountOk) {
+  if (!isMailCap(cap) || !p.capabilities.has(cap) || !accountOk) {
     throw new PerchError(`Capability "${cap}" is not granted to this client for account ${accountId}`, 'capability_denied');
   }
 }
@@ -68,7 +113,7 @@ export function assertMailCapability(p: Principal, accountId: string, cap: Capab
 export function parseCapabilities(list: string[]): Capability[] {
   const caps = [...new Set(list.map((c) => c.trim()).filter(Boolean))];
   for (const c of caps) {
-    if (!(CAPABILITIES as readonly string[]).includes(c)) throw new PerchError(`Unknown capability: ${c} (use read, draft, send)`, 'bad_argument');
+    if (!(CAPABILITIES as readonly string[]).includes(c)) throw new PerchError(`Unknown capability: ${c} (use ${CAPABILITIES.join(', ')})`, 'bad_argument');
   }
   return caps as Capability[];
 }
@@ -83,11 +128,10 @@ export async function createClientGrant(
 ): Promise<{ client: ClientGrant; token: string }> {
   const label = validateLabel(input.label);
   const capabilities = parseCapabilities(input.capabilities);
-  if (!capabilities.length) throw new PerchError('A client grant needs at least one capability (read, draft, send)', 'bad_argument');
+  if (!capabilities.length) throw new PerchError(`A client grant needs at least one capability (${CAPABILITIES.join(', ')})`, 'bad_argument');
   const accountIds = [...new Set(input.accountIds)];
-  if (!accountIds.length) throw new PerchError('A client grant needs at least one mail account id', 'bad_argument');
-  const known = new Set(mailAccountIds(await store.read()));
-  for (const id of accountIds) if (!known.has(id)) throw new PerchError(`Unknown mail account: ${id}`, 'unknown_account');
+  if (!accountIds.length) throw new PerchError('A client grant needs at least one account id', 'bad_argument');
+  validateGrantShape(await store.read(), capabilities, accountIds);
 
   const token = randomBytes(32).toString('base64url');
   await ensurePrivateDir(path.dirname(input.tokenFile));
@@ -96,8 +140,7 @@ export async function createClientGrant(
   }
   const client = await store.update((data) => {
     const now = new Date().toISOString();
-    const known2 = new Set(mailAccountIds(data));
-    for (const id of accountIds) if (!known2.has(id)) throw new PerchError(`Unknown mail account: ${id}`, 'unknown_account');
+    validateGrantShape(data, capabilities, accountIds);
     const grant: ClientGrant = {
       id: newAccountId('client', data.clients.map((c) => c.id)),
       label,
@@ -110,6 +153,34 @@ export async function createClientGrant(
     return grant;
   });
   return { client, token };
+}
+
+/**
+ * Every account must exist and be of a kind some granted capability applies to, and every capability
+ * family needs at least one matching account. A calendar grant therefore never carries mail access
+ * by accident, and a mail grant never Calendar/Contacts access.
+ */
+function validateGrantShape(data: StoreData, capabilities: Capability[], accountIds: string[]): void {
+  const mail = new Set(mailAccountIds(data));
+  const productivity = new Set(productivityAccountIds(data));
+  for (const id of accountIds) {
+    if (isProductivityAccountId(id)) {
+      if (!productivity.has(id)) throw new PerchError(`Unknown Google productivity account: ${id}`, 'unknown_account');
+    } else if (!mail.has(id)) throw new PerchError(`Unknown mail account: ${id}`, 'unknown_account');
+  }
+  const mailCaps = capabilities.some(isMailCap);
+  const prodCaps = capabilities.some(isProductivityCap);
+  if (mailCaps && !accountIds.some((id) => !isProductivityAccountId(id))) {
+    throw new PerchError('Mail capabilities (read, draft, send) need at least one mail account (gmail-…, microsoft-…, imap-…)', 'bad_argument');
+  }
+  if (prodCaps && !accountIds.some(isProductivityAccountId)) {
+    throw new PerchError('Calendar/contacts capabilities need at least one Google productivity account (gprod-…)', 'bad_argument');
+  }
+  for (const id of accountIds) {
+    if (isProductivityAccountId(id) ? !prodCaps : !mailCaps) {
+      throw new PerchError(`Account ${id} has no granted capability that applies to it; remove it or add a matching capability`, 'bad_argument');
+    }
+  }
 }
 
 export async function removeClientGrant(store: CredentialStore, id: string): Promise<void> {

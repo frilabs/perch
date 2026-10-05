@@ -83,7 +83,32 @@ const ImapAccountSchema = z.object({
   updatedAt: z.string(),
 });
 
-export const CAPABILITIES = ['read', 'draft', 'send'] as const;
+/**
+ * Google Calendar/Contacts grant (separate OAuth consent from Drive and Gmail). `services` and
+ * `allowCalendarWrite` record what was requested at onboarding; `scopes` what Google actually granted.
+ * Both must agree before a tool runs (see src/google/productivity.ts).
+ */
+const GoogleProductivityAccountSchema = z.object({
+  id: z.string().regex(/^gprod-[a-f0-9]{8}$/),
+  label: z.string().min(1).max(100),
+  email: z.string().min(3).max(320),
+  /** OpenID Connect subject: stable Google account id, used to detect duplicate grants. */
+  sub: z.string().min(1).max(255),
+  clientId: z.string().min(1),
+  clientSecret: z.string().min(1),
+  refreshToken: z.string().min(1),
+  scopes: z.array(z.string()),
+  services: z.array(z.enum(['calendar', 'contacts'])).min(1),
+  allowCalendarWrite: z.boolean(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+/** Mail capabilities (email milestone) apply to mail accounts only. */
+export const MAIL_CAPABILITIES = ['read', 'draft', 'send'] as const;
+/** Calendar/Contacts capabilities apply to Google productivity accounts (gprod-…) only. */
+export const PRODUCTIVITY_CAPABILITIES = ['calendar_read', 'calendar_write', 'contacts_read'] as const;
+export const CAPABILITIES = [...MAIL_CAPABILITIES, ...PRODUCTIVITY_CAPABILITIES] as const;
 
 /** Local per-client grant. Only the SHA-256 of the (high-entropy) client token is stored. */
 const ClientGrantSchema = z.object({
@@ -104,6 +129,8 @@ const StoreDataSchema = z.object({
   microsoft: z.array(MicrosoftAccountSchema).default([]),
   imap: z.array(ImapAccountSchema).default([]),
   clients: z.array(ClientGrantSchema).default([]),
+  // Added by the Google productivity milestone.
+  googleProductivity: z.array(GoogleProductivityAccountSchema).default([]),
 });
 
 export type GoogleAccount = z.infer<typeof GoogleAccountSchema>;
@@ -111,8 +138,11 @@ export type NotionWorkspace = z.infer<typeof NotionWorkspaceSchema>;
 export type GmailAccount = z.infer<typeof GmailAccountSchema>;
 export type MicrosoftAccount = z.infer<typeof MicrosoftAccountSchema>;
 export type ImapAccount = z.infer<typeof ImapAccountSchema>;
+export type GoogleProductivityAccount = z.infer<typeof GoogleProductivityAccountSchema>;
 export type ClientGrant = z.infer<typeof ClientGrantSchema>;
 export type Capability = (typeof CAPABILITIES)[number];
+export type MailCapability = (typeof MAIL_CAPABILITIES)[number];
+export type ProductivityCapability = (typeof PRODUCTIVITY_CAPABILITIES)[number];
 export type StoreData = z.infer<typeof StoreDataSchema>;
 
 export interface StorePaths {
@@ -123,7 +153,7 @@ export interface StorePaths {
 export const storeFilePath = (dataDir: string) => path.join(dataDir, 'store.enc');
 const lockFilePath = (dataDir: string) => path.join(dataDir, 'store.lock');
 
-const emptyData = (): StoreData => ({ version: 1, google: [], notion: [], gmail: [], microsoft: [], imap: [], clients: [] });
+const emptyData = (): StoreData => ({ version: 1, google: [], notion: [], gmail: [], microsoft: [], imap: [], clients: [], googleProductivity: [] });
 
 async function realpathOrResolve(p: string): Promise<string> {
   // Resolve the deepest existing ancestor so symlinked parents cannot hide containment.

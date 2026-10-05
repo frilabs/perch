@@ -85,6 +85,8 @@ export interface LoopbackOptions {
   loginHint?: string;
   /** Requested scopes (default: drive.readonly). All of them must be granted. */
   scopes?: string[];
+  /** Replaces the default "every requested scope granted" check (e.g. for scope aliases like `email`). */
+  verify?: (tok: GoogleTokenResponse) => AuthorizationResult;
   onAuthUrl: (url: string) => void;
 }
 
@@ -123,7 +125,7 @@ export async function runLoopbackAuthorization(opts: LoopbackOptions): Promise<A
           client_secret: opts.client.clientSecret,
         },
       });
-      return assertUsableGrant(tok, scopes);
+      return opts.verify ? opts.verify(tok) : assertUsableGrant(tok, scopes);
     },
   });
 }
