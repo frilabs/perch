@@ -3,6 +3,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { currentPrincipal, hasMailCapability, hasProductivityCapability, hasWriteCapability, READONLY_PRINCIPAL, type Principal } from '../auth/grants.js';
 import type { PerchContext } from '../context.js';
+import type { SessionScope } from '../users/namespaces.js';
 import { PerchError, safeMessage } from '../errors.js';
 import { MAX_CALENDAR_PAGE_SIZE } from '../google/calendar.js';
 import { MAX_DESCRIPTION_LENGTH, MAX_LOCATION_LENGTH, MAX_SUMMARY_LENGTH } from '../google/calendarWrite.js';
@@ -160,10 +161,16 @@ const outgoing = {
  * tool invocation the client grant is re-resolved from the store, so a removed or narrowed grant
  * fails closed on long-lived connections (stdio) before any provider call.
  */
-export function createMcpServer(ctx: PerchContext, principal: Principal = READONLY_PRINCIPAL): McpServer {
+export function createMcpServer(ctx: PerchContext, principal: Principal = READONLY_PRINCIPAL, scope: SessionScope = {}): McpServer {
   const operator = principal.kind === 'operator_readonly';
   const writes = hasWriteCapability(principal);
-  const current = () => currentPrincipal(ctx.store, principal);
+  // Before EVERY tool call: the namespace guard (user membership, user token) and the client grant are
+  // re-read, so revocation applies to long-lived sessions before any provider I/O.
+  const current = async () => {
+    await scope.guard?.();
+    return currentPrincipal(ctx.store, principal);
+  };
+  const tool = (fn: (p: Principal) => Promise<unknown>) => run(async () => fn(await current()));
   const server = new McpServer(
     { name: 'perch', version: PERCH_VERSION },
     {
@@ -193,10 +200,10 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
       annotations: READ_ONLY,
     },
     () =>
-      run(async () => {
-        const p = await current();
+      tool(async (p) => {
         const connection = {
           kind: p.kind,
+          ...(scope.userId ? { user: scope.userId } : {}),
           ...(p.clientId ? { clientId: p.clientId, clientLabel: p.clientLabel } : {}),
           capabilities: [...p.capabilities].sort(),
         };
@@ -252,7 +259,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         },
         annotations: READ_ONLY,
       },
-      (a) => run(() => ctx.drive.search(a)),
+      (a) => tool(() => ctx.drive.search(a)),
     );
 
     server.registerTool(
@@ -269,13 +276,13 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         },
         annotations: READ_ONLY,
       },
-      (a) => run(() => ctx.drive.search(a)),
+      (a) => tool(() => ctx.drive.search(a)),
     );
 
     server.registerTool(
       'drive_get_file',
       { description: 'Get Drive file metadata.', inputSchema: { accountId, fileId }, annotations: READ_ONLY },
-      (a) => run(() => ctx.drive.getFile(a.accountId, a.fileId)),
+      (a) => tool(() => ctx.drive.getFile(a.accountId, a.fileId)),
     );
 
     server.registerTool(
@@ -287,7 +294,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         inputSchema: { accountId, fileId, maxBytes },
         annotations: READ_ONLY,
       },
-      (a) => run(() => ctx.drive.readText(a.accountId, a.fileId, a)),
+      (a) => tool(() => ctx.drive.readText(a.accountId, a.fileId, a)),
     );
 
     server.registerTool(
@@ -297,7 +304,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         inputSchema: { accountId, fileId, maxBytes },
         annotations: READ_ONLY,
       },
-      (a) => run(() => ctx.drive.download(a.accountId, a.fileId, a)),
+      (a) => tool(() => ctx.drive.download(a.accountId, a.fileId, a)),
     );
 
     server.registerTool(
@@ -309,7 +316,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         inputSchema: { accountId, fileId, mimeType: z.string().describe('Target export MIME type'), maxBytes },
         annotations: READ_ONLY,
       },
-      (a) => run(() => ctx.drive.exportFile(a.accountId, a.fileId, a.mimeType, a)),
+      (a) => tool(() => ctx.drive.exportFile(a.accountId, a.fileId, a.mimeType, a)),
     );
 
     server.registerTool(
@@ -325,13 +332,13 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         },
         annotations: READ_ONLY,
       },
-      (a) => run(async () => ({ ...(await ctx.notion.search(a)), note: NOTION_SEARCH_NOTE })),
+      (a) => tool(async () => ({ ...(await ctx.notion.search(a)), note: NOTION_SEARCH_NOTE })),
     );
 
     server.registerTool(
       'notion_get_page',
       { description: 'Retrieve a Notion page object (properties).', inputSchema: { workspaceId, pageId: z.string() }, annotations: READ_ONLY },
-      (a) => run(() => ctx.notion.getPage(a.workspaceId, a.pageId)),
+      (a) => tool(() => ctx.notion.getPage(a.workspaceId, a.pageId)),
     );
 
     server.registerTool(
@@ -350,7 +357,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         },
         annotations: READ_ONLY,
       },
-      (a) => run(() => ctx.notion.getPageContent(a.workspaceId, a.pageId, a)),
+      (a) => tool(() => ctx.notion.getPageContent(a.workspaceId, a.pageId, a)),
     );
 
     server.registerTool(
@@ -360,7 +367,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         inputSchema: { workspaceId, blockId: z.string(), cursor, pageSize: notionPageSize },
         annotations: READ_ONLY,
       },
-      (a) => run(() => ctx.notion.getBlockChildren(a.workspaceId, a.blockId, a)),
+      (a) => tool(() => ctx.notion.getBlockChildren(a.workspaceId, a.blockId, a)),
     );
 
     server.registerTool(
@@ -370,7 +377,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         inputSchema: { workspaceId, databaseId: z.string() },
         annotations: READ_ONLY,
       },
-      (a) => run(() => ctx.notion.getDatabase(a.workspaceId, a.databaseId)),
+      (a) => tool(() => ctx.notion.getDatabase(a.workspaceId, a.databaseId)),
     );
 
     server.registerTool(
@@ -380,7 +387,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         inputSchema: { workspaceId, dataSourceId: z.string() },
         annotations: READ_ONLY,
       },
-      (a) => run(() => ctx.notion.getDataSource(a.workspaceId, a.dataSourceId)),
+      (a) => tool(() => ctx.notion.getDataSource(a.workspaceId, a.dataSourceId)),
     );
 
     server.registerTool(
@@ -397,7 +404,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         },
         annotations: READ_ONLY,
       },
-      (a) => run(() => ctx.notion.queryDataSource(a.workspaceId, a.dataSourceId, a)),
+      (a) => tool(() => ctx.notion.queryDataSource(a.workspaceId, a.dataSourceId, a)),
     );
   }
 
@@ -418,7 +425,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         },
         annotations: READ_ONLY,
       },
-      (a) => run(async () => ctx.mail.search(await current(), a)),
+      (a) => tool((p) => ctx.mail.search(p, a)),
     );
 
     server.registerTool(
@@ -430,7 +437,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         inputSchema: { accountId: mailAccountId, messageId: z.string().max(2048), maxBytes: mailMaxBytes },
         annotations: READ_ONLY,
       },
-      (a) => run(async () => ctx.mail.read(await current(), a)),
+      (a) => tool((p) => ctx.mail.read(p, a)),
     );
 
     server.registerTool(
@@ -440,7 +447,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         inputSchema: { accountId: mailAccountId, messageId: z.string().max(2048), attachmentId: z.string().max(4096), maxBytes: mailMaxBytes },
         annotations: READ_ONLY,
       },
-      (a) => run(async () => ctx.mail.getAttachment(await current(), a)),
+      (a) => tool((p) => ctx.mail.getAttachment(p, a)),
     );
   }
 
@@ -454,7 +461,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         inputSchema: outgoing,
         annotations: DRAFT,
       },
-      (a) => run(async () => ctx.mail.createDraft(await current(), a)),
+      (a) => tool((p) => ctx.mail.createDraft(p, a)),
     );
   }
 
@@ -468,7 +475,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         inputSchema: outgoing,
         annotations: SEND,
       },
-      (a) => run(async () => ctx.mail.send(await current(), a)),
+      (a) => tool((p) => ctx.mail.send(p, a)),
     );
   }
 
@@ -484,7 +491,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         },
         annotations: READ_ONLY,
       },
-      (a) => run(async () => ctx.calendar.listCalendars(await current(), a)),
+      (a) => tool((p) => ctx.calendar.listCalendars(p, a)),
     );
 
     server.registerTool(
@@ -506,7 +513,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         },
         annotations: READ_ONLY,
       },
-      (a) => run(async () => ctx.calendar.listEvents(await current(), a)),
+      (a) => tool((p) => ctx.calendar.listEvents(p, a)),
     );
 
     server.registerTool(
@@ -516,7 +523,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         inputSchema: { accountId: prodAccountId, calendarId, eventId, timeZone: z.string().max(64).optional() },
         annotations: READ_ONLY,
       },
-      (a) => run(async () => ctx.calendar.getEvent(await current(), a)),
+      (a) => tool((p) => ctx.calendar.getEvent(p, a)),
     );
   }
 
@@ -536,7 +543,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         },
         annotations: READ_ONLY,
       },
-      (a) => run(async () => ctx.contacts.list(await current(), a)),
+      (a) => tool((p) => ctx.contacts.list(p, a)),
     );
 
     server.registerTool(
@@ -546,7 +553,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         inputSchema: { accountId: prodAccountId, resourceName: z.string().max(64), personFields },
         annotations: READ_ONLY,
       },
-      (a) => run(async () => ctx.contacts.get(await current(), a)),
+      (a) => tool((p) => ctx.contacts.get(p, a)),
     );
   }
 
@@ -570,7 +577,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         }),
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       },
-      (a) => run(async () => ctx.calendar.createEvent(await current(), a)),
+      (a) => tool((p) => ctx.calendar.createEvent(p, a)),
     );
 
     if (principal.capabilities.has('calendar_read')) {
@@ -592,7 +599,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
           }),
           annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
         },
-        (a) => run(async () => ctx.calendar.updateEvent(await current(), a)),
+        (a) => tool((p) => ctx.calendar.updateEvent(p, a)),
       );
     }
   }

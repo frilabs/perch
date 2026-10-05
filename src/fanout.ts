@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { PerchError, safeMessage } from './errors.js';
+import type { CursorSeal } from './store/credentialStore.js';
 
 /**
  * Runs one paginated query against several accounts/workspaces and merges the pages.
@@ -56,10 +57,13 @@ const queryHash = (key: unknown) => createHash('sha256').update(JSON.stringify(k
 const isRecordOf = (v: unknown, type: 'string' | 'number'): v is Record<string, never> =>
   typeof v === 'object' && v !== null && !Array.isArray(v) && Object.values(v).every((x) => typeof x === type);
 
-function decodeCursor(cursor: string, kind: string, hash: string): CursorState {
+function decodeCursor(seal: CursorSeal, cursor: string, kind: string, hash: string): CursorState {
+  // The MAC check runs first: a cursor from another namespace (store) or an edited one never reaches
+  // the per-source upstream cursors below, even when account ids collide.
+  const payload = seal.openCursor(`fanout:${kind}`, cursor);
   let state: CursorState;
   try {
-    state = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as CursorState;
+    state = JSON.parse(payload) as CursorState;
   } catch {
     throw new PerchError('Invalid cursor', 'bad_cursor');
   }
@@ -79,11 +83,13 @@ export async function fanOut<T>(opts: {
   queryKey: unknown;
   sources: Source[];
   cursor?: string;
+  /** The namespace's store: seals and verifies the opaque cursor. */
+  seal: CursorSeal;
   fetchPage: (source: Source, upstreamCursor: string | undefined) => Promise<SourcePage<T>>;
 }): Promise<FanOutResult<T & { accountId: string; accountLabel: string }>> {
   const hash = queryHash(opts.queryKey);
   const state: CursorState = opts.cursor
-    ? decodeCursor(opts.cursor, opts.kind, hash)
+    ? decodeCursor(opts.seal, opts.cursor, opts.kind, hash)
     : { k: opts.kind, h: hash, t: Object.fromEntries(opts.sources.map((s) => [s.id, ''])), f: {}, x: {} };
 
   const next: CursorState = { k: opts.kind, h: hash, t: {}, f: {}, x: { ...state.x } };
@@ -133,7 +139,7 @@ export async function fanOut<T>(opts: {
   const hasMore = Object.keys(next.t).length > 0;
   return {
     results,
-    nextCursor: hasMore ? Buffer.from(JSON.stringify(next)).toString('base64url') : null,
+    nextCursor: hasMore ? opts.seal.sealCursor(`fanout:${opts.kind}`, JSON.stringify(next)) : null,
     hasMore,
     partial: errors.length > 0 || incompleteSources.length > 0,
     errors,
