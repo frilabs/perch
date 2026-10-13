@@ -36,6 +36,8 @@ const PROVIDER_BY_PREFIX: Record<string, AuditProvider> = {
   microsoft: 'microsoft',
   imap: 'imap',
   gprod: 'google_productivity',
+  slack: 'slack',
+  whatsapp: 'whatsapp',
 };
 
 export function actorOf(p: Principal): Actor {

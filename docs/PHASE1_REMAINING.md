@@ -77,7 +77,9 @@ Evidence: `MAIL_WORKFLOW_MILESTONE.md` §7–§8 (MOCK providers only, not live-
 - Versioned controlled migration with pre-migration backup, malformed/future-schema rejection and rollback/recovery tests. Existing backward-compatible defaults are not a complete migration system.
 - Integrate the licence sibling, regenerate/check notices, run production-only installation verification, then exercise the exact image/compose artifact.
 
-## 4. Replaceable self-hosted WhatsApp adapter — NOT implemented
+## 4. Replaceable self-hosted WhatsApp adapter — implemented 2026-10-14 against GOWA v9 (mock-tested only)
+
+Implemented on `main` per Fritz's instruction: see `SLACK_WHATSAPP_MILESTONE.md` (GOWA REST adapter, pairing code onboarding, device-slot binding, read tools, opt-in idempotent text send). Still open from the list below: pinning/testing against the real pinned GOWA binary, live pairing/read/send, presence-pulse behaviour. Original acceptance list kept for reference:
 
 - Candidate primary source reviewed: `aldinokemal/go-whatsapp-web-multidevice`, commit `3971c4cbdfec00d5b8f0b4cdbd61bf310b962756` (2026-10-04), `docs/openapi.yaml` declares API version 9.0.0. Repository license endpoint reports MIT (`LICENCE.txt` blob `34fbff4c1e783c4df65975eead02a08fd745936e`). This is API/license research, **not connector or runtime verification**.
 - Pin/test the adopted version and its redistribution/dependency obligations. Keep a replaceable adapter interface; no cloud vendor required. No WhatsApp account was supplied or paired.

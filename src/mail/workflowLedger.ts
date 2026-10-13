@@ -42,8 +42,10 @@ const HEX64 = /^[a-f0-9]{64}$/;
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 export const OPERATION_ID_PATTERN = /^op-[a-f0-9]{24}$/;
 /** Ids of accounts Perch itself generated (provider prefix + 8 hex). Caller text never matches by accident. */
-export const ACCOUNT_ID_PATTERN = /^(google|notion|gmail|microsoft|imap|gprod)-[a-f0-9]{8}$/;
-const MAIL_ACCOUNT_ID = /^(gmail|microsoft|imap)-[a-f0-9]{8}$/;
+export const ACCOUNT_ID_PATTERN = /^(google|notion|gmail|microsoft|imap|gprod|slack|whatsapp)-[a-f0-9]{8}$/;
+/** Accounts that can send through the idempotent workflow (mail, Slack, WhatsApp). */
+const SEND_ACCOUNT_ID = /^(gmail|microsoft|imap|slack|whatsapp)-[a-f0-9]{8}$/;
+export const SEND_PROVIDERS = ['gmail', 'microsoft', 'imap', 'slack', 'whatsapp'] as const;
 const NAMESPACE = /^(root|user-[a-f0-9]{16})$/;
 const SAFE_TOKEN = /^[a-z][a-z0-9_]{0,47}$/;
 /** Provider message ids are kept only in this opaque form (Gmail ids); anything with an address/host is dropped. */
@@ -77,8 +79,8 @@ const SendRecordSchema = z.strictObject({
   /** HMAC of the sender account identity at claim time. */
   binding: z.string().regex(HEX64),
   operationId: z.string().regex(OPERATION_ID_PATTERN),
-  accountId: z.string().regex(MAIL_ACCOUNT_ID),
-  provider: z.enum(['gmail', 'microsoft', 'imap']),
+  accountId: z.string().regex(SEND_ACCOUNT_ID),
+  provider: z.enum(SEND_PROVIDERS),
   actor: ActorSchema,
   state: z.enum(SEND_STATES),
   /** Random id of the one attempt allowed to finalize this record. */
@@ -107,7 +109,7 @@ export const AUDIT_OUTCOMES = [
   'pruned',
 ] as const;
 
-export const AUDIT_PROVIDERS = ['drive', 'notion', 'gmail', 'microsoft', 'imap', 'google_productivity'] as const;
+export const AUDIT_PROVIDERS = ['drive', 'notion', 'gmail', 'microsoft', 'imap', 'google_productivity', 'slack', 'whatsapp'] as const;
 
 const AuditEventSchema = z.strictObject({
   at: z.string().regex(ISO),
@@ -137,6 +139,7 @@ export type Actor = z.infer<typeof ActorSchema>;
 export type SendRecord = z.infer<typeof SendRecordSchema>;
 export type SendState = SendRecord['state'];
 export type SendReason = (typeof SEND_REASONS)[number];
+export type SendProvider = (typeof SEND_PROVIDERS)[number];
 export type AuditEvent = z.infer<typeof AuditEventSchema>;
 export type AuditOutcome = (typeof AUDIT_OUTCOMES)[number];
 export type AuditProvider = (typeof AUDIT_PROVIDERS)[number];

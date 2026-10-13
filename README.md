@@ -1,14 +1,14 @@
 # Perch
 
-Perch ist ein MCP-Server. Er bündelt **mehrere Google-Drive-Konten**, **mehrere Notion-Workspaces**, **mehrere Mail-Konten** (Gmail, Outlook.com/Microsoft 365, GMX bzw. IMAP/SMTP) und **mehrere Google-Calendar/Contacts-Konten** hinter **einem** Connector. Standardmäßig ist alles read-only. Mail-Entwürfe, -Versand und das Anlegen/Ändern privater Kalendertermine gibt es nur über explizite lokale Client-Grants pro Konto.
+Perch ist ein MCP-Server. Er bündelt **mehrere Google-Drive-Konten**, **mehrere Notion-Workspaces**, **mehrere Mail-Konten** (Gmail, Outlook.com/Microsoft 365, GMX bzw. IMAP/SMTP), **mehrere Google-Calendar/Contacts-Konten**, **mehrere Slack-Workspaces** und **WhatsApp** (über eine selbst gehostete GOWA-Bridge) hinter **einem** Connector, für Claude Code, Codex und andere MCP-Clients. Standardmäßig ist alles read-only. Mail-Entwürfe, Versand (Mail, Slack, WhatsApp) und das Anlegen/Ändern privater Kalendertermine gibt es nur über explizite lokale Client-Grants pro Konto.
 
 - Läuft auf dem Heimserver.
 - Claude Code auf dem Laptop bindet ihn einmal ein, per Tailscale Serve (HTTPS) oder SSH-Tunnel.
 - Kein Kontowechsel, kein Teilen einzelner Dateien.
 - Jedes Ergebnis trägt Konto- bzw. Workspace-ID und Label als Herkunftsangabe.
 
-Stand 2026-10-05:
-- Das MVP (Drive/Notion) und der E-Mail-Meilenstein sind implementiert und lokal mit Mock-Upstreams bzw. lokalen Testservern getestet.
+Stand 2026-10-14:
+- Drive/Notion, Mail, Calendar/Contacts, Nutzer-Isolation, Mail-Workflow und Slack/WhatsApp sind implementiert und lokal mit Mock-Upstreams bzw. lokalen Testservern getestet.
 - **Nicht** live gegen Google, Notion, Microsoft oder GMX verifiziert.
 - Nicht deployed.
 
@@ -35,7 +35,14 @@ Stand 2026-10-05:
   - eigener OAuth-Grant, Dienste explizit per `--services calendar,contacts`, Default `calendar.readonly`/`contacts.readonly`, Opt-in `calendar.events.owned`
   - Kalender und Termine lesen; private Termine anlegen (idempotent per `requestId`) und ändern (`If-Match`), ohne Teilnehmer, Einladungen oder Benachrichtigungen
   - Kontakte seitenweise lesen (keine Suche)
-- **Client-Grants:** `perch client add --allow read,draft,send|calendar_read,calendar_write,contacts_read --account …`. Das globale HTTP-Token bleibt read-only.
+- **Slack** (`docs/SLACK_WHATSAPP_MILESTONE.md`, je Workspace eine interne App mit User-Token, Manifest in `docs/slack-app-manifest.json`):
+  - Kanäle, private Kanäle, DMs und Gruppen-DMs auflisten; Verlauf und Threads lesen; Slack-Suche über alle Workspaces
+  - Posten als der verbundene Nutzer (auch in Threads), nur mit Client-Grant `slack_send`, idempotent per `requestId`
+- **WhatsApp** über GOWA (inoffiziell, selbst gehostet, nur localhost):
+  - Koppeln per Kopplungscode über die CLI, mehrere Konten in getrennten Geräte-Slots
+  - Chats auflisten, Nachrichten lesen und durchsuchen (Suche über die jüngsten Chats); Medien nur als Metadaten
+  - Textnachrichten senden nur mit Client-Grant `whatsapp_send`, idempotent per `requestId`
+- **Client-Grants:** `perch client add --allow read,draft,send|calendar_read,calendar_write,contacts_read|slack_read,slack_send|whatsapp_read,whatsapp_send --account …`. Das globale HTTP-Token bleibt read-only.
 - **Admin-angelegte Nutzer** (`docs/USER_ISOLATION_MILESTONE.md`, nur mit Mocks getestet): `perch user add|list|remove`. Jeder Nutzer bekommt einen eigenen verschlüsselten Store und Schlüssel, ein Read-only-Token und eigene Client-Grants (`PERCH_USER=<id> perch …`). Jedes Token gilt in genau einem Namespace; Mitgliedschaft und Grants prüft Perch vor jedem Tool-Aufruf neu. Keine öffentliche Registrierung, keine gehärtete Mandantenfähigkeit.
 - **Transporte:** stdio und zustandsloses Streamable HTTP (`POST /mcp`)
 - **Sicherheit:**
@@ -64,13 +71,16 @@ Die vollständige Anleitung steht in [`docs/SETUP.md`](docs/SETUP.md): Google-Cl
 
 ```bash
 npm run typecheck
-npm test          # vitest; Google (Drive/Gmail/Calendar/People)/Notion/Graph nur als klar markierte Mocks, IMAP/SMTP gegen lokale Testserver
+npm test          # vitest; Google (Drive/Gmail/Calendar/People)/Notion/Graph/Slack/GOWA nur als klar markierte Mocks, IMAP/SMTP gegen lokale Testserver
 npm run smoke     # baut und testet dist/cli.js über stdio und HTTP
 ```
 
 | Datei | Zweck |
 | --- | --- |
-| `src/cli.ts`, `src/cli/` | CLI (`init`, `serve`, `google`, `notion`, `gmail`, `microsoft`, `imap`, `google-productivity`, `client`, `accounts`, `token`) |
+| `src/cli.ts`, `src/cli/` | CLI (`init`, `serve`, `google`, `notion`, `gmail`, `microsoft`, `imap`, `google-productivity`, `slack`, `whatsapp`, `client`, `accounts`, `token`) |
+| `src/slack/` | Slack Web API (User-Token pro Workspace), App-Manifest |
+| `src/whatsapp/` | GOWA-Bridge: Instanz, Koppeln, Chats, Nachrichten, Senden |
+| `src/messaging/` | idempotenter Sende-Ablauf für Slack und WhatsApp (gemeinsamer Ledger mit Mail) |
 | `src/auth/` | Client-Grants (read/draft/send pro Mail-Konto, calendar_read/calendar_write/contacts_read pro Calendar/Contacts-Konto), Principals |
 | `src/oauth/` | PKCE-Loopback, Refresh mit Single-Flight und Rotation (fail closed) |
 | `src/mail/` | MailService, MIME-Bau, Gmail-, Graph- und IMAP/SMTP-Adapter, GMX-Presets |
@@ -91,6 +101,7 @@ npm run smoke     # baut und testet dist/cli.js über stdio und HTTP
 - [`docs/EMAIL_MILESTONE.md`](docs/EMAIL_MILESTONE.md): E-Mail-Meilenstein (Spezifikation, TDD-Nachweise)
 - [`docs/GOOGLE_PRODUCTIVITY_MILESTONE.md`](docs/GOOGLE_PRODUCTIVITY_MILESTONE.md): Calendar/Contacts-Meilenstein (Spezifikation, TDD-Nachweise)
 - [`docs/USER_ISOLATION_MILESTONE.md`](docs/USER_ISOLATION_MILESTONE.md): Nutzer-Isolations-Meilenstein (Spezifikation, TDD-Nachweise)
+- [`docs/SLACK_WHATSAPP_MILESTONE.md`](docs/SLACK_WHATSAPP_MILESTONE.md): Slack/WhatsApp-Meilenstein (Entscheidungen, Allowlist, Grenzen)
 - [`docs/PROJECT_SCOPE.md`](docs/PROJECT_SCOPE.md): erweiterte Projektrichtung
 - [`docs/HANDOFF.md`](docs/HANDOFF.md): aktueller Stand
 - [`AGENTS.md`](AGENTS.md): Arbeitsregeln
@@ -99,5 +110,5 @@ npm run smoke     # baut und testet dist/cli.js über stdio und HTTP
 
 - Body-freies Audit-Log und idempotenter Sende-Workflow; Docker/Compose, Backup, Migrationen
 - Kalender-Einladungen, Serien, Löschen; Kontakte schreiben
-- WhatsApp höchstens experimentell, später
+- Live-Test Slack und WhatsApp; ältere WhatsApp-Historie nachladen
 - LinkedIn ausgeschlossen

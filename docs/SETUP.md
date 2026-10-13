@@ -371,6 +371,156 @@ PERCH_USER=user-0123456789abcdef perch audit list                          # Nam
 - **Abhilfe:** den Ledger aus dem Backup zurückspielen. `perch mail-workflow init` ist nur für Namespaces gedacht, die nie einen Ledger hatten. `store.enc` merkt sich, dass ein Ledger angelegt wurde (Feld `mailWorkflowLedger`). Hatte der Namespace je einen, lehnt `init` ab (`ledger_missing`) und setzt nie zurück; eine vorhandene Datei wird nie überschrieben. Vor jedem Ledger-Schreibzugriff muss dieses Feld dauerhaft in `store.enc` stehen; lässt es sich nicht schreiben, wird nichts gesendet.
 - **Kein Downgrade, Backups zusammen zurückspielen:** Eine ältere Perch-Version oder ein `store.enc`-Backup von vor diesem Feld entfernt die Markierung. Geht danach auch der Ledger verloren, kann `init` das nicht erkennen und legt einen leeren an; benutzte `requestId`s wären vergessen. `store.enc` und `mail-workflow.enc` deshalb immer aus demselben Backup zurückspielen und keine ältere Perch-Version starten.
 
+## 4e. Slack-Workspaces verbinden (Slack/WhatsApp-Meilenstein)
+
+Pro Workspace gibt es eine eigene **interne Slack-App** mit einem **User-Token** (`xoxp-…`). Perch liest damit, was du in dem Workspace sehen kannst, und postet (nur mit Client-Grant `slack_send`) **als du**.
+
+Warum keine gemeinsame App für alle Workspaces: Slack drosselt seit 2025 verteilte Apps außerhalb des Marketplace bei `conversations.history`/`conversations.replies` stark (etwa 1 Anfrage pro Minute). Interne Apps, die nur im eigenen Workspace installiert sind, behalten die normalen Limits.
+
+### 4e.1 App anlegen (einmal pro Workspace, Nutzeraufgabe)
+
+1. Manifest ausgeben: `perch slack manifest`. Es ist identisch mit [`slack-app-manifest.json`](slack-app-manifest.json).
+2. <https://api.slack.com/apps> → **Create New App** → **From a manifest** → den Workspace wählen → Manifest einfügen → **Create**.
+3. **Install to Workspace** → Berechtigungen bestätigen.
+   - Verlangt der Workspace eine Admin-Freigabe für Apps, erscheint stattdessen **Request to Install**. Dann muss ein Workspace-Admin die App freigeben. Ohne Freigabe geht es in diesem Workspace nicht.
+4. Unter **OAuth & Permissions** das **User OAuth Token** (`xoxp-…`) kopieren. Bot-Tokens (`xoxb-`) lehnt Perch ab.
+
+Die App hat nur User-Scopes:
+
+| Scope | Wofür |
+| --- | --- |
+| `channels:read`, `groups:read`, `im:read`, `mpim:read` | Kanäle, private Kanäle, DMs und Gruppen-DMs auflisten |
+| `channels:history`, `groups:history`, `im:history`, `mpim:history` | Nachrichten und Threads lesen |
+| `users:read` | Namen zu Nutzer-IDs |
+| `search:read` | `slack_search` |
+| `chat:write` | `slack_send_message` (nur mit Client-Grant) |
+
+Token-Rotation ist im Manifest aus, das Token läuft also nicht ab.
+
+### 4e.2 In Perch verbinden
+
+```bash
+perch slack add --label "Firma"     # Token verdeckt eingeben
+perch slack list
+```
+
+Perch prüft das Token mit `auth.test` und speichert Workspace, Nutzer und die tatsächlich gewährten Scopes. Fehlen `search:read` oder `chat:write`, warnt `slack add`. Das gleiche Workspace-Konto zweimal zu verbinden wird abgelehnt.
+
+### 4e.3 Lesen und Senden
+
+- **Lesen** (`slack_list_conversations`, `slack_get_history`, `slack_get_thread`, `slack_search`): globales Token und jeder Client mit `slack_read`.
+- **Senden** (`slack_send_message`, `slack_send_status`): nur ein Client-Grant mit `slack_send` für genau diese Workspaces:
+
+  ```bash
+  perch client add --label "Claude Code" --allow slack_read,slack_send --account slack-1a2b3c4d
+  ```
+
+  Pflichtfeld `requestId` wie bei `mail_send` (Abschnitt 4d): gleiche ID + gleicher Inhalt postet nie zweimal.
+
+  **Achtung Limit:** Slack-, WhatsApp- und Mail-Sends teilen sich 1000 Sende-Einträge pro Namespace. Danach schlagen alle Sends fehl, auch Mail (`ledger_full`), bis es einen Ledger-Rollover gibt (`docs/SLACK_WHATSAPP_MILESTONE.md` §6).
+
+Trennen: `perch slack remove ID` entfernt nur lokal. Das Token bleibt gültig, bis du die App im Workspace deinstallierst (App-Seite → **Remove app**).
+
+## 4f. WhatsApp über GOWA verbinden (Slack/WhatsApp-Meilenstein)
+
+**Inoffiziell.** WhatsApp bietet für private Konten keine API. Perch spricht mit [GOWA](https://github.com/aldinokemal/go-whatsapp-web-multidevice) (MIT), einem selbst gehosteten Dienst, der sich wie WhatsApp Web als **verknüpftes Gerät** anmeldet. Das verstößt potenziell gegen die WhatsApp-Nutzungsbedingungen; WhatsApp kann solche Konten einschränken oder sperren. Senden erhöht das Risiko.
+
+Weitere Grenzen:
+
+- **Verlauf:** GOWA kennt nur Nachrichten ab dem Koppeln plus das, was das Handy beim Koppeln synchronisiert. Ältere Nachrichten fehlen.
+- **Daten im Klartext:** GOWA speichert alle Nachrichten **unverschlüsselt** in SQLite (`storages/` im GOWA-Verzeichnis). Verzeichnis nur für den GOWA-Nutzer lesbar halten und wie den Perch-Store sichern.
+- **Keine globale Suche:** `whatsapp_search` durchsucht die zuletzt aktiven Chats (Default 30), nicht alle.
+- GOWA kann selbst senden, löschen, Gruppen verwalten usw. Perch erlaubt nur Leserouten und `POST /send/message`. GOWA darf deshalb **nur auf localhost** lauschen und muss Basic-Auth haben.
+
+### 4f.1 GOWA installieren (Server, Nutzeraufgabe)
+
+Getestet wurde Perch nur gegen einen nachgebauten GOWA (API v9). Stand der Recherche: Release **v9.6.0** (2026-10-03).
+
+```bash
+mkdir -p ~/gowa && cd ~/gowa
+V=9.6.0
+curl -LO https://github.com/aldinokemal/go-whatsapp-web-multidevice/releases/download/v$V/whatsapp_${V}_linux_amd64.zip
+curl -LO https://github.com/aldinokemal/go-whatsapp-web-multidevice/releases/download/v$V/checksums.txt
+grep "whatsapp_${V}_linux_amd64.zip" checksums.txt | sha256sum -c -
+unzip whatsapp_${V}_linux_amd64.zip && chmod 700 ~/gowa
+```
+
+(`linux_arm64` für ARM-Server.) Die Datei `~/gowa/.env` (Rechte `0600`):
+
+```ini
+APP_HOST=127.0.0.1
+APP_PORT=3000
+# eigener langer Nutzer und ein zufälliges Passwort, z. B. openssl rand -base64 32
+APP_BASIC_AUTH=perch:HIER-EIN-ZUFAELLIGES-PASSWORT
+APP_OS=Perch
+# keine Web-Oberfläche (sie lädt sonst laufend HTML von GitHub nach)
+APP_UI_ENABLED=false
+APP_UI_AUTO_UPDATE=false
+# GOWAs eigener MCP-Server bietet Sende- und Lösch-Tools: aus
+MCP_ENABLED=false
+WHATSAPP_CHAT_STORAGE=true
+WHATSAPP_AUTO_REPLY=
+WHATSAPP_AUTO_MARK_READ=false
+WHATSAPP_AUTO_REJECT_CALL=false
+WHATSAPP_AUTO_DOWNLOAD_MEDIA=false
+WHATSAPP_WEBHOOK=
+WHATSAPP_PRESENCE_ON_CONNECT=unavailable
+```
+
+Mit `WHATSAPP_PRESENCE_ON_CONNECT=unavailable` erscheint das verknüpfte Gerät offline, sodass die Benachrichtigungen auf dem Handy normal bleiben. GOWAs „Presence-Puls“ (`WHATSAPP_PRESENCE_PULSE_*`, Default: einmal täglich 5 Minuten „online“) ist hier bewusst nicht abgeschaltet, weil nicht geprüft ist, ob die Sitzung ohne ihn stabil bleibt. Das beim Live-Test prüfen.
+
+systemd-User-Unit `~/.config/systemd/user/gowa.service` (nicht mitgeliefert, nicht automatisch installiert):
+
+```ini
+[Unit]
+Description=GOWA WhatsApp bridge (localhost only)
+
+[Service]
+WorkingDirectory=%h/gowa
+ExecStart=%h/gowa/whatsapp rest
+Restart=on-failure
+UMask=0077
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload && systemctl --user enable --now gowa
+curl -s -u "perch:PASSWORT" http://127.0.0.1:3000/devices   # Test: {"code":"SUCCESS",...}
+```
+
+GOWA liest die `.env` im Arbeitsverzeichnis. Den Port 3000 **nicht** per Tailscale Serve oder Firewall freigeben.
+
+### 4f.2 In Perch verbinden und koppeln
+
+```bash
+perch whatsapp instance set --url http://127.0.0.1:3000    # Nutzer und Passwort verdeckt eingeben
+perch whatsapp add --label "Privat" --phone +4366012345678
+```
+
+`whatsapp add` legt in GOWA einen eigenen Geräte-Slot an (`perch-…`) und zeigt einen **Kopplungscode**. Am Handy: WhatsApp → Einstellungen → **Verknüpfte Geräte** → **Gerät hinzufügen** → **Stattdessen mit Telefonnummer verknüpfen** → Code eingeben. Perch wartet bis zu 180 s (`--timeout`); läuft die Zeit ab, wird der Slot wieder gelöscht.
+
+Erlaubt sind nur Bridge-Adressen auf Loopback (`127.0.0.1`, `::1`, `localhost`) oder einer Tailscale-Adresse (100.64.0.0/10), mit Port. Mehrere WhatsApp-Konten (z. B. privat und geschäftlich) laufen über dieselbe GOWA-Instanz in getrennten Slots; jede Anfrage nennt ihren Slot ausdrücklich (`X-Device-Id`).
+
+```bash
+perch whatsapp list
+perch whatsapp status              # eingeloggt? verbunden?
+perch whatsapp remove ID           # löscht den Slot in GOWA: entkoppelt das Gerät, löscht die gespeicherten Chats
+perch whatsapp remove ID --keep-device   # nur lokal entfernen
+```
+
+### 4f.3 Lesen und Senden
+
+- **Lesen** (`whatsapp_list_chats`, `whatsapp_get_messages`, `whatsapp_search`): globales Token und jeder Client mit `whatsapp_read`. Medien nur als Metadaten (Typ, Dateiname, Größe), keine Downloads.
+- **Senden** (`whatsapp_send_message`, `whatsapp_send_status`): nur Text, optional als Antwort, nur mit Client-Grant `whatsapp_send` und Pflichtfeld `requestId`:
+
+  ```bash
+  perch client add --label "Claude Code" --allow whatsapp_read,whatsapp_send --account whatsapp-1a2b3c4d
+  ```
+
+  Ergebnis `accepted` (von GOWA an WhatsApp übergeben), `rejected` (GOWA hat abgelehnt, nicht gesendet) oder `indeterminate` (Antwort verloren; nie automatisch wiederholt).
+
 ## 5. Konten anzeigen, trennen, widerrufen
 
 ```bash
@@ -473,11 +623,23 @@ Token wechseln:
 2. Server neu starten
 3. `claude mcp remove perch` und den Befehl oben erneut ausführen
 
+### Codex einmalig konfigurieren (Laptop)
+
+Codex bindet Streamable-HTTP-MCP-Server über `~/.codex/config.toml` ein; das Token kommt aus einer Umgebungsvariable. Laut Codex-Dokumentation, mit Perch **nicht getestet**:
+
+```toml
+[mcp_servers.perch]
+url = "https://homeserver.tailnet-xyz.ts.net/mcp"   # oder http://127.0.0.1:8765/mcp (SSH-Tunnel)
+bearer_token_env_var = "PERCH_TOKEN"
+```
+
+`PERCH_TOKEN` in der Shell setzen, aus der Codex startet. Für Codex am besten ein **eigener Client-Grant** (`perch client add --label Codex …`): Dann lassen sich Claude Code und Codex getrennt freigeben und widerrufen, und das Audit-Log unterscheidet sie. Ein Client-Grant sieht allerdings weder Drive noch Notion; dafür bleibt das globale Read-only-Token.
+
 ## 7. Tools und Grenzen
 
 | Tool | Hinweise |
 | --- | --- |
-| `perch_list_accounts` | IDs, Labels, E-Mail bzw. Token-Eigentümer, keine Secrets. Für Client-Grants nur die gewährten Konten der gewährten Dienstfamilien (`mail` und/oder `googleProductivity`), keine Drive/Notion-Einträge |
+| `perch_list_accounts` | IDs, Labels, E-Mail bzw. Token-Eigentümer, keine Secrets. Für Client-Grants nur die gewährten Konten der gewährten Dienstfamilien (`mail`, `googleProductivity`, `slack`, `whatsapp`), keine Drive/Notion-Einträge |
 | `drive_search`, `drive_list_files` | `accountId` optional, ohne Angabe über alle Konten. `nextCursor`/`hasMore`, `partial`, `errors[]`, `incompleteSources` |
 | `drive_get_file`, `drive_read_file`, `drive_download_file`, `drive_export_file` | `maxBytes`: Default 48 KiB, explizit bis 10 MiB. Nur Text oder Base64, kein Schreiben ins Dateisystem |
 | `notion_search` | **Nur Titelsuche** über Seiten und Data Sources, keine Volltextsuche, eventuell unvollständig |
@@ -498,6 +660,15 @@ Token wechseln:
 | `calendar_create_event` | Nur mit Client-Grant `calendar_write` und Provider-Freigabe. Private Termine (`private`/`confidential`, ohne Angabe `private`) ohne Gäste/Benachrichtigungen an andere, nur Popup-Erinnerungen; `requestId` macht Wiederholungen idempotent. Ergebnis `created`, `conflict`, `rejected` oder `indeterminate` |
 | `calendar_update_event` | Nur mit `calendar_write` + `calendar_read`. PATCH mit `If-Match: etag`, `sendUpdates=none`, nur eigene Termine ohne Gäste und ohne Serie. Das Ergebnis ist immer privat und nur mit Popup-Erinnerungen (wird im selben PATCH gesetzt). Ergebnis `updated`, `precondition_failed`, `rejected` oder `indeterminate` |
 
+| `slack_list_conversations` | Kanäle, private Kanäle, Gruppen-DMs und DMs aller lesbaren Workspaces oder eines. `query` filtert nach Kanal- oder Personenname. Herkunft `workspaceId`/`workspaceLabel` |
+| `slack_get_history`, `slack_get_thread` | Nachrichten mit Namen (`userName`), Thread-Hinweisen (`threadTs`, `replyCount`) und Datei-Metadaten. Zeitfenster `oldest`/`latest` (RFC 3339). Cursor an Workspace und Kanal gebunden |
+| `slack_search` | Slacks Suche (`in:#kanal`, `from:@person`, `before:`/`after:`) über alle Workspaces, neueste zuerst, mit Permalink. Workspaces ohne `search:read` erscheinen in `errors[]` |
+| `slack_send_message`, `slack_send_status` | nur mit Client-Grant `slack_send`. Postet als der verbundene Nutzer, optional im Thread (`threadTs`, `replyBroadcast`). Pflichtfeld `requestId`; Ergebnis `accepted`/`rejected`/`indeterminate` wie bei Mail |
+| `whatsapp_list_chats` | Chats (Personen, Gruppen) aller lesbaren Konten oder eines, `query` nach Chatname, `archived` |
+| `whatsapp_get_messages` | Nachrichten eines Chats, Textsuche `query`, Zeitfenster `after`/`before`, `fromMe`, `mediaOnly`. Medien nur als Metadaten, keine Medien-URLs |
+| `whatsapp_search` | Textsuche in den zuletzt aktiven `chatLimit` Chats pro Konto (Default 30, max. 100), **keine** Suche über alle Chats |
+| `whatsapp_send_message`, `whatsapp_send_status` | nur mit Client-Grant `whatsapp_send`. Nur Text, optional als Antwort (`replyToMessageId`). Pflichtfeld `requestId` |
+
 ### Ausgabegröße und Client-Limits
 
 - MCP-Clients begrenzen die Tool-Ausgabe. Claude Code warnt bei großen Ausgaben und kürzt bzw. verwirft sie ab `MAX_MCP_OUTPUT_TOKENS`, Default etwa 25 000 Tokens (Wert in der Claude-Code-Dokumentation prüfen).
@@ -509,11 +680,12 @@ Token wechseln:
 
 - Fällt bei einer Suche über mehrere Konten eines aus, kommen die übrigen Ergebnisse mit `partial: true` und `errors[]`. Die nächste Seite versucht das ausgefallene Konto erneut.
 - Nach 3 Fehlversuchen gibt Perch es auf und meldet es auf jeder weiteren Seite.
-- Notion-Rate-Limits (HTTP 429) wiederholt Perch begrenzt, gemäß `Retry-After` und mit höchstens 10 s Wartezeit.
+- Notion- und Slack-Rate-Limits (HTTP 429) wiederholt Perch beim Lesen begrenzt, gemäß `Retry-After` und mit höchstens 10 s Wartezeit. Beim Senden nie.
 
 ### Sicherheitshinweise zur Nutzung
 
 - **Inhalte sind nicht vertrauenswürdig (Prompt Injection).** Dateien und Notion-Seiten können Anweisungen an das Modell enthalten, z. B. geteilte Dokumente Dritter. Perch ist read-only und kann upstream nichts ändern. Die Claude-Code-Sitzung hat aber eventuell andere Tools (Shell, Web, weitere MCP-Server), über die Daten abfließen könnten. Tool-Freigaben in Claude Code bewusst setzen und Ergebnisse aus fremden Dokumenten kritisch lesen.
+- **Slack und WhatsApp senden:** dasselbe gilt für `slack_send_message` und `whatsapp_send_message`. Slack-Nachrichten und WhatsApp-Chats sind ebenso nicht vertrauenswürdige Eingaben.
 - **Mail-Versand:** Ein Modell mit `mail_send` kann im Namen des Kontos schreiben. Send-Grants nur gezielt vergeben, Tool-Freigaben in Claude Code nicht pauschal erlauben, und Empfänger und Inhalt vor dem Senden bestätigen. Eingehende Mails können Prompt-Injection enthalten.
 - Das Notion-PAT könnte laut Notion auch schreiben. Perch blockiert das per Allowlist, das Token selbst bleibt aber mächtig. Deshalb geschützt aufbewahren (verschlüsselte DB) und bei Verdacht in Notion widerrufen.
 

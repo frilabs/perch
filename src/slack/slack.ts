@@ -1,0 +1,573 @@
+import { createHash } from 'node:crypto';
+import { actorOf, type AuditLog } from '../audit/audit.js';
+import { assertSlackCapability, currentPrincipal, type Principal } from '../auth/grants.js';
+import { PerchError } from '../errors.js';
+import { fanOut, type FanOutResult } from '../fanout.js';
+import { newAccountId, validateLabel } from '../ids.js';
+import type { SendWorkflow } from '../mail/workflow.js';
+import { messageSendStatus, sendMessageIdempotently, type MessageSendResult, type MessageSendView } from '../messaging/send.js';
+import type { CredentialStore, SlackWorkspace } from '../store/credentialStore.js';
+import { SLACK_CHANNEL_ID, SLACK_TS, UpstreamError, type Upstream } from '../upstream.js';
+
+/**
+ * Slack Web API with a user token (xoxp-…) per workspace. Each workspace uses its own internal app
+ * (docs/slack-app-manifest.json): internal apps keep Slack's normal rate tiers for conversations.history
+ * and conversations.replies, which commercially distributed non-Marketplace apps do not.
+ *
+ * Reads are plain allowlisted GETs. Posting (chat.postMessage) needs a client grant with slack_send for
+ * the workspace and goes through the idempotent send workflow (src/messaging/send.ts).
+ */
+
+/** User-token scopes of the bundled manifest (docs/slack-app-manifest.json). */
+export const SLACK_USER_SCOPES = [
+  'channels:read',
+  'channels:history',
+  'groups:read',
+  'groups:history',
+  'im:read',
+  'im:history',
+  'mpim:read',
+  'mpim:history',
+  'users:read',
+  'search:read',
+  'chat:write',
+] as const;
+
+export const DEFAULT_SLACK_PAGE_SIZE = 50;
+export const MAX_SLACK_PAGE_SIZE = 200;
+export const MAX_SLACK_SEARCH_PAGE_SIZE = 100;
+/** Slack truncates longer messages; Perch refuses instead. */
+export const MAX_SLACK_TEXT = 40_000;
+export const CONVERSATION_TYPES = ['public_channel', 'private_channel', 'mpim', 'im'] as const;
+export type ConversationType = (typeof CONVERSATION_TYPES)[number];
+
+const MAX_RETRIES_PER_REQUEST = 3;
+const MAX_RETRIES_PER_CALL = 6;
+const MAX_RETRY_WAIT_MS = 10_000;
+/** Upper bound on users.info lookups per tool call (names are cached per workspace afterwards). */
+const MAX_USER_LOOKUPS_PER_CALL = 50;
+const MAX_CACHED_USERS = 5000;
+/** conversations.list pages scanned per result page when filtering by name. */
+const MAX_FILTER_SCANS = 20;
+const SLACK_ERROR = /^[a-z_]{1,64}$/;
+const SLACK_USER = /^[UW][A-Z0-9]{2,30}$/;
+
+export interface WorkspaceProvenance {
+  workspaceId: string;
+  workspaceLabel: string;
+  team?: string;
+}
+
+const fingerprint = (s: string) => createHash('sha256').update(s).digest('hex');
+const auth = (token: string) => ({ authorization: `Bearer ${token}` });
+
+function slackFailure(code: unknown): PerchError {
+  const c = typeof code === 'string' && SLACK_ERROR.test(code) ? code : 'unknown_error';
+  if (c === 'missing_scope') {
+    return new PerchError('Slack refused: the token lacks a required scope. Add it to the app (docs/slack-app-manifest.json), reinstall and run perch slack add again', 'provider_scope_missing');
+  }
+  if (['invalid_auth', 'not_authed', 'token_revoked', 'token_expired', 'account_inactive'].includes(c)) {
+    return new PerchError(`Slack refused the token (${c}): it is invalid, revoked or the app was uninstalled; reconnect with perch slack add`, 'upstream_error');
+  }
+  if (c === 'ratelimited') return new PerchError('Slack rate limit reached; try again later', 'upstream_error');
+  return new PerchError(`Slack request failed (${c})`, 'upstream_error');
+}
+
+function bounded(name: string, value: number | undefined, def: number, max: number): number {
+  const n = value ?? def;
+  if (!Number.isInteger(n) || n < 1 || n > max) throw new PerchError(`${name} must be between 1 and ${max}`, 'bad_argument');
+  return n;
+}
+
+function channelIdOf(v: unknown): string {
+  if (typeof v !== 'string' || !SLACK_CHANNEL_ID.test(v)) throw new PerchError('channelId must be a Slack conversation id (C…, G… or D…) from slack_list_conversations', 'bad_argument');
+  return v;
+}
+
+function tsOf(v: unknown, what: string): string {
+  if (typeof v !== 'string' || !SLACK_TS.test(v)) throw new PerchError(`${what} must be a Slack message timestamp like 1712345678.123456`, 'bad_argument');
+  return v;
+}
+
+/** RFC 3339 (with offset) to a Slack epoch timestamp string. */
+function epochOf(v: string | undefined, what: string): string | undefined {
+  if (v === undefined) return undefined;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/.test(v)) {
+    throw new PerchError(`${what} must be an RFC 3339 timestamp with offset, e.g. 2026-10-05T09:00:00+02:00`, 'bad_argument');
+  }
+  const ms = Date.parse(v);
+  if (!Number.isFinite(ms)) throw new PerchError(`${what} is not a valid time`, 'bad_argument');
+  return (ms / 1000).toFixed(6);
+}
+
+const isoOf = (ts: string | undefined) => {
+  const n = Number(ts);
+  return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toISOString() : undefined;
+};
+
+/**
+ * Slack ts is not a valid ledger provider id ('.'): stored as `<seconds>_<micros>`. The conversation id is
+ * never stored (the ledger holds no recipients); the caller knows it from its own request.
+ */
+const encodeTs = (ts: string) => ts.replace('.', '_');
+const decodeTs = (ref: string | undefined) => {
+  const m = ref ? /^(\d{9,11})_(\d{6})$/.exec(ref) : null;
+  return m ? `${m[1]}.${m[2]}` : undefined;
+};
+
+type Raw = Record<string, unknown>;
+
+export interface SlackMessage {
+  ts: string;
+  time?: string;
+  user?: string;
+  userName?: string;
+  botName?: string;
+  subtype?: string;
+  text: string;
+  threadTs?: string;
+  replyCount?: number;
+  edited?: boolean;
+  files?: Array<{ name?: string; mimetype?: string; size?: number }>;
+}
+
+function toMessage(m: Raw): SlackMessage {
+  const files = Array.isArray(m.files)
+    ? (m.files as Raw[]).map((f) => ({
+        ...(typeof f.name === 'string' ? { name: f.name } : {}),
+        ...(typeof f.mimetype === 'string' ? { mimetype: f.mimetype } : {}),
+        ...(typeof f.size === 'number' ? { size: f.size } : {}),
+      }))
+    : undefined;
+  const ts = String(m.ts ?? '');
+  const time = isoOf(ts);
+  return {
+    ts,
+    ...(time ? { time } : {}),
+    ...(typeof m.user === 'string' ? { user: m.user } : {}),
+    ...(typeof m.username === 'string' ? { botName: m.username } : {}),
+    ...(typeof m.subtype === 'string' ? { subtype: m.subtype } : {}),
+    text: typeof m.text === 'string' ? m.text : '',
+    ...(typeof m.thread_ts === 'string' && m.thread_ts !== m.ts ? { threadTs: m.thread_ts } : {}),
+    ...(typeof m.reply_count === 'number' ? { replyCount: m.reply_count } : {}),
+    ...(m.edited ? { edited: true } : {}),
+    ...(files?.length ? { files } : {}),
+  };
+}
+
+function conversationType(c: Raw): ConversationType {
+  if (c.is_im) return 'im';
+  if (c.is_mpim) return 'mpim';
+  if (c.is_private || c.is_group) return 'private_channel';
+  return 'public_channel';
+}
+
+/**
+ * Validates a user token with auth.test and stores it under a user-assigned label. Bot tokens are refused:
+ * they cannot read DMs or search, and would post as the app instead of the user.
+ */
+export async function addSlackWorkspace(store: CredentialStore, upstream: Upstream, input: { label: string; token: string }): Promise<SlackWorkspace> {
+  const label = validateLabel(input.label);
+  const token = input.token.trim();
+  if (!token) throw new PerchError('Empty token', 'bad_argument');
+  if (!/^xoxp-[A-Za-z0-9-]{10,500}$/.test(token)) {
+    throw new PerchError('Expected a Slack user token (xoxp-…, "User OAuth Token" of the app). Bot (xoxb-), rotating (xoxe-) and app-level (xapp-) tokens are not supported', 'bad_argument');
+  }
+  const existing = (await store.read()).slack.find((w) => fingerprint(w.token) === fingerprint(token));
+  if (existing) throw new PerchError(`This token is already connected as ${existing.id} ("${existing.label}")`, 'duplicate_account');
+  const res = await upstream.raw('slack', { method: 'GET', path: '/api/auth.test', headers: auth(token) });
+  let body: Raw;
+  try {
+    body = JSON.parse(res.body.toString('utf8')) as Raw;
+  } catch {
+    throw new PerchError('Slack returned a malformed response', 'upstream_bad_response');
+  }
+  if (body.ok !== true) throw slackFailure(body.error);
+  const teamId = typeof body.team_id === 'string' ? body.team_id : '';
+  const userId = typeof body.user_id === 'string' ? body.user_id : '';
+  if (!/^[TE][A-Z0-9]{2,30}$/.test(teamId) || !SLACK_USER.test(userId)) throw new PerchError('Slack returned an unexpected identity', 'upstream_bad_response');
+  const scopes = (res.headers['x-oauth-scopes'] ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => /^[a-z.:_-]{1,100}$/.test(s));
+  return store.update((data) => {
+    if (data.slack.some((w) => fingerprint(w.token) === fingerprint(token))) throw new PerchError('This token is already connected', 'duplicate_account');
+    const dup = data.slack.find((w) => w.teamId === teamId && w.userId === userId);
+    if (dup) throw new PerchError(`This Slack user in this workspace is already connected as ${dup.id} ("${dup.label}"); remove it first to replace the token`, 'duplicate_account');
+    const now = new Date().toISOString();
+    const ws: SlackWorkspace = {
+      id: newAccountId('slack', data.slack.map((w) => w.id)),
+      label,
+      token,
+      teamId,
+      ...(typeof body.team === 'string' ? { teamName: body.team.slice(0, 200) } : {}),
+      ...(typeof body.url === 'string' ? { teamUrl: body.url.slice(0, 500) } : {}),
+      userId,
+      ...(typeof body.user === 'string' ? { userName: body.user.slice(0, 200) } : {}),
+      scopes,
+      createdAt: now,
+      updatedAt: now,
+    };
+    data.slack.push(ws);
+    return ws;
+  });
+}
+
+/** Local disconnect only. The token stays valid until the app is uninstalled or the token revoked in Slack. */
+export async function removeSlackWorkspace(store: CredentialStore, id: string): Promise<void> {
+  await store.update((data) => {
+    if (!data.slack.some((w) => w.id === id)) throw new PerchError(`Unknown Slack workspace: ${id}`, 'unknown_account');
+    data.slack = data.slack.filter((w) => w.id !== id);
+  });
+}
+
+const bindingParts = (ws: SlackWorkspace) => ['slack', ws.id, ws.teamId, ws.userId, fingerprint(ws.token)];
+
+/** Per tool call: 429 retries left and users.info lookups left (shared by every page and scan of the call). */
+interface RetryBudget {
+  remaining: number;
+  lookups: number;
+}
+
+const newBudget = (): RetryBudget => ({ remaining: MAX_RETRIES_PER_CALL, lookups: MAX_USER_LOOKUPS_PER_CALL });
+
+export interface SlackSendRequest {
+  workspaceId: string;
+  channelId: string;
+  text: string;
+  threadTs?: string;
+  replyBroadcast?: boolean;
+  requestId: string;
+}
+
+export class SlackService {
+  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly guard?: () => Promise<void>;
+  private readonly users = new Map<string, string>();
+
+  constructor(
+    private readonly store: CredentialStore,
+    private readonly upstream: Upstream,
+    private readonly workflow: SendWorkflow,
+    private readonly audit: AuditLog,
+    opts: { sleep?: (ms: number) => Promise<void>; guard?: () => Promise<void> } = {},
+  ) {
+    this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    this.guard = opts.guard;
+  }
+
+  private async workspace(id: unknown): Promise<SlackWorkspace> {
+    const ws = typeof id === 'string' ? (await this.store.read()).slack.find((w) => w.id === id) : undefined;
+    if (!ws) throw new PerchError(`Unknown Slack workspace: ${String(id)}`, 'unknown_account');
+    return ws;
+  }
+
+  private async readable(p: Principal, id: unknown): Promise<SlackWorkspace> {
+    if (typeof id !== 'string') throw new PerchError('workspaceId is required', 'bad_argument');
+    assertSlackCapability(p, id, 'slack_read');
+    return this.workspace(id);
+  }
+
+  private async readableAll(p: Principal, id: string | undefined): Promise<SlackWorkspace[]> {
+    if (id !== undefined) return [await this.readable(p, id)];
+    if (!p.capabilities.has('slack_read')) throw new PerchError('Capability "slack_read" is not granted to this client', 'capability_denied');
+    return (await this.store.read()).slack.filter((w) => p.slackAccounts === 'all' || p.slackAccounts.has(w.id));
+  }
+
+  private prov(ws: SlackWorkspace): WorkspaceProvenance {
+    return { workspaceId: ws.id, workspaceLabel: ws.label, ...(ws.teamName ? { team: ws.teamName } : {}) };
+  }
+
+  private async call<T extends Raw>(budget: RetryBudget, ws: SlackWorkspace, method: string, query: Record<string, string | number | boolean | undefined>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const body = await this.upstream.json<Raw>('slack', { method: 'GET', path: `/api/${method}`, query, headers: auth(ws.token) });
+        if (body.ok !== true) throw slackFailure(body.error);
+        return body as T;
+      } catch (err) {
+        const limited = err instanceof UpstreamError && err.status === 429;
+        if (!limited || attempt >= MAX_RETRIES_PER_REQUEST || budget.remaining <= 0) throw err;
+        budget.remaining--;
+        await this.sleep(Math.min((err.retryAfterSeconds ?? 1) * 1000, MAX_RETRY_WAIT_MS));
+      }
+    }
+  }
+
+  /** Adds userName to messages (users.info, cached per workspace, bounded per call; failures are ignored). */
+  private async withNames<T extends { user?: string; userName?: string }>(budget: RetryBudget, ws: SlackWorkspace, items: T[]): Promise<T[]> {
+    for (const id of new Set(items.map((m) => m.user).filter((u): u is string => typeof u === 'string' && SLACK_USER.test(u)))) {
+      const key = `${ws.id}:${id}`;
+      if (this.users.has(key) || budget.lookups <= 0) continue;
+      budget.lookups--;
+      try {
+        const r = await this.call<{ user?: Raw }>(budget, ws, 'users.info', { user: id });
+        const profile = (r.user?.profile ?? {}) as Raw;
+        const name = [profile.display_name, profile.real_name, r.user?.real_name, r.user?.name].find((n) => typeof n === 'string' && n.trim());
+        if (typeof name === 'string') {
+          if (this.users.size >= MAX_CACHED_USERS) this.users.delete(this.users.keys().next().value!);
+          this.users.set(key, name.slice(0, 200));
+        }
+      } catch {
+        // Names are a convenience; the stable user id stays in the result.
+      }
+    }
+    return items.map((m) => {
+      const name = m.user ? this.users.get(`${ws.id}:${m.user}`) : undefined;
+      return name ? { ...m, userName: name } : m;
+    });
+  }
+
+  /** Channels, private channels, group DMs and DMs the token's user is in (or can see), across workspaces. */
+  async listConversations(
+    p: Principal,
+    input: { workspaceId?: string; types?: ConversationType[]; query?: string; pageSize?: number; cursor?: string },
+  ): Promise<FanOutResult<Raw & WorkspaceProvenance>> {
+    const pageSize = bounded('pageSize', input.pageSize, DEFAULT_SLACK_PAGE_SIZE, MAX_SLACK_PAGE_SIZE);
+    const types = input.types?.length ? [...new Set(input.types)] : [...CONVERSATION_TYPES];
+    if (types.some((t) => !(CONVERSATION_TYPES as readonly string[]).includes(t))) throw new PerchError(`types must be of ${CONVERSATION_TYPES.join(', ')}`, 'bad_argument');
+    const needle = input.query?.trim().toLowerCase();
+    const workspaces = await this.readableAll(p, input.workspaceId);
+    const budget = newBudget();
+    const res = await fanOut<Raw>({
+      kind: 'slack-conversations',
+      queryKey: { ws: input.workspaceId ?? null, types, q: needle ?? null, pageSize },
+      sources: workspaces,
+      seal: this.store,
+      cursor: input.cursor,
+      fetchPage: async (source, start) => {
+        const ws = workspaces.find((w) => w.id === source.id)!;
+        const items: Raw[] = [];
+        let cursor = start;
+        for (let scans = 0; scans < (needle ? MAX_FILTER_SCANS : 1); scans++) {
+          const r = await this.call<{ channels?: Raw[]; response_metadata?: { next_cursor?: string } }>(budget, ws, 'conversations.list', {
+            types: types.join(','),
+            exclude_archived: true,
+            limit: needle ? MAX_SLACK_PAGE_SIZE : pageSize,
+            cursor,
+          });
+          let rows = (r.channels ?? []).map((c) => ({
+            channelId: String(c.id),
+            type: conversationType(c),
+            ...(typeof c.name === 'string' ? { name: c.name } : {}),
+            ...(typeof c.user === 'string' ? { user: c.user } : {}),
+            ...(typeof c.is_member === 'boolean' ? { isMember: c.is_member } : {}),
+            ...(typeof c.num_members === 'number' ? { numMembers: c.num_members } : {}),
+            ...((c.topic as Raw | undefined)?.value ? { topic: String((c.topic as Raw).value).slice(0, 500) } : {}),
+          }));
+          rows = await this.withNames(budget, ws, rows);
+          if (needle) rows = rows.filter((c) => [c.name, (c as { userName?: string }).userName].some((n) => typeof n === 'string' && n.toLowerCase().includes(needle)));
+          items.push(...rows);
+          cursor = r.response_metadata?.next_cursor || undefined;
+          if (!cursor || items.length >= pageSize) break;
+        }
+        return { items, next: cursor ?? null };
+      },
+    });
+    return { ...res, results: res.results.map(({ accountId, accountLabel, ...c }) => ({ ...c, workspaceId: accountId, workspaceLabel: accountLabel })) };
+  }
+
+  /** Messages of one conversation, newest first. */
+  async getHistory(p: Principal, input: { workspaceId: string; channelId: string; oldest?: string; latest?: string; pageSize?: number; cursor?: string }) {
+    const ws = await this.readable(p, input.workspaceId);
+    const channel = channelIdOf(input.channelId);
+    const pageSize = bounded('pageSize', input.pageSize, DEFAULT_SLACK_PAGE_SIZE, MAX_SLACK_PAGE_SIZE);
+    const kind = `slack-history:${ws.id}:${channel}:${input.oldest ?? ''}:${input.latest ?? ''}`;
+    const budget = newBudget();
+    const r = await this.call<{ messages?: Raw[]; has_more?: boolean; response_metadata?: { next_cursor?: string } }>(budget, ws, 'conversations.history', {
+      channel,
+      limit: pageSize,
+      oldest: epochOf(input.oldest, 'oldest'),
+      latest: epochOf(input.latest, 'latest'),
+      cursor: input.cursor ? this.store.openCursor(kind, input.cursor) : undefined,
+    });
+    const next = r.response_metadata?.next_cursor;
+    return {
+      ...this.prov(ws),
+      channelId: channel,
+      messages: await this.withNames(budget, ws, (r.messages ?? []).map(toMessage)),
+      nextCursor: next ? this.store.sealCursor(kind, next) : null,
+      hasMore: Boolean(next),
+    };
+  }
+
+  /** A thread: the parent message followed by its replies, oldest first. */
+  async getThread(p: Principal, input: { workspaceId: string; channelId: string; threadTs: string; pageSize?: number; cursor?: string }) {
+    const ws = await this.readable(p, input.workspaceId);
+    const channel = channelIdOf(input.channelId);
+    const ts = tsOf(input.threadTs, 'threadTs');
+    const pageSize = bounded('pageSize', input.pageSize, DEFAULT_SLACK_PAGE_SIZE, MAX_SLACK_PAGE_SIZE);
+    const kind = `slack-thread:${ws.id}:${channel}:${ts}`;
+    const budget = newBudget();
+    const r = await this.call<{ messages?: Raw[]; response_metadata?: { next_cursor?: string } }>(budget, ws, 'conversations.replies', {
+      channel,
+      ts,
+      limit: pageSize,
+      cursor: input.cursor ? this.store.openCursor(kind, input.cursor) : undefined,
+    });
+    const next = r.response_metadata?.next_cursor;
+    return {
+      ...this.prov(ws),
+      channelId: channel,
+      threadTs: ts,
+      messages: await this.withNames(budget, ws, (r.messages ?? []).map(toMessage)),
+      nextCursor: next ? this.store.sealCursor(kind, next) : null,
+      hasMore: Boolean(next),
+    };
+  }
+
+  /** Slack's message search (search.messages; supports in:#channel, from:@user, before:/after: modifiers), newest first. */
+  async search(p: Principal, input: { query: string; workspaceId?: string; pageSize?: number; cursor?: string }): Promise<FanOutResult<Raw & WorkspaceProvenance>> {
+    const query = input.query?.trim();
+    if (!query) throw new PerchError('query is required', 'bad_argument');
+    const pageSize = bounded('pageSize', input.pageSize, 20, MAX_SLACK_SEARCH_PAGE_SIZE);
+    const workspaces = await this.readableAll(p, input.workspaceId);
+    const budget = newBudget();
+    const res = await fanOut<Raw>({
+      kind: 'slack-search',
+      queryKey: { q: query, ws: input.workspaceId ?? null, pageSize },
+      sources: workspaces,
+      seal: this.store,
+      cursor: input.cursor,
+      fetchPage: async (source, start) => {
+        const ws = workspaces.find((w) => w.id === source.id)!;
+        if (!ws.scopes.includes('search:read')) throw new PerchError('This workspace token has no search:read scope; add it to the app and reconnect', 'provider_scope_missing');
+        const page = start ? Number(start) : 1;
+        if (!Number.isInteger(page) || page < 1 || page > 100) throw new PerchError('Invalid cursor', 'bad_cursor');
+        const r = await this.call<{ messages?: { matches?: Raw[]; paging?: { page?: number; pages?: number } } }>(budget, ws, 'search.messages', {
+          query,
+          count: pageSize,
+          page,
+          sort: 'timestamp',
+          sort_dir: 'desc',
+          highlight: false,
+        });
+        const matches = (r.messages?.matches ?? []).map((m) => {
+          const ch = (m.channel ?? {}) as Raw;
+          const msg = toMessage(m);
+          return {
+            ...msg,
+            ...(typeof ch.id === 'string' ? { channelId: ch.id } : {}),
+            ...(typeof ch.name === 'string' ? { channelName: ch.name } : {}),
+            ...(typeof m.username === 'string' ? { userName: m.username } : {}),
+            ...(typeof m.permalink === 'string' ? { permalink: m.permalink } : {}),
+          };
+        });
+        const pages = r.messages?.paging?.pages ?? 1;
+        return { items: matches, next: page < pages && page < 100 ? String(page + 1) : null };
+      },
+    });
+    return { ...res, results: res.results.map(({ accountId, accountLabel, ...m }) => ({ ...m, workspaceId: accountId, workspaceLabel: accountLabel })) };
+  }
+
+  /** Re-checks the namespace guard and the stored grant (revocation applies before the provider call). */
+  private async stillAllowed(stale: Principal, workspaceId: string): Promise<void> {
+    await this.guard?.();
+    assertSlackCapability(await currentPrincipal(this.store, stale), workspaceId, 'slack_send');
+  }
+
+  private assertCanPost(ws: SlackWorkspace): void {
+    if (!ws.scopes.includes('chat:write')) {
+      throw new PerchError(`Workspace ${ws.id} was connected without the chat:write scope. Add it to the app, reinstall and run perch slack add again`, 'provider_scope_missing');
+    }
+  }
+
+  /** Posts a message as the token's user (idempotent per requestId; see src/messaging/send.ts). */
+  async send(p: Principal, req: SlackSendRequest): Promise<Omit<MessageSendView, 'providerMessageId'> & WorkspaceProvenance & { channelId: string; messageTs?: string }> {
+    let ws: SlackWorkspace | undefined;
+    let channel = '';
+    const view = await sendMessageIdempotently({
+      workflow: this.workflow,
+      audit: this.audit,
+      actor: actorOf(p),
+      provider: 'slack',
+      accountId: req?.workspaceId,
+      prepare: async () => {
+        await this.guard?.();
+        if (typeof req?.workspaceId !== 'string') throw new PerchError('workspaceId is required', 'bad_argument');
+        assertSlackCapability(p, req.workspaceId, 'slack_send');
+        ws = await this.workspace(req.workspaceId);
+        this.assertCanPost(ws);
+        channel = channelIdOf(req.channelId);
+        if (typeof req.text !== 'string' || !req.text.trim()) throw new PerchError('text must not be empty', 'bad_argument');
+        if (req.text.length > MAX_SLACK_TEXT) throw new PerchError(`text exceeds ${MAX_SLACK_TEXT} characters`, 'bad_argument');
+        const threadTs = req.threadTs === undefined ? undefined : tsOf(req.threadTs, 'threadTs');
+        if (req.replyBroadcast !== undefined && typeof req.replyBroadcast !== 'boolean') throw new PerchError('replyBroadcast must be a boolean', 'bad_argument');
+        if (req.replyBroadcast && !threadTs) throw new PerchError('replyBroadcast requires threadTs', 'bad_argument');
+        const canonical = JSON.stringify(['perch-slack-send-v1', ws.id, channel, req.text, threadTs ?? null, req.replyBroadcast ?? false]);
+        return { accountId: ws.id, requestId: req.requestId, canonical, binding: bindingParts(ws) };
+      },
+      attempt: (binding) => this.attempt(p, req, channel, binding),
+    });
+    const ts = decodeTs(view.providerMessageId);
+    const { providerMessageId: _ref, ...rest } = view;
+    return { ...this.prov(ws!), ...rest, channelId: channel, ...(ts ? { messageTs: ts } : {}) };
+  }
+
+  private async attempt(p: Principal, req: SlackSendRequest, channel: string, binding: string): Promise<MessageSendResult> {
+    const notSent = (detail: string, reason: MessageSendResult['reason']): MessageSendResult => ({ status: 'rejected', detail: `Not sent: ${detail}`, reason });
+    try {
+      await this.stillAllowed(p, req.workspaceId);
+    } catch (err) {
+      return notSent(err instanceof PerchError ? err.message : 'the request is no longer authorised', 'not_submitted_authorization');
+    }
+    const current = (await this.store.read()).slack.find((w) => w.id === req.workspaceId);
+    if (!current || (await this.workflow.binding(bindingParts(current))) !== binding) {
+      return notSent('the workspace was removed or reconnected since this requestId was first used', 'not_submitted_account_changed');
+    }
+    try {
+      this.assertCanPost(current);
+    } catch (err) {
+      return notSent((err as PerchError).message, 'not_submitted_provider_precheck');
+    }
+    let body: Raw;
+    try {
+      body = await this.upstream.json<Raw>('slack', {
+        method: 'POST',
+        path: '/api/chat.postMessage',
+        capability: 'slack_send',
+        headers: auth(current.token),
+        json: {
+          channel,
+          text: req.text,
+          ...(req.threadTs ? { thread_ts: req.threadTs } : {}),
+          ...(req.replyBroadcast ? { reply_broadcast: true } : {}),
+        },
+      });
+    } catch (err) {
+      // Slack answered with an error status: not processed (429 = rate limited before processing).
+      if (err instanceof UpstreamError && err.status < 500) return notSent(`Slack refused the request (HTTP ${err.status})`, 'provider_rejected');
+      if (err instanceof PerchError && err.code === 'route_not_allowed') return notSent(err.message, 'not_submitted_provider_precheck');
+      return { status: 'indeterminate', detail: 'The request to Slack failed after it may have been processed; the outcome is unknown.', reason: 'provider_unknown' };
+    }
+    if (body.ok !== true) return notSent(slackFailure(body.error).message, 'provider_rejected');
+    const ts = typeof body.ts === 'string' && SLACK_TS.test(body.ts) ? body.ts : undefined;
+    return { status: 'accepted', detail: 'Posted.', ...(ts ? { providerMessageId: encodeTs(ts) } : {}), reason: 'provider_accepted' };
+  }
+
+  async sendStatus(p: Principal, input: { workspaceId: string; requestId: string }) {
+    if (typeof input?.workspaceId !== 'string') throw new PerchError('workspaceId is required', 'bad_argument');
+    assertSlackCapability(p, input.workspaceId, 'slack_send');
+    const ws = await this.workspace(input.workspaceId);
+    const view = await messageSendStatus(this.workflow, actorOf(p), ws.id, input.requestId, bindingParts(ws));
+    const ts = decodeTs(view.providerMessageId);
+    const { providerMessageId: _ref, ...rest } = view;
+    return { ...this.prov(ws), ...rest, ...(ts ? { messageTs: ts } : {}) };
+  }
+
+  /** Workspaces visible to this principal (never tokens). */
+  async listWorkspaces(p: Principal) {
+    const data = await this.store.read();
+    return data.slack
+      .filter((w) => p.slackAccounts === 'all' || p.slackAccounts.has(w.id))
+      .map((w) => ({
+        workspaceId: w.id,
+        label: w.label,
+        ...(w.teamName ? { team: w.teamName } : {}),
+        ...(w.userName ? { user: w.userName } : {}),
+        canSearch: w.scopes.includes('search:read'),
+        canPost: w.scopes.includes('chat:write'),
+        granted: [...p.capabilities].filter((c) => c.startsWith('slack_')).sort(),
+        connectedAt: w.createdAt,
+      }));
+  }
+}

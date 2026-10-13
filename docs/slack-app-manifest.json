@@ -1,0 +1,28 @@
+{
+  "display_information": {
+    "name": "Perch",
+    "description": "Personal MCP connector: lets my own AI tools read and post Slack messages as me."
+  },
+  "oauth_config": {
+    "scopes": {
+      "user": [
+        "channels:read",
+        "channels:history",
+        "groups:read",
+        "groups:history",
+        "im:read",
+        "im:history",
+        "mpim:read",
+        "mpim:history",
+        "users:read",
+        "search:read",
+        "chat:write"
+      ]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

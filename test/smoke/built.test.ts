@@ -21,8 +21,8 @@ import { CredentialStore } from '../../src/store/credentialStore.js';
 import { openUserStore } from '../../src/users/registry.js';
 import { dummySecret, makeTempDirs, type TempDirs } from '../support/fixtures.js';
 
-/** Read-only tool count (Drive/Notion 14 + mail read 3 + Calendar read 3 + Contacts read 2). Write tools need a client grant. */
-const READ_ONLY_TOOLS = 22;
+/** Read-only tool count (Drive/Notion 14 + mail read 3 + Calendar read 3 + Contacts read 2 + Slack read 4 + WhatsApp read 3). Write tools need a client grant. */
+const READ_ONLY_TOOLS = 29;
 
 const CLI = path.resolve('dist/cli.js');
 const GUARD = pathToFileURL(path.resolve('test/smoke/offlineGuard.mjs')).href;
