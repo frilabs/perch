@@ -1,16 +1,24 @@
 import { randomBytes } from 'node:crypto';
 import { PerchError } from '../errors.js';
 import type { ComposeAttachment } from './compose.js';
-import { ACCEPTED_NOTE, type MailProviderKind } from './types.js';
+import { ACCEPTED_NOTE } from './types.js';
 import {
   MAX_SEND_RECORDS,
   PROVIDER_MESSAGE_ID_PATTERN,
   type Actor,
   type MailWorkflowLedger,
   type SendReason,
+  type SendProvider,
   type SendRecord,
   type SendState,
 } from './workflowLedger.js';
+
+/** Audit operation type of a send record, derived from its provider (never caller text). */
+export function sendTypeOf(provider: SendProvider): string {
+  if (provider === 'slack') return 'slack_send_message';
+  if (provider === 'whatsapp') return 'whatsapp_send_message';
+  return 'mail_send';
+}
 
 /**
  * Durable idempotent send workflow. One send record per (namespace, actor, account, requestId):
@@ -124,7 +132,7 @@ export interface ClaimInput {
   binding: string;
   operationId: string;
   accountId: string;
-  provider: MailProviderKind;
+  provider: SendProvider;
   actor: Actor;
 }
 
@@ -148,7 +156,7 @@ export class SendWorkflow {
 
   /** Atomic claim (see class comment). Conflicts and changed accounts are audited, then thrown. */
   async claim(c: ClaimInput): Promise<ClaimResult> {
-    const base = { ns: this.ledger.namespace, actor: c.actor, operationId: c.operationId, type: 'mail_send', accountId: c.accountId, provider: c.provider };
+    const base = { ns: this.ledger.namespace, actor: c.actor, operationId: c.operationId, type: sendTypeOf(c.provider), accountId: c.accountId, provider: c.provider };
     const at = () => new Date().toISOString();
     const r = await this.ledger.transact((d) => {
       const existing = d.sends.find((s) => s.key === c.key);
@@ -219,7 +227,7 @@ export class SendWorkflow {
           ns: this.ledger.namespace,
           actor: rec.actor,
           operationId: rec.operationId,
-          type: 'mail_send',
+          type: sendTypeOf(rec.provider),
           accountId: rec.accountId,
           provider: rec.provider,
           outcome: state,

@@ -35,12 +35,15 @@ import { createMcpServer } from '../mcp/server.js';
 import { registerMicrosoftAccount, removeMicrosoftAccount } from '../microsoft/accounts.js';
 import { runMicrosoftAuthorization, validateTenant } from '../microsoft/oauth.js';
 import { addNotionWorkspace, removeNotionWorkspace } from '../notion/notion.js';
+import { SLACK_APP_MANIFEST } from '../slack/manifest.js';
+import { addSlackWorkspace, removeSlackWorkspace } from '../slack/slack.js';
 import { ensurePrivateDir, pathExists, readPrivateFile, writePrivateFileAtomic, writePrivateFileExclusive } from '../secureFs.js';
 import { CredentialStore, initStore, type ImapAccount, type StoreData } from '../store/credentialStore.js';
 import { createFetchTransport, Upstream, type UpstreamTransport } from '../upstream.js';
 import { NamespaceRouter } from '../users/namespaces.js';
 import { addUser, listUsers, openUserStore, removeUser, userStorePaths } from '../users/registry.js';
 import { PERCH_VERSION } from '../version.js';
+import { DEFAULT_PAIR_TIMEOUT_MS, pairWhatsappAccount, removeWhatsappAccount, setWhatsappInstance, whatsappDeviceStatus } from '../whatsapp/whatsapp.js';
 
 export interface CliIo {
   env: Record<string, string | undefined>;
@@ -52,9 +55,11 @@ export interface CliIo {
   transport?: UpstreamTransport;
   /** Tests inject a MOCK IMAP/SMTP login check; production logs in to the real servers over TLS. */
   imapVerify?: (account: ImapAccount) => Promise<void>;
+  /** Tests inject a no-op sleep (WhatsApp pairing polls the bridge). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
-const USAGE = `perch ${PERCH_VERSION} - Google Drive + Notion + mail + Calendar/Contacts MCP server (read-only unless a client grant allows more)
+const USAGE = `perch ${PERCH_VERSION} - Google Drive + Notion + mail + Calendar/Contacts + Slack + WhatsApp MCP server (read-only unless a client grant allows more)
 
 Usage:
   perch init                                   create key, encrypted store and HTTP token (if missing)
@@ -79,8 +84,16 @@ Usage:
   perch google-productivity add --label NAME --services calendar,contacts [--allow-calendar-write]
                       [--port N] [--timeout SECONDS] [--login-hint EMAIL]
   perch google-productivity list | remove ID [--revoke]
+  perch slack manifest                         print the Slack app manifest (create one internal app per workspace)
+  perch slack add --label NAME                 user token (xoxp-…) is read via a masked terminal prompt
+  perch slack list | remove ID
+  perch whatsapp instance set --url http://127.0.0.1:3000   GOWA basic-auth user/password via masked prompts
+  perch whatsapp instance show
+  perch whatsapp add --label NAME --phone +43…  [--timeout SECONDS]   pair a new linked device by pairing code
+  perch whatsapp list | status | remove ID [--keep-device]
   perch client add --label NAME --allow CAPS --account ID [--account ID ...] [--token-file PATH]
-                      CAPS: read,draft,send (mail accounts); calendar_read,calendar_write,contacts_read (gprod accounts)
+                      CAPS: read,draft,send (mail accounts); calendar_read,calendar_write,contacts_read (gprod accounts);
+                            slack_read,slack_send (slack accounts); whatsapp_read,whatsapp_send (whatsapp accounts)
   perch client list | remove ID
   perch token rotate                           replace the HTTP bearer token file
   perch audit list [--limit N] [--client ID] [--account ID]   body-free audit trail of the selected namespace
@@ -115,7 +128,23 @@ function rootOnly(config: PerchConfig, what: string): void {
   if (config.user) throw new PerchError(`${what} is not available with PERCH_USER (root namespace / local admin only); unset PERCH_USER`, 'not_root_namespace');
 }
 
-type AccountSection = 'all' | 'google' | 'notion' | 'gmail' | 'microsoft' | 'imap' | 'productivity';
+type AccountSection = 'all' | 'google' | 'notion' | 'gmail' | 'microsoft' | 'imap' | 'productivity' | 'slack' | 'whatsapp';
+
+function formatSlack(data: StoreData): string[] {
+  const lines = ['Slack workspaces (labels are user-assigned):'];
+  if (!data.slack.length) lines.push('  (none)');
+  for (const w of data.slack) {
+    lines.push(`  ${w.id}  "${w.label}"  ${w.teamName ?? w.teamId}  user ${w.userName ?? w.userId}  ${w.scopes.includes('chat:write') ? 'read+post' : 'read'}  connected ${w.createdAt}`);
+  }
+  return lines;
+}
+
+function formatWhatsapp(data: StoreData): string[] {
+  const lines = [`WhatsApp accounts${data.whatsappInstance ? ` (bridge ${data.whatsappInstance.origin})` : ' (no bridge configured)'}:`];
+  if (!data.whatsapp.length) lines.push('  (none)');
+  for (const a of data.whatsapp) lines.push(`  ${a.id}  "${a.label}"  ${a.jid ?? 'unknown jid'}  device ${a.deviceId}  connected ${a.createdAt}`);
+  return lines;
+}
 
 function formatProductivity(data: StoreData): string[] {
   const lines = ['Google Calendar/Contacts accounts:'];
@@ -149,6 +178,8 @@ function formatMail(data: StoreData, which: AccountSection): string[] {
 function formatAccounts(data: StoreData, which: AccountSection): string {
   if (which === 'gmail' || which === 'microsoft' || which === 'imap') return `${formatMail(data, which).join('\n')}\n`;
   if (which === 'productivity') return `${formatProductivity(data).join('\n')}\n`;
+  if (which === 'slack') return `${formatSlack(data).join('\n')}\n`;
+  if (which === 'whatsapp') return `${formatWhatsapp(data).join('\n')}\n`;
   const lines: string[] = [];
   if (which !== 'notion') {
     lines.push('Google accounts:');
@@ -163,7 +194,7 @@ function formatAccounts(data: StoreData, which: AccountSection): string {
       lines.push(`  ${w.id}  "${w.label}"${owner}  connected ${w.createdAt}`);
     }
   }
-  if (which === 'all') lines.push(...formatMail(data, 'all'), ...formatProductivity(data));
+  if (which === 'all') lines.push(...formatMail(data, 'all'), ...formatProductivity(data), ...formatSlack(data), ...formatWhatsapp(data));
   return `${lines.join('\n')}\n`;
 }
 
@@ -514,6 +545,92 @@ async function cmdImap(config: PerchConfig, io: CliIo, sub: string | undefined, 
   );
 }
 
+async function cmdSlack(config: PerchConfig, io: CliIo, sub: string | undefined, rest: string[], values: Record<string, unknown>) {
+  if (sub === 'manifest') return io.stdout(`${JSON.stringify(SLACK_APP_MANIFEST, null, 2)}\n`);
+  const store = await openStore(config);
+  if (sub === 'list') return io.stdout(formatAccounts(await store.read(), 'slack'));
+  if (sub === 'remove') {
+    const id = rest[0];
+    if (!id) throw new UsageError('Usage: perch slack remove ID');
+    await removeSlackWorkspace(store, id);
+    io.stdout(`Disconnected ${id} locally. The token stays valid until you uninstall the app (or revoke the token) in that Slack workspace.\n`);
+    return;
+  }
+  if (sub !== 'add') throw new UsageError('Usage: perch slack manifest|add|list|remove');
+  if (typeof values.label !== 'string') throw new UsageError('--label is required');
+  const token = await io.readSecret(`Slack user token (xoxp-…) for "${values.label}" (input hidden): `);
+  const ws = await addSlackWorkspace(store, new Upstream(io.transport ?? createFetchTransport()), { label: values.label, token });
+  const missing = ['search:read', 'chat:write'].filter((s) => !ws.scopes.includes(s));
+  io.stdout(
+    `Connected Slack workspace ${ws.id} "${ws.label}" (${ws.teamName ?? ws.teamId}, user ${ws.userName ?? ws.userId}).\n` +
+      (missing.length ? `Note: the token lacks ${missing.join(', ')}; ${missing.includes('chat:write') ? 'posting' : 'search'} will not work until you add it and reconnect.\n` : '') +
+      `Posting needs a client grant: perch client add --label NAME --allow slack_read,slack_send --account ${ws.id}\n`,
+  );
+}
+
+async function cmdWhatsapp(config: PerchConfig, io: CliIo, sub: string | undefined, rest: string[], values: Record<string, unknown>) {
+  const store = await openStore(config);
+  const upstream = new Upstream(io.transport ?? createFetchTransport());
+  if (sub === 'instance') {
+    const action = rest[0];
+    if (action === 'show') {
+      const inst = (await store.read()).whatsappInstance;
+      return io.stdout(inst ? `WhatsApp bridge: ${inst.origin} (basic auth user set; password stored encrypted), configured ${inst.createdAt}\n` : 'No WhatsApp bridge configured.\n');
+    }
+    if (action !== 'set') throw new UsageError('Usage: perch whatsapp instance set --url URL | show');
+    if (typeof values.url !== 'string') throw new UsageError('--url is required, e.g. http://127.0.0.1:3000');
+    const username = await io.readSecret('GOWA basic-auth username (input hidden): ');
+    const password = await io.readSecret('GOWA basic-auth password (input hidden): ');
+    const r = await setWhatsappInstance(store, upstream, { url: values.url, username, password });
+    return io.stdout(`WhatsApp bridge ${r.origin} verified (${r.devices} device slot(s)) and stored.\n`);
+  }
+  if (sub === 'list') return io.stdout(formatAccounts(await store.read(), 'whatsapp'));
+  if (sub === 'status') {
+    const rows = await whatsappDeviceStatus(store, upstream);
+    if (!rows.length) return io.stdout('No WhatsApp accounts.\n');
+    return io.stdout(
+      `${rows
+        .map((r) => `  ${r.account.id}  "${r.account.label}"  ${r.error ? `error: ${r.error}` : `${r.loggedIn ? 'logged in' : 'NOT logged in (pair again)'}, ${r.connected ? 'connected' : 'disconnected'}`}`)
+        .join('\n')}\n`,
+    );
+  }
+  if (sub === 'remove') {
+    const id = rest[0];
+    if (!id) throw new UsageError('Usage: perch whatsapp remove ID [--keep-device]');
+    const deleted = await removeWhatsappAccount(store, upstream, id, { keepDevice: values['keep-device'] === true });
+    io.stdout(
+      `Removed ${id} locally. ` +
+        (values['keep-device'] === true
+          ? 'Its device slot was kept in the bridge (still linked).\n'
+          : deleted
+            ? 'Its device slot was deleted in the bridge: unlinked from the phone, stored chats cleared.\n'
+            : 'The bridge could not delete its device slot: unlink "Perch" under WhatsApp > Linked devices on the phone.\n'),
+    );
+    return;
+  }
+  if (sub !== 'add') throw new UsageError('Usage: perch whatsapp instance|add|list|status|remove');
+  if (typeof values.label !== 'string') throw new UsageError('--label is required');
+  if (typeof values.phone !== 'string') throw new UsageError('--phone is required (international format, e.g. +4366012345678)');
+  const timeout = values.timeout === undefined ? DEFAULT_PAIR_TIMEOUT_MS / 1000 : Number(values.timeout);
+  if (!Number.isInteger(timeout) || timeout < 30 || timeout > 900) throw new UsageError('--timeout must be 30-900 seconds');
+  const account = await pairWhatsappAccount(store, upstream, {
+    label: values.label,
+    phone: values.phone,
+    timeoutMs: timeout * 1000,
+    sleep: io.sleep,
+    onCode: (code) =>
+      io.stdout(
+        `Pairing code: ${code}\nOn the phone: WhatsApp > Settings > Linked devices > Link a device > "Link with phone number instead", ` +
+          `then enter the code. Waiting up to ${timeout} s...\n`,
+      ),
+  });
+  io.stdout(
+    `Connected WhatsApp account ${account.id} "${account.label}"${account.jid ? ` (${account.jid})` : ''}.\n` +
+      'Reading is available to the global token; sending needs a client grant: ' +
+      `perch client add --label NAME --allow whatsapp_read,whatsapp_send --account ${account.id}\n`,
+  );
+}
+
 async function cmdClient(config: PerchConfig, io: CliIo, sub: string | undefined, rest: string[], values: Record<string, unknown>) {
   const store = await openStore(config);
   if (sub === 'list') {
@@ -532,7 +649,10 @@ async function cmdClient(config: PerchConfig, io: CliIo, sub: string | undefined
   if (sub !== 'add') throw new UsageError('Usage: perch client add|list|remove');
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
   if (typeof values.allow !== 'string') {
-    throw new UsageError('--allow is required (comma separated: read,draft,send for mail; calendar_read,calendar_write,contacts_read for gprod accounts)');
+    throw new UsageError(
+      '--allow is required (comma separated: read,draft,send for mail; calendar_read,calendar_write,contacts_read for gprod accounts; ' +
+        'slack_read,slack_send for slack accounts; whatsapp_read,whatsapp_send for whatsapp accounts)',
+    );
   }
   const accounts = (values.account as string[] | undefined) ?? [];
   if (!accounts.length) throw new UsageError('--account is required (repeat for several accounts)');
@@ -579,7 +699,7 @@ async function cmdUser(config: PerchConfig, io: CliIo, sub: string | undefined, 
   io.stdout(
     `Created user ${user.id} "${user.label}" with its own encrypted store and key.\n` +
       `Its read-only bearer token was written to ${tokenFile} (0600) and is not shown here; hand it to the user securely.\n` +
-      `Onboard the user's accounts and client grants with PERCH_USER=${user.id} perch <google|notion|gmail|microsoft|imap|google-productivity|client> ...\n`,
+      `Onboard the user's accounts and client grants with PERCH_USER=${user.id} perch <google|notion|gmail|microsoft|imap|google-productivity|slack|whatsapp|client> ...\n`,
   );
 }
 
@@ -715,6 +835,9 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         state: { type: 'string' },
         outcome: { type: 'string' },
         before: { type: 'string' },
+        url: { type: 'string' },
+        phone: { type: 'string' },
+        'keep-device': { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
       },
@@ -761,6 +884,12 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         return 0;
       case 'google-productivity':
         await cmdProductivity(config, io, sub, rest, values);
+        return 0;
+      case 'slack':
+        await cmdSlack(config, io, sub, rest, values);
+        return 0;
+      case 'whatsapp':
+        await cmdWhatsapp(config, io, sub, rest, values);
         return 0;
       case 'client':
         await cmdClient(config, io, sub, rest, values);

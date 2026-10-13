@@ -7,11 +7,15 @@ import {
   CAPABILITIES,
   MAIL_CAPABILITIES,
   PRODUCTIVITY_CAPABILITIES,
+  SLACK_CAPABILITIES,
+  WHATSAPP_CAPABILITIES,
   type Capability,
   type ClientGrant,
   type CredentialStore,
   type ProductivityCapability,
+  type SlackCapability,
   type StoreData,
+  type WhatsappCapability,
 } from '../store/credentialStore.js';
 
 /**
@@ -35,19 +39,47 @@ export interface Principal {
   mailAccounts: ReadonlySet<string> | 'all';
   /** Google productivity (Calendar/Contacts) accounts; 'all' only for the read-only operator. */
   productivityAccounts: ReadonlySet<string> | 'all';
+  /** Slack workspaces; 'all' only for the read-only operator. */
+  slackAccounts: ReadonlySet<string> | 'all';
+  /** WhatsApp accounts; 'all' only for the read-only operator. */
+  whatsappAccounts: ReadonlySet<string> | 'all';
 }
 
 export const READONLY_PRINCIPAL: Principal = Object.freeze({
   kind: 'operator_readonly',
-  capabilities: new Set<Capability>(['read', 'calendar_read', 'contacts_read']),
+  capabilities: new Set<Capability>(['read', 'calendar_read', 'contacts_read', 'slack_read', 'whatsapp_read']),
   mailAccounts: 'all',
   productivityAccounts: 'all',
+  slackAccounts: 'all',
+  whatsappAccounts: 'all',
 }) as Principal;
 
-const PRODUCTIVITY_PREFIX = 'gprod-';
-export const isProductivityAccountId = (id: string) => id.startsWith(PRODUCTIVITY_PREFIX);
-const isMailCap = (c: Capability) => (MAIL_CAPABILITIES as readonly string[]).includes(c);
-const isProductivityCap = (c: Capability) => (PRODUCTIVITY_CAPABILITIES as readonly string[]).includes(c);
+/** Account families: each capability applies to exactly one family, recognised by the account id prefix. */
+export type AccountFamily = 'mail' | 'productivity' | 'slack' | 'whatsapp';
+const FAMILY_CAPS: Record<AccountFamily, readonly string[]> = {
+  mail: MAIL_CAPABILITIES,
+  productivity: PRODUCTIVITY_CAPABILITIES,
+  slack: SLACK_CAPABILITIES,
+  whatsapp: WHATSAPP_CAPABILITIES,
+};
+const FAMILY_HINT: Record<AccountFamily, string> = {
+  mail: 'Mail capabilities (read, draft, send) need at least one mail account (gmail-…, microsoft-…, imap-…)',
+  productivity: 'Calendar/contacts capabilities need at least one Google productivity account (gprod-…)',
+  slack: 'Slack capabilities (slack_read, slack_send) need at least one Slack workspace (slack-…)',
+  whatsapp: 'WhatsApp capabilities (whatsapp_read, whatsapp_send) need at least one WhatsApp account (whatsapp-…)',
+};
+
+export function familyOf(id: string): AccountFamily {
+  if (id.startsWith('gprod-')) return 'productivity';
+  if (id.startsWith('slack-')) return 'slack';
+  if (id.startsWith('whatsapp-')) return 'whatsapp';
+  return 'mail';
+}
+const capFamily = (c: Capability): AccountFamily => (Object.keys(FAMILY_CAPS) as AccountFamily[]).find((f) => FAMILY_CAPS[f].includes(c))!;
+
+export const isProductivityAccountId = (id: string) => familyOf(id) === 'productivity';
+const isMailCap = (c: Capability) => capFamily(c) === 'mail';
+const isProductivityCap = (c: Capability) => capFamily(c) === 'productivity';
 
 export const tokenSha256 = (token: string) => createHash('sha256').update(token, 'utf8').digest('hex');
 
@@ -59,16 +91,52 @@ export function productivityAccountIds(data: StoreData): string[] {
   return data.googleProductivity.map((a) => a.id);
 }
 
+function accountIdsOf(data: StoreData, family: AccountFamily): string[] {
+  if (family === 'mail') return mailAccountIds(data);
+  if (family === 'productivity') return productivityAccountIds(data);
+  if (family === 'slack') return data.slack.map((w) => w.id);
+  return data.whatsapp.map((a) => a.id);
+}
+
 export function principalFromGrant(grant: ClientGrant): Principal {
+  const of = (f: AccountFamily) => new Set(grant.accountIds.filter((id) => familyOf(id) === f));
   return {
     kind: 'client',
     clientId: grant.id,
     clientLabel: grant.label,
     tokenSha256: grant.tokenSha256,
     capabilities: new Set(grant.capabilities),
-    mailAccounts: new Set(grant.accountIds.filter((id) => !isProductivityAccountId(id))),
-    productivityAccounts: new Set(grant.accountIds.filter(isProductivityAccountId)),
+    mailAccounts: of('mail'),
+    productivityAccounts: of('productivity'),
+    slackAccounts: of('slack'),
+    whatsappAccounts: of('whatsapp'),
   };
+}
+
+export function hasFamilyCapability(p: Principal, family: AccountFamily): boolean {
+  return [...p.capabilities].some((c) => capFamily(c) === family);
+}
+
+/** Throws unless the principal holds `cap` for the Slack workspace `accountId`. The operator only reads. */
+export function assertSlackCapability(p: Principal, accountId: string, cap: SlackCapability): void {
+  if (p.kind === 'operator_readonly' && cap !== 'slack_read') {
+    throw new PerchError('This connection is read-only (global token or default stdio). Sending to Slack needs a client grant: perch client add --allow slack_send', 'capability_denied');
+  }
+  const accountOk = p.slackAccounts === 'all' || p.slackAccounts.has(accountId);
+  if (!p.capabilities.has(cap) || !accountOk) {
+    throw new PerchError(`Capability "${cap}" is not granted to this client for workspace ${accountId}`, 'capability_denied');
+  }
+}
+
+/** Throws unless the principal holds `cap` for the WhatsApp account `accountId`. The operator only reads. */
+export function assertWhatsappCapability(p: Principal, accountId: string, cap: WhatsappCapability): void {
+  if (p.kind === 'operator_readonly' && cap !== 'whatsapp_read') {
+    throw new PerchError('This connection is read-only (global token or default stdio). Sending on WhatsApp needs a client grant: perch client add --allow whatsapp_send', 'capability_denied');
+  }
+  const accountOk = p.whatsappAccounts === 'all' || p.whatsappAccounts.has(accountId);
+  if (!p.capabilities.has(cap) || !accountOk) {
+    throw new PerchError(`Capability "${cap}" is not granted to this client for account ${accountId}`, 'capability_denied');
+  }
 }
 
 export function hasWriteCapability(p: Principal): boolean {
@@ -161,24 +229,24 @@ export async function createClientGrant(
  * family needs at least one matching account. A calendar grant therefore never carries mail access
  * by accident, and a mail grant never Calendar/Contacts access.
  */
+const UNKNOWN_ACCOUNT: Record<AccountFamily, string> = {
+  mail: 'Unknown mail account',
+  productivity: 'Unknown Google productivity account',
+  slack: 'Unknown Slack workspace',
+  whatsapp: 'Unknown WhatsApp account',
+};
+
 function validateGrantShape(data: StoreData, capabilities: Capability[], accountIds: string[]): void {
-  const mail = new Set(mailAccountIds(data));
-  const productivity = new Set(productivityAccountIds(data));
   for (const id of accountIds) {
-    if (isProductivityAccountId(id)) {
-      if (!productivity.has(id)) throw new PerchError(`Unknown Google productivity account: ${id}`, 'unknown_account');
-    } else if (!mail.has(id)) throw new PerchError(`Unknown mail account: ${id}`, 'unknown_account');
+    const family = familyOf(id);
+    if (!accountIdsOf(data, family).includes(id)) throw new PerchError(`${UNKNOWN_ACCOUNT[family]}: ${id}`, 'unknown_account');
   }
-  const mailCaps = capabilities.some(isMailCap);
-  const prodCaps = capabilities.some(isProductivityCap);
-  if (mailCaps && !accountIds.some((id) => !isProductivityAccountId(id))) {
-    throw new PerchError('Mail capabilities (read, draft, send) need at least one mail account (gmail-…, microsoft-…, imap-…)', 'bad_argument');
-  }
-  if (prodCaps && !accountIds.some(isProductivityAccountId)) {
-    throw new PerchError('Calendar/contacts capabilities need at least one Google productivity account (gprod-…)', 'bad_argument');
+  const families = new Set(capabilities.map(capFamily));
+  for (const f of families) {
+    if (!accountIds.some((id) => familyOf(id) === f)) throw new PerchError(FAMILY_HINT[f], 'bad_argument');
   }
   for (const id of accountIds) {
-    if (isProductivityAccountId(id) ? !prodCaps : !mailCaps) {
+    if (!families.has(familyOf(id))) {
       throw new PerchError(`Account ${id} has no granted capability that applies to it; remove it or add a matching capability`, 'bad_argument');
     }
   }

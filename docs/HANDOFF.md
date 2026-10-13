@@ -1,5 +1,17 @@
 # Handoff: Perch
 
+## Update 2026-10-14: Slack- und WhatsApp-Meilenstein (direkt auf `main`)
+
+- **Freigabe:** Fritz im Chat am 2026-10-13/14: Ansatz A (eigene Anbindungen statt durchgereichter MCP-Server), Slack lesen und senden, WhatsApp über GOWA lesen und (mit Grant) senden, beides für das globale Token lesbar, GOWA als Binary + systemd. Ausdrücklich „Implementiere alles auf main“ (Abweichung von der Branch/PR-Regel in `AGENTS.md`, auf Fritz' Anweisung).
+- **Implementiert:** siehe `docs/SLACK_WHATSAPP_MILESTONE.md` und `docs/SETUP.md` §4e/§4f (inkl. Codex-Konfiguration in §6).
+  - 7 neue Lese-Tools (`slack_*`, `whatsapp_*`), 4 Schreib-Tools nur für Client-Grants (`slack_send_message`, `slack_send_status`, `whatsapp_send_message`, `whatsapp_send_status`).
+  - Neue Capabilities `slack_read`, `slack_send`, `whatsapp_read`, `whatsapp_send`; Grants nach Konto-Familien geprüft.
+  - Slack/WhatsApp-Sends nutzen denselben idempotenten Ledger wie Mail (`src/messaging/send.ts`).
+- **Review:** unabhängiger Review ohne Security-Blocker; Fixes eingearbeitet (Lookup-Budget, Koppeln bei Poll-Fehlern, GOWA-Geräte-Routen nur `admin`, 100.100.100.100). Offen dokumentiert: gemeinsames Sende-Limit 1000 (blockiert dann auch Mail), kein Downgrade nach Slack/WhatsApp-Events.
+- **Getestet (nur Mocks):** `npm run check` grün: 643 Tests (51 Dateien), Smoke 10/10, Lizenzprüfung OK, keine neuen Abhängigkeiten.
+- **Live verifiziert:** nichts. Nächster Schritt: Deployment auf dem Heimserver und Live-Test (SETUP §4e/§4f).
+
+
 ## Integrationsstand 2026-10-05
 
 Fritz hat ausdrücklich den Merge aller sechs veröffentlichten PRs nach `main` freigegeben. Dieser Integrationsstand kombiniert den Mail-/Nutzer-/Calendar-/E-Mail-/Drive-/Notion-Stack mit dem MIT-/Notices-Meilenstein. Die einzigen Merge-Konflikte betrafen diese Handoff-Dokumentation; beide Meilensteinbeschreibungen bleiben erhalten. Der Orchestrator prüft den kombinierten Stand vor der finalen Integration. Operations-/WhatsApp-Arbeiten sind hier nicht enthalten; Deployment und Live-Provider-Tests sind nicht freigegeben bzw. nicht durchgeführt.

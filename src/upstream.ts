@@ -9,9 +9,12 @@ import { PerchError } from './errors.js';
  * never the origins.
  */
 
-export type Service = 'drive' | 'oauth' | 'notion' | 'gmail' | 'graph' | 'msauth' | 'calendar' | 'people' | 'openid';
-export type RouteCapability = 'read' | 'draft' | 'send' | 'calendar_write';
-export type HttpMethod = 'GET' | 'POST' | 'PATCH';
+export type Service = 'drive' | 'oauth' | 'notion' | 'gmail' | 'graph' | 'msauth' | 'calendar' | 'people' | 'openid' | 'slack' | 'gowa';
+/**
+ * `admin` routes (GOWA device pairing/removal) are only ever passed by the local CLI, never by an MCP tool.
+ */
+export type RouteCapability = 'read' | 'draft' | 'send' | 'calendar_write' | 'slack_send' | 'whatsapp_send' | 'admin';
+export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
 export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
   drive: 'https://www.googleapis.com',
@@ -24,7 +27,17 @@ export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
   people: 'https://people.googleapis.com',
   /** userinfo_endpoint of Google's OpenID Connect discovery document (hard-coded, never fetched). */
   openid: 'https://openidconnect.googleapis.com',
+  slack: 'https://slack.com',
+  /**
+   * GOWA (self-hosted WhatsApp bridge) has no fixed origin: each call passes the configured instance
+   * origin, which must pass validateGowaOrigin (loopback or a Tailscale address only). This placeholder
+   * is never used for a request.
+   */
+  gowa: 'http://127.0.0.1',
 });
+
+/** Services whose origin is configured per namespace instead of fixed (see validateGowaOrigin). */
+const DYNAMIC_ORIGIN: ReadonlySet<Service> = new Set(['gowa']);
 
 const SERVICE_NAMES: Record<Service, string> = {
   drive: 'Google Drive API',
@@ -36,6 +49,8 @@ const SERVICE_NAMES: Record<Service, string> = {
   calendar: 'Google Calendar API',
   people: 'Google People API',
   openid: 'Google OpenID Connect',
+  slack: 'Slack Web API',
+  gowa: 'WhatsApp bridge (GOWA)',
 };
 
 const NOTION_ID = '[0-9a-fA-F-]{32,36}';
@@ -60,6 +75,16 @@ const CAL_ID = '(?:[A-Za-z0-9._-]|%40|%2B|%23){1,1024}';
 const EVENT_ID = '(?!import$|quickAdd$|watch$)[a-v0-9]{5,1024}(?:_[0-9]{8}(?:T[0-9]{6}Z)?)?';
 /** People: only contact resource names (people/c<digits>), never people/me or Google account ids. */
 const CONTACT_ID = 'c[0-9]{1,30}';
+
+/** Slack Web API ids: channels/groups/DMs (C/G/D…), message timestamps. */
+export const SLACK_CHANNEL_ID = /^[CGD][A-Z0-9]{2,30}$/;
+export const SLACK_TS = /^[0-9]{9,11}\.[0-9]{6}$/;
+/** WhatsApp JIDs Perch reads and writes to: people (phone or LID) and groups. Never status/newsletter/broadcast. */
+export const WHATSAPP_JID = /^(?:[0-9]{5,20}@s\.whatsapp\.net|[0-9]{5,20}@lid|[0-9]{5,20}(?:-[0-9]{5,20})?@g\.us)$/;
+const JID_PATH = '[0-9]{5,20}(?:-[0-9]{5,20})?%40(?:s\\.whatsapp\\.net|lid|g\\.us)';
+/** Device slots Perch creates in GOWA (`perch-` + 16 hex); other slots are never addressed. */
+export const GOWA_DEVICE_ID = /^perch-[a-f0-9]{16}$/;
+const DEVICE_PATH = 'perch-[a-f0-9]{16}';
 
 type Route = [method: string, path: RegExp, capability?: RouteCapability];
 
@@ -114,7 +139,61 @@ const ROUTES: Record<Service, Route[]> = {
     ['GET', new RegExp(`^/v1/people/${CONTACT_ID}$`)],
   ],
   openid: [['GET', /^\/v1\/userinfo$/]],
+  slack: [
+    ['GET', /^\/api\/auth\.test$/],
+    ['GET', /^\/api\/conversations\.list$/],
+    ['GET', /^\/api\/conversations\.info$/],
+    ['GET', /^\/api\/conversations\.history$/],
+    ['GET', /^\/api\/conversations\.replies$/],
+    ['GET', /^\/api\/users\.info$/],
+    ['GET', /^\/api\/search\.messages$/],
+    ['POST', /^\/api\/chat\.postMessage$/, 'slack_send'],
+  ],
+  gowa: [
+    ['GET', /^\/chats$/],
+    ['GET', new RegExp(`^/chat/${JID_PATH}/messages$`)],
+    ['POST', /^\/send\/message$/, 'whatsapp_send'],
+    // Local CLI only (pairing and unlinking); no MCP tool passes the admin capability.
+    ['GET', /^\/devices$/, 'admin'],
+    ['POST', /^\/devices$/, 'admin'],
+    ['POST', new RegExp(`^/devices/${DEVICE_PATH}/login/code$`), 'admin'],
+    ['GET', new RegExp(`^/devices/${DEVICE_PATH}$`), 'admin'],
+    ['GET', new RegExp(`^/devices/${DEVICE_PATH}/status$`), 'admin'],
+    ['DELETE', new RegExp(`^/devices/${DEVICE_PATH}$`), 'admin'],
+  ],
 };
+
+/**
+ * A GOWA instance origin: http(s) on loopback (127.0.0.1, ::1, localhost) or a Tailscale address
+ * (100.64.0.0/10, fd7a:115c:a1e0::/48), explicit port, no path, query, credentials or fragment.
+ * Returns the normalised origin. GOWA can send messages and holds the whole chat history, so it must
+ * never be reachable from anywhere else; Perch refuses to talk to it on any other address.
+ */
+export function validateGowaOrigin(raw: string): string {
+  const bad = () =>
+    new PerchError(
+      'GOWA URL must be http(s)://127.0.0.1:PORT, http://localhost:PORT, http://[::1]:PORT or a Tailscale address (100.64.0.0/10) with explicit port and no path',
+      'bad_argument',
+    );
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    throw bad();
+  }
+  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password || url.search || url.hash) throw bad();
+  if (url.pathname !== '/' && url.pathname !== '') throw bad();
+  if (!url.port) throw bad();
+  const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  const loopback = host === 'localhost' || host === '::1' || (ipv4 !== null && ipv4[1] === '127');
+  // 100.100.100.100 is Tailscale's own service address (MagicDNS), never a node.
+  const tailnet4 = ipv4 !== null && Number(ipv4[1]) === 100 && Number(ipv4[2]) >= 64 && Number(ipv4[2]) <= 127 && host !== '100.100.100.100';
+  const tailnet6 = /^fd7a:115c:a1e0:/.test(host);
+  if (ipv4 && ipv4.slice(1).some((o) => Number(o) > 255)) throw bad();
+  if (!loopback && !tailnet4 && !tailnet6) throw bad();
+  return url.origin;
+}
 
 /** True when (service, method, path) is allowlisted for exactly this capability. */
 export function isAllowedRoute(service: Service, method: string, path: string, capability: RouteCapability = 'read'): boolean {
@@ -224,6 +303,8 @@ export interface CallOptions {
   maxBytes?: number;
   /** Required for draft/send/calendar_write routes; must equal the route's tag. */
   capability?: RouteCapability;
+  /** Only for services without a fixed origin (GOWA): the configured instance origin, re-validated here. */
+  origin?: string;
 }
 
 const SAFE_CODE = /^[A-Za-z_]{1,64}$/;
@@ -264,8 +345,15 @@ export class Upstream {
     if (!isAllowedRoute(service, opts.method, opts.path, opts.capability)) {
       throw new PerchError(`Blocked non-allowlisted ${SERVICE_NAMES[service]} call`, 'route_not_allowed');
     }
-    const url = new URL(opts.path, ORIGINS[service]);
-    if (url.origin !== ORIGINS[service] || url.pathname !== opts.path) {
+    let origin = ORIGINS[service];
+    if (DYNAMIC_ORIGIN.has(service)) {
+      if (!opts.origin) throw new PerchError(`Blocked ${SERVICE_NAMES[service]} call without a configured origin`, 'route_not_allowed');
+      origin = validateGowaOrigin(opts.origin);
+    } else if (opts.origin !== undefined) {
+      throw new PerchError(`Blocked ${SERVICE_NAMES[service]} call to a non-fixed origin`, 'route_not_allowed');
+    }
+    const url = new URL(opts.path, origin);
+    if (url.origin !== origin || url.pathname !== opts.path) {
       throw new PerchError(`Blocked non-allowlisted ${SERVICE_NAMES[service]} call`, 'route_not_allowed');
     }
     for (const [k, v] of Object.entries(opts.query ?? {})) {

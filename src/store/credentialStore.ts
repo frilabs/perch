@@ -106,11 +106,54 @@ const GoogleProductivityAccountSchema = z.object({
   updatedAt: z.string(),
 });
 
+/**
+ * Slack workspace connected with a user token (xoxp-…) of an internal app installed in that workspace
+ * (docs/slack-app-manifest.json). `scopes` are what Slack reported for the token at onboarding.
+ */
+const SlackWorkspaceSchema = z.object({
+  id: z.string().regex(/^slack-[a-f0-9]{8}$/),
+  label: z.string().min(1).max(100),
+  token: z.string().min(1),
+  teamId: z.string().regex(/^[TE][A-Z0-9]{2,30}$/),
+  teamName: z.string().max(200).optional(),
+  teamUrl: z.string().max(500).optional(),
+  userId: z.string().regex(/^[UW][A-Z0-9]{2,30}$/),
+  userName: z.string().max(200).optional(),
+  scopes: z.array(z.string().max(100)),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+/** The namespace's GOWA instance (self-hosted WhatsApp bridge). Basic-auth credentials are stored encrypted. */
+const WhatsappInstanceSchema = z.object({
+  origin: z.string().min(1).max(200),
+  username: z.string().min(1).max(200),
+  password: z.string().min(1).max(500),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+/** One WhatsApp account = one GOWA device slot created and paired by Perch (`perch-` + 16 hex). */
+const WhatsappAccountSchema = z.object({
+  id: z.string().regex(/^whatsapp-[a-f0-9]{8}$/),
+  label: z.string().min(1).max(100),
+  deviceId: z.string().regex(/^perch-[a-f0-9]{16}$/),
+  /** Own JID reported by GOWA after pairing, e.g. 4366012345678@s.whatsapp.net. */
+  jid: z.string().max(200).optional(),
+  displayName: z.string().max(200).optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
 /** Mail capabilities (email milestone) apply to mail accounts only. */
 export const MAIL_CAPABILITIES = ['read', 'draft', 'send'] as const;
 /** Calendar/Contacts capabilities apply to Google productivity accounts (gprod-…) only. */
 export const PRODUCTIVITY_CAPABILITIES = ['calendar_read', 'calendar_write', 'contacts_read'] as const;
-export const CAPABILITIES = [...MAIL_CAPABILITIES, ...PRODUCTIVITY_CAPABILITIES] as const;
+/** Slack capabilities apply to Slack workspaces (slack-…) only. */
+export const SLACK_CAPABILITIES = ['slack_read', 'slack_send'] as const;
+/** WhatsApp capabilities apply to WhatsApp accounts (whatsapp-…) only. */
+export const WHATSAPP_CAPABILITIES = ['whatsapp_read', 'whatsapp_send'] as const;
+export const CAPABILITIES = [...MAIL_CAPABILITIES, ...PRODUCTIVITY_CAPABILITIES, ...SLACK_CAPABILITIES, ...WHATSAPP_CAPABILITIES] as const;
 
 /** Local per-client grant. Only the SHA-256 of the (high-entropy) client token is stored. */
 const ClientGrantSchema = z.object({
@@ -162,6 +205,10 @@ const StoreDataSchema = z.object({
   // Added by the mail workflow milestone: set once this namespace's mail-workflow.enc exists. A missing
   // ledger with this marker was lost (restore from backup); it is never initialised again.
   mailWorkflowLedger: z.strictObject({ createdAt: z.string() }).optional(),
+  // Added by the Slack/WhatsApp milestone.
+  slack: z.array(SlackWorkspaceSchema).default([]),
+  whatsappInstance: WhatsappInstanceSchema.optional(),
+  whatsapp: z.array(WhatsappAccountSchema).default([]),
 });
 
 export type GoogleAccount = z.infer<typeof GoogleAccountSchema>;
@@ -171,6 +218,11 @@ export type MicrosoftAccount = z.infer<typeof MicrosoftAccountSchema>;
 export type ImapAccount = z.infer<typeof ImapAccountSchema>;
 export type GoogleProductivityAccount = z.infer<typeof GoogleProductivityAccountSchema>;
 export type ClientGrant = z.infer<typeof ClientGrantSchema>;
+export type SlackWorkspace = z.infer<typeof SlackWorkspaceSchema>;
+export type WhatsappInstance = z.infer<typeof WhatsappInstanceSchema>;
+export type WhatsappAccount = z.infer<typeof WhatsappAccountSchema>;
+export type SlackCapability = (typeof SLACK_CAPABILITIES)[number];
+export type WhatsappCapability = (typeof WHATSAPP_CAPABILITIES)[number];
 export type UserRecord = z.infer<typeof UserSchema>;
 export type Capability = (typeof CAPABILITIES)[number];
 export type MailCapability = (typeof MAIL_CAPABILITIES)[number];
@@ -195,6 +247,8 @@ const emptyData = (): StoreData => ({
   clients: [],
   googleProductivity: [],
   users: [],
+  slack: [],
+  whatsapp: [],
   // initStore creates the ledger before the store, so a new store is born with it.
   mailWorkflowLedger: { createdAt: new Date().toISOString() },
 });
