@@ -20,6 +20,18 @@ export interface PerchConfig {
   microsoftTenant: string;
   /** stdio only: client token file selecting a client grant (default stdio is read-only). */
   clientTokenFile?: string;
+  /** Public access (docs/PUBLIC_ACCESS_SPEC.md §2): base URL of the public listener, e.g. https://host.tailnet.ts.net */
+  publicBaseUrl?: string;
+  /** Loopback port of the public listener. */
+  publicPort: number;
+  /** Google OAuth client of type "Web application" for the operator's sign-in. */
+  googleLoginClientFile?: string;
+  /** Dynamic Client Registration (only while a pairing window is open). */
+  oauthDcr: boolean;
+  /** Optional Telegram notification file (bot token + chat id, 0600). */
+  notifyTelegramFile?: string;
+  /** Trust X-Forwarded-For from a loopback proxy for the shown IP and limits. */
+  publicTrustForwarded: boolean;
 }
 
 /**
@@ -46,6 +58,15 @@ export function resolveConfig(env: Record<string, string | undefined>): PerchCon
   const port = Number(env.PERCH_HTTP_PORT || '8765');
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new PerchError('PERCH_HTTP_PORT must be a valid port', 'bad_config');
   rejectUserSelector(env);
+  const publicPort = Number(env.PERCH_PUBLIC_PORT || '8767');
+  if (!Number.isInteger(publicPort) || publicPort < 0 || publicPort > 65535) throw new PerchError('PERCH_PUBLIC_PORT must be a valid port', 'bad_config');
+  const flag = (name: string, dflt: boolean) => {
+    const v = env[name]?.trim().toLowerCase();
+    if (v === undefined || v === '') return dflt;
+    if (['1', 'on', 'true', 'yes'].includes(v)) return true;
+    if (['0', 'off', 'false', 'no'].includes(v)) return false;
+    throw new PerchError(`${name} must be on or off`, 'bad_config');
+  };
   return {
     dataDir: path.resolve(env.PERCH_DATA_DIR || path.join(dataHome, 'perch')),
     keyFile: path.resolve(env.PERCH_KEY_FILE || path.join(configHome, 'perch', 'store.key')),
@@ -59,6 +80,12 @@ export function resolveConfig(env: Record<string, string | undefined>): PerchCon
     ...(env.PERCH_MICROSOFT_CLIENT_ID ? { microsoftClientId: env.PERCH_MICROSOFT_CLIENT_ID.trim() } : {}),
     microsoftTenant: env.PERCH_MICROSOFT_TENANT?.trim() || 'common',
     ...(env.PERCH_CLIENT_TOKEN_FILE ? { clientTokenFile: path.resolve(env.PERCH_CLIENT_TOKEN_FILE) } : {}),
+    ...(env.PERCH_PUBLIC_BASE_URL ? { publicBaseUrl: env.PERCH_PUBLIC_BASE_URL.trim() } : {}),
+    publicPort,
+    ...(env.PERCH_GOOGLE_LOGIN_CLIENT_FILE ? { googleLoginClientFile: path.resolve(env.PERCH_GOOGLE_LOGIN_CLIENT_FILE) } : {}),
+    oauthDcr: flag('PERCH_OAUTH_DCR', true),
+    ...(env.PERCH_NOTIFY_TELEGRAM_FILE ? { notifyTelegramFile: path.resolve(env.PERCH_NOTIFY_TELEGRAM_FILE) } : {}),
+    publicTrustForwarded: flag('PERCH_PUBLIC_TRUST_FORWARDED', false),
   };
 }
 

@@ -55,6 +55,8 @@ const ActorSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('operator_readonly') }),
   z.strictObject({ kind: z.literal('client'), clientId: z.string().regex(/^client-[a-f0-9]{8}$/) }),
   z.strictObject({ kind: z.literal('local_admin') }),
+  // Public access lifecycle events (pairing, tokens, revocation); the device id when one exists.
+  z.strictObject({ kind: z.literal('oauth'), deviceId: z.string().regex(/^oc-[a-f0-9]{16}$/).optional() }),
 ]);
 
 export const SEND_STATES = ['pending', 'accepted', 'rejected', 'indeterminate'] as const;

@@ -7,7 +7,8 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat, writeFile } from 'node:fs/promises';
+import { request } from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -387,6 +388,47 @@ describe('built artifact', () => {
     // Nothing under users/ or user-keys/ was created.
     expect(existsSync(path.join(dirs.dataDir, 'users'))).toBe(false);
     expect(existsSync(path.join(path.dirname(dirs.keyFile), 'user-keys'))).toBe(false);
+  });
+
+  it('serve --http --public starts the public listener: only its own routes, no static tokens, a 0600 control socket', async () => {
+    const clientFile = path.join(dirs.root, 'config', 'google-web-client.json');
+    await writeFile(clientFile, JSON.stringify({ web: { client_id: '123456789012-abcdef.apps.googleusercontent.com', client_secret: dummySecret('WEB'), redirect_uris: ['https://perch.smoke.test/oauth/google/callback'] } }), { mode: 0o600 });
+    const penv = { ...env, PERCH_PUBLIC_BASE_URL: 'https://perch.smoke.test', PERCH_PUBLIC_PORT: '0', PERCH_GOOGLE_LOGIN_CLIENT_FILE: clientFile };
+    const child: ChildProcess = spawn(process.execPath, [CLI, 'serve', '--http', '--port', '0', '--public'], { env: penv, stdio: ['ignore', 'ignore', 'pipe'] });
+    try {
+      let stderr = '';
+      const port = await new Promise<number>((resolve, reject) => {
+        child.stderr!.on('data', (c: Buffer) => {
+          stderr += c.toString();
+          const m = /public listener on http:\/\/127\.0\.0\.1:(\d+)/.exec(stderr);
+          if (m && /listening on/.test(stderr)) resolve(Number(m[1]));
+        });
+        child.once('exit', (code) => reject(new Error(`exited early (${code}): ${stderr}`)));
+      });
+      const get = (p: string, headers: Record<string, string> = {}, method = 'GET') =>
+        new Promise<{ status: number; body: string; headers: Record<string, unknown> }>((resolve, reject) => {
+          const req = request({ host: '127.0.0.1', port, path: p, method, headers: { host: 'perch.smoke.test', ...headers } }, (res) => {
+            let body = '';
+            res.on('data', (c: Buffer) => (body += c.toString()));
+            res.on('end', () => resolve({ status: res.statusCode ?? 0, body, headers: res.headers }));
+          });
+          req.on('error', reject);
+          req.end();
+        });
+      expect(JSON.parse((await get('/.well-known/oauth-protected-resource')).body).resource).toBe('https://perch.smoke.test/mcp');
+      const globalToken = (await readFile(dirs.tokenFile, 'utf8')).trim();
+      expect((await get('/status', { authorization: `Bearer ${globalToken}` })).status).toBe(404);
+      expect((await get('/local/pair', { authorization: `Bearer ${globalToken}` })).status).toBe(404);
+      const mcp = await get('/mcp', { authorization: `Bearer ${globalToken}`, 'content-type': 'application/json' }, 'POST');
+      expect(mcp.status).toBe(401);
+      expect(String(mcp.headers['www-authenticate'])).toContain('resource_metadata="https://perch.smoke.test/.well-known/oauth-protected-resource"');
+      expect((await get('/oauth/authorize?client_id=x')).body).toContain('No pairing window is open');
+      expect((await stat(path.join(dirs.dataDir, 'control.sock'))).mode & 0o777).toBe(0o600);
+    } finally {
+      const exited = new Promise<number | null>((r) => child.once('exit', (code) => r(code)));
+      child.kill('SIGTERM');
+      expect(await exited).toBe(0);
+    }
   });
 
   it('keeps idempotent send records and a body-free audit trail in the built artifact (stdio + HTTP), without network', async () => {

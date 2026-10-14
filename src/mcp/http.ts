@@ -16,6 +16,7 @@ const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_WRITE_BODY_BYTES = 16 * 1024 * 1024;
 const MCP_PATH = '/mcp';
 const STATUS_PATH = '/status';
+const LOCAL_PAIR_PATH = '/local/pair';
 /** Live checks of the status page are reused for this long (page reloads never hammer the providers). */
 export const STATUS_CACHE_SECONDS = 60;
 
@@ -97,7 +98,12 @@ export interface HttpServerOptions {
   allowedOrigins?: string[];
   log?: (line: string) => void;
   /** Tests only: MOCK IMAP/SMTP login for the status page's live checks. */
-  statusOptions?: Pick<StatusOptions, 'imapVerify'>;
+  statusOptions?: Pick<StatusOptions, 'imapVerify' | 'pairingOpen'>;
+  /**
+   * Local pairing page of the public access (GET/POST /local/pair), only on this local listener and only for
+   * the global read-only token (Basic auth like the status page). Absent: /local/pair is 404.
+   */
+  localPair?: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<void>;
 }
 
 export interface RunningHttpServer {
@@ -157,13 +163,21 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
         log(`perch: rejected request with Host ${JSON.stringify(host.slice(0, 100))} (add it to PERCH_ALLOWED_HOSTS if legitimate)`);
         return sendJson(res, 403, rpcError(-32000, 'Forbidden host'));
       }
+      const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+      const isLocalPair = opts.localPair !== undefined && path === LOCAL_PAIR_PATH;
       const origin = req.headers.origin;
-      if (origin !== undefined && !allowedOrigins.has(origin)) {
+      // The local pairing page posts its own forms: its own origin is allowed there (and only there).
+      const ownOrigin = isLocalPair && origin !== undefined && (origin === `http://${host}` || origin === `https://${host}`);
+      if (origin !== undefined && !allowedOrigins.has(origin) && !ownOrigin) {
         log('perch: rejected request with a disallowed Origin');
         return sendJson(res, 403, rpcError(-32000, 'Forbidden origin'));
       }
-      const path = new URL(req.url ?? '/', 'http://localhost').pathname;
       const isStatus = path === STATUS_PATH || path === `${STATUS_PATH}/`;
+      if (isLocalPair) {
+        if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' }, { allow: 'GET, POST' });
+        const site = req.headers['sec-fetch-site'];
+        if (site !== undefined && site !== 'same-origin' && site !== 'none') return sendJson(res, 403, { error: 'Forbidden' });
+      }
       if (isStatus) {
         if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: 'Method not allowed' }, { allow: 'GET, HEAD' });
         // Navigations and same-origin loads only: another site must not be able to trigger live checks.
@@ -172,7 +186,7 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
       }
       let principal: Principal | null;
       try {
-        principal = await authenticate(isStatus ? statusCredential(req.headers.authorization) : req.headers.authorization, tokenDigest, opts.context);
+        principal = await authenticate(isStatus || isLocalPair ? statusCredential(req.headers.authorization) : req.headers.authorization, tokenDigest, opts.context);
       } catch (err) {
         if (err instanceof PerchError && err.code === 'ambiguous_token') {
           log('perch: rejected the global token because it also matches a client grant (check perch client list)');
@@ -180,8 +194,12 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
         } else throw err;
       }
       if (!principal) {
-        if (isStatus) return sendJson(res, 401, { error: 'Unauthorized' }, { 'www-authenticate': 'Basic realm="Perch status", charset="UTF-8"' });
+        if (isStatus || isLocalPair) return sendJson(res, 401, { error: 'Unauthorized' }, { 'www-authenticate': 'Basic realm="Perch status", charset="UTF-8"' });
         return sendJson(res, 401, rpcError(-32001, 'Unauthorized'), { 'www-authenticate': 'Bearer realm="perch"' });
+      }
+      if (isLocalPair) {
+        if (principal.kind !== 'operator_readonly') return sendJson(res, 403, { error: 'The pairing page needs the global token, not a client grant' });
+        return await opts.localPair!(req, res, new URL(req.url ?? '/', 'http://localhost'));
       }
       if (isStatus) {
         // A client grant is narrower than the operator: only the global read-only token sees the overview.
