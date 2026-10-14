@@ -1,11 +1,9 @@
-// MOCK upstream "worlds" for user-isolation tests: every namespace (root operator, user A, user B) gets
-// its own in-memory Drive, Notion, Gmail, Graph, IMAP/SMTP and Calendar/Contacts fakes, and its store is
-// seeded with the SAME (colliding) account ids. Every upstream request is logged with the namespace tag of
-// the world that received it, so a test can prove which namespace's credentials an operation used, and that
+// MOCK upstream "worlds": every store (tag A, B, ...) gets its own in-memory Drive, Notion, Gmail, Graph,
+// IMAP/SMTP and Calendar/Contacts fakes, and is seeded with the SAME (colliding) account ids. Every upstream request is logged with the tag of
+// the world that received it, so a test can prove which store's credentials an operation used, and that
 // a denied operation caused no provider I/O at all. Nothing here talks to a real provider; every secret is
 // generated dummy data.
-import type { ContextFactory } from '../../src/users/namespaces.js';
-import { createPerchContext } from '../../src/context.js';
+import { createPerchContext, type PerchContext } from '../../src/context.js';
 import { ImapMailProvider } from '../../src/mail/imap.js';
 import { createMailProviders } from '../../src/mail/providers.js';
 import type { SmtpSender } from '../../src/mail/smtp.js';
@@ -213,14 +211,9 @@ export async function seedWorld(store: CredentialStore, w: World): Promise<void>
   });
 }
 
-/**
- * Context factory for the namespace router: each namespace's store gets the transport and IMAP/SMTP fakes
- * of its own world (looked up by store.namespace). An unknown namespace fails the test loudly.
- */
-export function worldContextFactory(worlds: Map<string, World>, io: IoLog): ContextFactory {
-  return (store, guard) => {
-    const w = worlds.get(store.namespace);
-    if (!w) throw new Error(`MOCK: no world for namespace ${store.namespace}`);
+/** A context whose store uses the transport and IMAP/SMTP fakes of world `w`. */
+export function worldContext(store: CredentialStore, w: World, io: IoLog): PerchContext {
+  {
     const transport = worldTransport(w, io);
     const smtp = {
       send: async (_a: unknown, raw: Buffer) => {
@@ -238,6 +231,6 @@ export function worldContextFactory(worlds: Map<string, World>, io: IoLog): Cont
       },
       smtp,
     });
-    return createPerchContext(store, transport, { ...createMailProviders(store, new Upstream(transport)), imap }, guard);
-  };
+    return createPerchContext(store, transport, { ...createMailProviders(store, new Upstream(transport)), imap });
+  }
 }

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { AuditLog } from '../audit/audit.js';
-import { createClientGrant, parseCapabilities, removeClientGrant } from '../auth/grants.js';
+import { createClientGrant, parseCapabilities, principalForClientToken, READONLY_PRINCIPAL, removeClientGrant } from '../auth/grants.js';
 import { loadHttpToken, resolveConfig, type PerchConfig } from '../config.js';
 import { createPerchContext } from '../context.js';
 import { PerchError, safeMessage } from '../errors.js';
@@ -40,8 +40,6 @@ import { addSlackWorkspace, removeSlackWorkspace } from '../slack/slack.js';
 import { ensurePrivateDir, pathExists, readPrivateFile, writePrivateFileAtomic, writePrivateFileExclusive } from '../secureFs.js';
 import { CredentialStore, initStore, type ImapAccount, type StoreData } from '../store/credentialStore.js';
 import { createFetchTransport, Upstream, type UpstreamTransport } from '../upstream.js';
-import { NamespaceRouter } from '../users/namespaces.js';
-import { addUser, listUsers, openUserStore, removeUser, userStorePaths } from '../users/registry.js';
 import { collectStatus, failedChecks, formatStatusText } from '../status/status.js';
 import { PERCH_VERSION } from '../version.js';
 import { DEFAULT_PAIR_TIMEOUT_MS, pairWhatsappAccount, removeWhatsappAccount, setWhatsappInstance, whatsappDeviceStatus } from '../whatsapp/whatsapp.js';
@@ -65,11 +63,9 @@ const USAGE = `perch ${PERCH_VERSION} - Google Drive + Notion + mail + Calendar/
 Usage:
   perch init                                   create key, encrypted store and HTTP token (if missing)
   perch serve --stdio                          MCP over stdio (read-only; PERCH_CLIENT_TOKEN_FILE selects a client grant)
-  perch serve --http [--host IP] [--port N]    MCP over stateless Streamable HTTP (bearer auth; routes every user by token)
-  perch user add --label NAME [--token-file PATH]   provision a user (own store and key; read-only token file)
-  perch user list | remove ID                  remove disables membership; key and store are kept
+  perch serve --http [--host IP] [--port N]    MCP over stateless Streamable HTTP (bearer auth)
   perch accounts                               list all connected accounts
-  perch status [--no-check] [--json]           overview of the selected namespace with a live check per account
+  perch status [--no-check] [--json]           overview with a live check per account
                                                (exit code 1 if a check failed); the same page: GET /status on serve --http
   perch google add --label NAME [--port N] [--timeout SECONDS] [--login-hint EMAIL]
   perch google list | remove ID [--revoke]
@@ -99,15 +95,13 @@ Usage:
                             slack_read,slack_send (slack accounts); whatsapp_read,whatsapp_send (whatsapp accounts)
   perch client list | remove ID
   perch token rotate                           replace the HTTP bearer token file
-  perch audit list [--limit N] [--client ID] [--account ID]   body-free audit trail of the selected namespace
+  perch audit list [--limit N] [--client ID] [--account ID]   body-free audit trail
   perch mail-workflow list [--state pending|accepted|rejected|indeterminate]   idempotent send records
   perch mail-workflow resolve OPERATION_ID --outcome sent|not-sent   record a human-verified outcome (never sends)
   perch mail-workflow init                     create a missing ledger for a store created before it existed
 
 Configuration is read from environment variables (see .env.example). Secrets are never
-accepted as command-line arguments. PERCH_USER=<user id> runs the account, client and
-serve --stdio, audit and mail-workflow commands inside that provisioned user's namespace (root namespace
-when unset).`;
+accepted as command-line arguments. Perch serves exactly one operator per installation.`;
 
 const SECRET_FLAG = /^--?(token|pat|secret|client-secret|refresh-token|access-token|password|key|api-key)(=|$)/i;
 
@@ -121,14 +115,20 @@ function openRootStore(config: PerchConfig) {
   return CredentialStore.open({ dataDir: config.dataDir, keyFile: config.keyFile });
 }
 
-/** The selected namespace's store: root, or the PERCH_USER user's (active membership required). */
-async function openStore(config: PerchConfig) {
-  const root = await openRootStore(config);
-  return config.user ? openUserStore(root, config.user) : root;
-}
+const openStore = openRootStore;
 
-function rootOnly(config: PerchConfig, what: string): void {
-  if (config.user) throw new PerchError(`${what} is not available with PERCH_USER (root namespace / local admin only); unset PERCH_USER`, 'not_root_namespace');
+/**
+ * User isolation was removed (one operator per installation). Stores that still list provisioned users
+ * open as before; those users' tokens are no longer accepted, and their stores and keys stay untouched.
+ */
+async function warnAboutProvisionedUsers(store: CredentialStore, io: CliIo): Promise<void> {
+  const active = (await store.read()).users.filter((u) => u.status === 'active');
+  if (active.length) {
+    io.stderr(
+      `perch: warning: this store still lists ${active.length} provisioned user(s) (${active.map((u) => u.id).join(', ')}). ` +
+        'User namespaces are no longer supported; their tokens are rejected. Their stores and keys were not touched (see docs/SETUP.md).\n',
+    );
+  }
 }
 
 type AccountSection = 'all' | 'google' | 'notion' | 'gmail' | 'microsoft' | 'imap' | 'productivity' | 'slack' | 'whatsapp';
@@ -202,7 +202,6 @@ function formatAccounts(data: StoreData, which: AccountSection): string {
 }
 
 async function cmdInit(config: PerchConfig, io: CliIo) {
-  rootOnly(config, 'perch init');
   const r = await initStore({ dataDir: config.dataDir, keyFile: config.keyFile });
   io.stdout(`${r.createdKey ? 'Created' : 'Kept existing'} key file: ${config.keyFile}\n`);
   io.stdout(`${r.createdStore ? 'Created' : 'Kept existing'} encrypted store: ${path.join(config.dataDir, 'store.enc')}\n`);
@@ -231,23 +230,20 @@ async function cmdInit(config: PerchConfig, io: CliIo) {
 
 async function cmdServe(config: PerchConfig, io: CliIo, values: Record<string, unknown>): Promise<number> {
   if (Boolean(values.stdio) === Boolean(values.http)) throw new UsageError('Choose exactly one of --stdio or --http');
-  if (values.http) rootOnly(config, 'perch serve --http (it serves every user by token)');
-  const root = await openRootStore(config);
-  // One context per namespace: own store, upstream and access-token caches.
-  const factory = (store: CredentialStore, guard?: () => Promise<void>) => createPerchContext(store, io.transport ?? createFetchTransport(), undefined, guard);
-  const router = new NamespaceRouter(factory(root), factory);
+  const store = await openRootStore(config);
+  await warnAboutProvisionedUsers(store, io);
+  const context = createPerchContext(store, io.transport ?? createFetchTransport());
   if (values.stdio) {
-    // Plain stdio is the read-only operator of the selected namespace (root, or PERCH_USER's);
-    // a client token file selects one of that namespace's client grants.
+    // Plain stdio is the read-only operator; a client token file selects one of the client grants.
     const token = config.clientTokenFile ? (await readPrivateFile(config.clientTokenFile)).toString('utf8').trim() : undefined;
-    const s = await router.localSession(config.user, token);
-    const server = createMcpServer(s.context, s.principal, s.session);
+    const principal = token === undefined ? READONLY_PRINCIPAL : await principalForClientToken(store, token);
+    if (!principal) throw new PerchError('PERCH_CLIENT_TOKEN_FILE does not hold a known client token (perch client list)', 'unknown_client');
+    const server = createMcpServer(context, principal);
     const closed = new Promise<void>((resolve) => {
       server.server.onclose = () => resolve();
     });
     await server.connect(new StdioServerTransport());
-    const who = s.principal.clientId ? `client ${s.principal.clientId}` : 'read-only';
-    io.stderr(`perch: serving MCP over stdio (${s.userId ? `user ${s.userId}, ` : ''}${who})\n`);
+    io.stderr(`perch: serving MCP over stdio (${principal.clientId ? `client ${principal.clientId}` : 'read-only'})\n`);
     await closed;
     return 0;
   }
@@ -257,8 +253,7 @@ async function cmdServe(config: PerchConfig, io: CliIo, values: Record<string, u
     host: (values.host as string | undefined) ?? config.httpHost,
     port,
     token: await loadHttpToken(config),
-    context: router.root,
-    namespaces: router,
+    context,
     allowedHosts: config.allowedHosts,
     allowedOrigins: config.allowedOrigins,
     log: (l) => io.stderr(`${l}\n`),
@@ -671,46 +666,13 @@ async function cmdClient(config: PerchConfig, io: CliIo, sub: string | undefined
   const tokenFile = path.resolve(
     typeof values['token-file'] === 'string'
       ? values['token-file']
-      : path.join(path.dirname(config.tokenFile), 'clients', `${config.user ? `${config.user}-` : ''}${randomBytes(4).toString('hex')}.token`),
+      : path.join(path.dirname(config.tokenFile), 'clients', `${randomBytes(4).toString('hex')}.token`),
   );
   const { client } = await createClientGrant(store, { label: values.label, capabilities, accountIds: accounts, tokenFile });
   io.stdout(
     `Created client ${client.id} "${client.label}" (${client.capabilities.join(',')}) for ${client.accountIds.join(', ')}.\n` +
       `Its bearer token was written to ${tokenFile} (0600) and is not shown here.\n` +
       'HTTP: send it as "Authorization: Bearer <token>". stdio: set PERCH_CLIENT_TOKEN_FILE to that file.\n',
-  );
-}
-
-async function cmdUser(config: PerchConfig, io: CliIo, sub: string | undefined, rest: string[], values: Record<string, unknown>) {
-  rootOnly(config, 'perch user');
-  const root = await openRootStore(config);
-  if (sub === 'list') {
-    const users = await listUsers(root);
-    const lines = ['Users (admin-provisioned; each has its own store and key):'];
-    if (!users.length) lines.push('  (none)');
-    for (const u of users) lines.push(`  ${u.id}  "${u.label}"  ${u.status}  created ${u.createdAt}${u.removedAt ? `  removed ${u.removedAt}` : ''}`);
-    return io.stdout(`${lines.join('\n')}\n`);
-  }
-  if (sub === 'remove') {
-    const id = rest[0];
-    if (!id) throw new UsageError('Usage: perch user remove ID');
-    await removeUser(root, id);
-    const p = userStorePaths({ dataDir: config.dataDir, keyFile: config.keyFile }, id);
-    return io.stdout(
-      `Removed user ${id}: its read-only token and client grants stop working immediately. The id is never reused.\n` +
-        `Its store (${p.dataDir}) and key (${p.keyFile}) were kept; delete or archive them yourself if wanted.\n`,
-    );
-  }
-  if (sub !== 'add') throw new UsageError('Usage: perch user add|list|remove');
-  if (typeof values.label !== 'string') throw new UsageError('--label is required');
-  const { user, tokenFile } = await addUser(root, {
-    label: values.label,
-    tokenFile: typeof values['token-file'] === 'string' ? values['token-file'] : (id) => path.join(path.dirname(config.tokenFile), 'users', `${id}.token`),
-  });
-  io.stdout(
-    `Created user ${user.id} "${user.label}" with its own encrypted store and key.\n` +
-      `Its read-only bearer token was written to ${tokenFile} (0600) and is not shown here; hand it to the user securely.\n` +
-      `Onboard the user's accounts and client grants with PERCH_USER=${user.id} perch <google|notion|gmail|microsoft|imap|google-productivity|slack|whatsapp|client> ...\n`,
   );
 }
 
@@ -797,7 +759,6 @@ async function cmdMailWorkflow(config: PerchConfig, io: CliIo, sub: string | und
 }
 
 async function cmdToken(config: PerchConfig, io: CliIo, sub: string | undefined) {
-  rootOnly(config, 'perch token');
   if (sub !== 'rotate') throw new UsageError('Usage: perch token rotate');
   await ensurePrivateDir(path.dirname(config.tokenFile));
   await writePrivateFileAtomic(config.tokenFile, Buffer.from(`${generateHttpToken()}\n`));
@@ -908,9 +869,6 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         return 0;
       case 'client':
         await cmdClient(config, io, sub, rest, values);
-        return 0;
-      case 'user':
-        await cmdUser(config, io, sub, rest, values);
         return 0;
       case 'token':
         await cmdToken(config, io, sub);

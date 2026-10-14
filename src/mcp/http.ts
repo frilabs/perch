@@ -3,12 +3,11 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 import { isIP } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { hasWriteCapability, principalForClientToken, READONLY_PRINCIPAL, type Principal } from '../auth/grants.js';
+import { hasWriteCapability, principalForClientToken, READONLY_PRINCIPAL, tokenSha256, type Principal } from '../auth/grants.js';
 import type { PerchContext } from '../context.js';
 import { PerchError } from '../errors.js';
 import { renderStatusPage, statusPageHeaders } from '../status/page.js';
 import { collectStatus, type StatusOptions, type StatusReport } from '../status/status.js';
-import type { NamespaceRouter, SessionScope } from '../users/namespaces.js';
 import { createMcpServer } from './server.js';
 
 export const MIN_TOKEN_LENGTH = 43; // 32 random bytes as base64url
@@ -67,40 +66,24 @@ export function validateBindHost(host: string): void {
 const isLoopback = (h: string) => h === 'localhost' || h === '::1' || h.startsWith('127.');
 const hostPort = (h: string, port: number) => (isIP(h) === 6 ? `[${h}]:${port}` : `${h}:${port}`);
 
-interface Authenticated {
-  context: PerchContext;
-  principal: Principal;
-  scope: SessionScope;
-}
-
 /**
- * The global token is the root operator in READ-ONLY mode. Any other well-formed token is looked up by
- * hash (tokens carry 256 bits of entropy): with a namespace router, among root client grants and active
- * users' read-only tokens and client grants, resolving to exactly one namespace; without a router (legacy
- * single-operator mode), among root client grants only.
+ * The global token is the operator in READ-ONLY mode. Any other well-formed token is looked up by hash
+ * among the client grants (tokens carry 256 bits of entropy). A global token that also matches a client
+ * grant is ambiguous and rejected.
  */
-async function authenticate(
-  header: string | undefined,
-  expectedDigest: Buffer,
-  ctx: PerchContext,
-  namespaces: NamespaceRouter | undefined,
-): Promise<Authenticated | null> {
+async function authenticate(header: string | undefined, expectedDigest: Buffer, ctx: PerchContext): Promise<Principal | null> {
   const m = /^Bearer\s+(\S+)\s*$/i.exec(header ?? '');
   const got = createHash('sha256').update(m?.[1] ?? '').digest();
   // Always compare (constant time on fixed-size digests), then require a well-formed header.
   if (timingSafeEqual(got, expectedDigest) && m !== null) {
-    if (namespaces && (await namespaces.collidesWithGlobal(m[1]!))) {
-      throw new PerchError('The global token also matches a user or client token; refusing to choose a namespace', 'ambiguous_token');
+    const digest = tokenSha256(m[1]!);
+    if ((await ctx.store.read()).clients.some((c) => c.tokenSha256 === digest)) {
+      throw new PerchError('The global token also matches a client token; refusing to choose a principal', 'ambiguous_token');
     }
-    return { context: ctx, principal: READONLY_PRINCIPAL, scope: {} };
+    return READONLY_PRINCIPAL;
   }
   if (!m || m[1]!.length < MIN_TOKEN_LENGTH) return null;
-  if (namespaces) {
-    const r = await namespaces.resolveToken(m[1]!);
-    return r && { context: r.context, principal: r.principal, scope: r.session };
-  }
-  const principal = await principalForClientToken(ctx.store, m[1]!);
-  return principal && { context: ctx, principal, scope: {} };
+  return principalForClientToken(ctx.store, m[1]!);
 }
 
 export interface HttpServerOptions {
@@ -108,11 +91,6 @@ export interface HttpServerOptions {
   port: number;
   token: string;
   context: PerchContext;
-  /**
-   * Routes per-user tokens to their own namespace contexts. Its root context must be `context`.
-   * Without it, the server is the legacy single-operator server (root store only).
-   */
-  namespaces?: NamespaceRouter;
   /** Extra exact Host header values, e.g. the Tailscale Serve MagicDNS name. */
   allowedHosts?: string[];
   /** Exact Origin values; a request carrying any other Origin is rejected. */
@@ -155,19 +133,20 @@ function readBody(req: IncomingMessage, limit: number): Promise<Buffer | 'too_la
 /** Stateless Streamable HTTP: one MCP server + transport per POST, JSON responses. */
 export async function startHttpServer(opts: HttpServerOptions): Promise<RunningHttpServer> {
   validateBindHost(opts.host);
-  if (opts.namespaces && opts.namespaces.root !== opts.context) throw new PerchError('namespaces.root must be the server context', 'bad_config');
   const tokenDigest = createHash('sha256').update(validateHttpToken(opts.token)).digest();
   const log = opts.log ?? ((line: string) => process.stderr.write(`${line}\n`));
   const allowedOrigins = new Set(opts.allowedOrigins ?? []);
   let allowedHosts = new Set<string>();
-  // One cached live report per namespace context (single-flight while it runs).
-  const statusCache = new WeakMap<PerchContext, { at: number; report: Promise<StatusReport> }>();
-  const cachedStatus = (ctx: PerchContext) => {
-    const hit = statusCache.get(ctx);
-    if (hit && Date.now() - hit.at < STATUS_CACHE_SECONDS * 1000) return hit.report;
-    const report = collectStatus(ctx, opts.statusOptions);
-    statusCache.set(ctx, { at: Date.now(), report });
-    report.catch(() => statusCache.delete(ctx));
+  // One cached live report (single-flight while it runs).
+  let statusCache: { at: number; report: Promise<StatusReport> } | undefined;
+  const cachedStatus = () => {
+    if (statusCache && Date.now() - statusCache.at < STATUS_CACHE_SECONDS * 1000) return statusCache.report;
+    const report = collectStatus(opts.context, opts.statusOptions);
+    const entry = { at: Date.now(), report };
+    statusCache = entry;
+    report.catch(() => {
+      if (statusCache === entry) statusCache = undefined;
+    });
     return report;
   };
 
@@ -191,32 +170,23 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
         const site = req.headers['sec-fetch-site'];
         if (site !== undefined && site !== 'same-origin' && site !== 'none') return sendJson(res, 403, { error: 'Forbidden' });
       }
-      let auth: Authenticated | null;
+      let principal: Principal | null;
       try {
-        auth = await authenticate(isStatus ? statusCredential(req.headers.authorization) : req.headers.authorization, tokenDigest, opts.context, opts.namespaces);
+        principal = await authenticate(isStatus ? statusCredential(req.headers.authorization) : req.headers.authorization, tokenDigest, opts.context);
       } catch (err) {
         if (err instanceof PerchError && err.code === 'ambiguous_token') {
-          log('perch: rejected a bearer token that matches more than one grant (ambiguous token hash; check perch user list / perch client list)');
-          auth = null;
-        } else if (err instanceof PerchError && err.code === 'namespace_unavailable') {
-          log('perch: an active user namespace could not be opened (missing/corrupt store or key); all bearer tokens, including the global token, fail closed until it is restored or the user is removed');
-          return sendJson(res, 503, rpcError(-32000, 'Service unavailable'));
+          log('perch: rejected the global token because it also matches a client grant (check perch client list)');
+          principal = null;
         } else throw err;
       }
-      if (!auth) {
+      if (!principal) {
         if (isStatus) return sendJson(res, 401, { error: 'Unauthorized' }, { 'www-authenticate': 'Basic realm="Perch status", charset="UTF-8"' });
         return sendJson(res, 401, rpcError(-32001, 'Unauthorized'), { 'www-authenticate': 'Bearer realm="perch"' });
       }
-      const { principal } = auth;
       if (isStatus) {
-        // A client grant is narrower than its namespace: only the namespace's read-only token sees the overview.
-        if (principal.kind !== 'operator_readonly') return sendJson(res, 403, { error: 'The status page needs the global or a user read-only token, not a client grant' });
-        try {
-          await auth.scope.guard?.();
-        } catch {
-          return sendJson(res, 403, { error: 'Forbidden' });
-        }
-        const html = renderStatusPage(await cachedStatus(auth.context), { cachedSeconds: STATUS_CACHE_SECONDS });
+        // A client grant is narrower than the operator: only the global read-only token sees the overview.
+        if (principal.kind !== 'operator_readonly') return sendJson(res, 403, { error: 'The status page needs the global read-only token, not a client grant' });
+        const html = renderStatusPage(await cachedStatus(), { cachedSeconds: STATUS_CACHE_SECONDS });
         res.writeHead(200, statusPageHeaders());
         res.end(req.method === 'HEAD' ? undefined : html);
         return;
@@ -234,7 +204,7 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
         return sendJson(res, 400, rpcError(-32700, 'Parse error'));
       }
 
-      const mcp = createMcpServer(auth.context, principal, auth.scope);
+      const mcp = createMcpServer(opts.context, principal);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,

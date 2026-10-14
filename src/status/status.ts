@@ -59,8 +59,6 @@ export interface StatusReport {
   clients: Array<{ id: string; label: string; capabilities: string[]; accountIds: string[]; createdAt: string }>;
   whatsappBridge?: { origin: string; configuredAt: string };
   ledger: { sends: number; maxSends: number; pending: number; auditEvents: number; auditDropped: number; lastActivityAt?: string } | { error: string };
-  /** Root namespace only: provisioned users (membership, never tokens). */
-  users?: Array<{ id: string; label: string; status: string; createdAt: string }>;
 }
 
 export const CHECK_TIMEOUT_MS = 20_000;
@@ -215,7 +213,6 @@ export async function collectStatus(ctx: PerchContext, opts: StatusOptions = {})
     clients: d.clients.map((c) => ({ id: c.id, label: c.label, capabilities: [...c.capabilities], accountIds: [...c.accountIds], createdAt: c.createdAt })),
     ...(d.whatsappInstance ? { whatsappBridge: { origin: d.whatsappInstance.origin, configuredAt: d.whatsappInstance.createdAt } } : {}),
     ledger: await ledgerStatus(ctx),
-    ...(ctx.store.namespace === ROOT_NAMESPACE ? { users: d.users.map((u) => ({ id: u.id, label: u.label, status: u.status, createdAt: u.createdAt })) } : {}),
   };
 }
 
@@ -245,10 +242,6 @@ export function formatStatusText(r: StatusReport): string {
       `Send ledger: ${r.ledger.sends} / ${r.ledger.maxSends} records used${r.ledger.pending ? `, ${r.ledger.pending} pending (unknown outcome)` : ''}`,
       `Audit: ${r.ledger.auditEvents} events${r.ledger.auditDropped ? ` (+${r.ledger.auditDropped} rotated out)` : ''}${r.ledger.lastActivityAt ? `, last activity ${r.ledger.lastActivityAt.replace('T', ' ').slice(0, 16)} UTC` : ''}`,
     );
-  }
-  if (r.users) {
-    lines.push('', `Users${r.users.length ? '' : ': none'}`);
-    for (const u of r.users) lines.push(`  ${u.id}  "${u.label}"  ${u.status}  since ${day(u.createdAt)}`);
   }
   const failed = failedChecks(r);
   if (r.checked) lines.push('', failed ? `${failed} check(s) failed.` : 'All checks passed.');

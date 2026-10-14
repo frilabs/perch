@@ -123,15 +123,6 @@ export function renderStatusPage(r: StatusReport, opts: { cachedSeconds?: number
   const bridge = r.whatsappBridge
     ? `<div class="fact"><span class="muted">WhatsApp bridge</span><b class="mono">${esc(r.whatsappBridge.origin)}</b></div>`
     : '';
-  const users = r.users
-    ? `<h2>Users</h2>${
-        r.users.length
-          ? `<div class="box"><table><thead><tr><th>User</th><th>Status</th><th>Since</th></tr></thead><tbody>${r.users
-              .map((u) => `<tr><td><b>${esc(u.label)}</b><br><span class="mono">${esc(u.id)}</span></td><td>${esc(u.status)}</td><td>${esc(u.createdAt.slice(0, 10))}</td></tr>`)
-              .join('')}</tbody></table></div>`
-          : '<div class="box"><div class="empty">No provisioned users.</div></div>'
-      }`
-    : '';
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -150,7 +141,6 @@ export function renderStatusPage(r: StatusReport, opts: { cachedSeconds?: number
 ${sections}
 <h2>Client grants</h2>${clients}
 <h2>Operations</h2><div class="facts">${ledger}${bridge}</div>
-${users}
 <footer>Read-only overview. Connect, change or remove accounts and grants with the perch CLI on the server.</footer>
 </main>
 </body>
