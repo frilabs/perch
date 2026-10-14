@@ -64,7 +64,10 @@ export async function startControlServer(
   }
   const server: Server = createServer((socket) => {
     let listener: PairListener | null = null;
+    let opening = false;
     let windowId: string | undefined;
+    /** The confirmation this connection was shown; an answer applies to exactly that one. */
+    let confirmId: string | undefined;
     lines(socket, (line) => {
       let msg: ClientMessage;
       try {
@@ -72,11 +75,15 @@ export async function startControlServer(
       } catch {
         return send(socket, { type: 'error', message: 'bad request' });
       }
+      if (!msg || typeof msg !== 'object') return send(socket, { type: 'error', message: 'bad request' });
       if (msg.op === 'open') {
-        if (listener) return send(socket, { type: 'error', message: 'already open' });
+        if (listener || opening) return send(socket, { type: 'error', message: 'already open' });
+        opening = true;
         hooks.canOpen().then(
           () => {
             listener = (ev) => {
+              if (ev.type === 'opened') windowId = ev.windowId;
+              if (ev.type === 'confirm') confirmId = ev.confirmId;
               hooks.onEvent?.(ev);
               send(socket, ev);
             };
@@ -84,21 +91,27 @@ export async function startControlServer(
               windowId = manager.open(listener).windowId;
             } catch (err) {
               listener = null;
+              opening = false;
               send(socket, { type: 'error', message: err instanceof PerchError ? err.message : 'cannot open a pairing window' });
             }
           },
-          (err: unknown) => send(socket, { type: 'error', message: err instanceof PerchError ? err.message : 'cannot open a pairing window' }),
+          (err: unknown) => {
+            opening = false;
+            send(socket, { type: 'error', message: err instanceof PerchError ? err.message : 'cannot open a pairing window' });
+          },
         );
       } else if (msg.op === 'answer' && typeof msg.approved === 'boolean') {
         try {
-          manager.answer(msg.approved, windowId);
+          if (!windowId || !confirmId) throw new PerchError('Nothing is waiting for confirmation', 'nothing_to_confirm');
+          manager.answer(msg.approved, windowId, confirmId);
+          confirmId = undefined;
         } catch (err) {
           send(socket, { type: 'error', message: err instanceof PerchError ? err.message : 'cannot answer' });
         }
       }
     });
     socket.on('close', () => {
-      manager.close('aborted', windowId);
+      if (windowId) manager.close('aborted', windowId);
       if (listener) manager.stopWatching(listener);
     });
     socket.on('error', () => socket.destroy());

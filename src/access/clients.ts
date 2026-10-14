@@ -14,11 +14,13 @@ import type { OAuthState, Registration } from './state.js';
  * - DCR (RFC 7591): only while a pairing window is open; the registration lives in that window only.
  * - Pre-registered: created locally (perch oauth client add).
  */
-export const BUILTIN_CIMD = /^https:\/\/claude\.(ai|com)\/oauth\/[A-Za-z0-9._-]{1,100}$/;
+export const BUILTIN_CIMD = /^https:\/\/claude\.(ai|com)\/oauth\/[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
 /** Redirect hosts accepted for Claude's own documents (the hosted callback may move to claude.com). */
 const CLAUDE_REDIRECT_HOSTS = new Set(['claude.ai', 'claude.com']);
 const CIMD_CACHE_MS = 60 * 60 * 1000;
 const CIMD_MAX_BYTES = 64 * 1024;
+/** Spec §4: a metadata document must arrive within 5 s. */
+const CIMD_TIMEOUT_MS = 5000;
 
 export interface ResolvedClient {
   clientId: string;
@@ -122,10 +124,18 @@ export class ClientResolver {
   private async fetchCimd(clientId: string): Promise<ResolvedClient> {
     const url = new URL(clientId);
     const origin = validateCimdOrigin(clientId);
-    if (url.search || url.hash) throw new PerchError('Client metadata URL must not have a query or fragment', 'unknown_oauth_client');
+    if (url.search || url.hash || url.pathname.length > 200) throw new PerchError('Client metadata URL must not have a query or fragment', 'unknown_oauth_client');
     let doc: unknown;
     try {
-      doc = await this.upstream.json('cimd', { method: 'GET', path: url.pathname, origin, maxBytes: CIMD_MAX_BYTES });
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new PerchError('timeout', 'upstream_timeout')), CIMD_TIMEOUT_MS);
+      });
+      try {
+        doc = await Promise.race([this.upstream.json('cimd', { method: 'GET', path: url.pathname, origin, maxBytes: CIMD_MAX_BYTES }), timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
     } catch {
       throw new PerchError('The client metadata document could not be fetched', 'client_metadata_unavailable');
     }

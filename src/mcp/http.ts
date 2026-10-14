@@ -100,8 +100,8 @@ export interface HttpServerOptions {
   /** Tests only: MOCK IMAP/SMTP login for the status page's live checks. */
   statusOptions?: Pick<StatusOptions, 'imapVerify' | 'pairingOpen'>;
   /**
-   * Local pairing page of the public access (GET/POST /local/pair), only on this local listener and only for
-   * the global read-only token (Basic auth like the status page). Absent: /local/pair is 404.
+   * Local pairing page of the public access (GET/POST /local/pair), only on this local listener. It has its own
+   * password (perch oauth local-page enable), never the global token. Absent: /local/pair is 404.
    */
   localPair?: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<void>;
 }
@@ -177,6 +177,8 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
         if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' }, { allow: 'GET, POST' });
         const site = req.headers['sec-fetch-site'];
         if (site !== undefined && site !== 'same-origin' && site !== 'none') return sendJson(res, 403, { error: 'Forbidden' });
+        // Its own password (never the global token); checked by the handler.
+        return await opts.localPair!(req, res, new URL(req.url ?? '/', 'http://localhost'));
       }
       if (isStatus) {
         if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: 'Method not allowed' }, { allow: 'GET, HEAD' });
@@ -186,7 +188,7 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
       }
       let principal: Principal | null;
       try {
-        principal = await authenticate(isStatus || isLocalPair ? statusCredential(req.headers.authorization) : req.headers.authorization, tokenDigest, opts.context);
+        principal = await authenticate(isStatus ? statusCredential(req.headers.authorization) : req.headers.authorization, tokenDigest, opts.context);
       } catch (err) {
         if (err instanceof PerchError && err.code === 'ambiguous_token') {
           log('perch: rejected the global token because it also matches a client grant (check perch client list)');
@@ -194,12 +196,8 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
         } else throw err;
       }
       if (!principal) {
-        if (isStatus || isLocalPair) return sendJson(res, 401, { error: 'Unauthorized' }, { 'www-authenticate': 'Basic realm="Perch status", charset="UTF-8"' });
+        if (isStatus) return sendJson(res, 401, { error: 'Unauthorized' }, { 'www-authenticate': 'Basic realm="Perch status", charset="UTF-8"' });
         return sendJson(res, 401, rpcError(-32001, 'Unauthorized'), { 'www-authenticate': 'Bearer realm="perch"' });
-      }
-      if (isLocalPair) {
-        if (principal.kind !== 'operator_readonly') return sendJson(res, 403, { error: 'The pairing page needs the global token, not a client grant' });
-        return await opts.localPair!(req, res, new URL(req.url ?? '/', 'http://localhost'));
       }
       if (isStatus) {
         // A client grant is narrower than the operator: only the global read-only token sees the overview.

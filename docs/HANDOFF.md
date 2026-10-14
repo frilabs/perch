@@ -1,5 +1,17 @@
 # Handoff: Perch
 
+## Update 2026-10-14: Öffentlicher Zugang über OAuth umgesetzt (Branch `claude/perch-oauth-internet-access-b0cg8c`)
+
+- **Freigabe:** Fritz im Chat: „Passt alles, implementiere“ (Spec `docs/PUBLIC_ACCESS_SPEC.md`, alle Entscheidungen inklusive Limits; `perch user add` entfernen).
+- **Umgesetzt** (Details und Abweichungen: Spec §15; Einrichtung: `docs/SETUP.md` §6a):
+  - Commit 1: Rückbau der Nutzer-Isolation (`perch user`, `PERCH_USER`, Namespace-Router). Ein gesetztes `PERCH_USER` bricht ab; alte Stores öffnen weiter, `serve` warnt, alte Nutzer-Tokens bekommen `401`, alte Nutzer-Dateien bleiben unangetastet.
+  - Commit 2: `src/access/*` und `src/cli/oauth.ts`: öffentlicher Listener mit fester Routing-Tabelle, Perch als Authorization Server, Google-Login (ID-Token aus der direkten Token-Antwort, Claims streng geprüft), Perch-Code (TOTP) mit Notfall-Codes, Kopplungsfenster über einen 0600-Unix-Socket (`perch oauth pair`) oder `/local/pair`, ein Gerät pro Fenster, Code erst nach lokaler Bestätigung, rotierende Refresh-Tokens mit Wiederverwendungs-Erkennung, Notschalter, Rate-Limits, optionale Telegram-Hinweise. Base32, TOTP und QR-Encoder selbst gebaut; keine neuen Abhängigkeiten.
+  - Unabhängiger Review: kein Weg zu Tokens ohne bestätigte Kopplung gefunden. Ein hoher Befund (Neustart der Anmeldung umging „ein Gerät pro Fenster“, und die Bestätigung galt nicht fest der angezeigten Sitzung), zwei mittlere (globales Token konnte die lokale Seite steuern; Rate-Limits als DoS-Hebel) und mehrere kleine sind behoben, jeweils mit Regressionstest. Bewusst offen: Spec §15 Punkt 10.
+- **Getestet (nur Mocks):** `npm run check` als Nicht-Root-Nutzer grün: 663 Tests (52 Dateien), Smoke 11/11 (inklusive `serve --http --public` gegen die gebaute CLI), Lizenzprüfung OK, `npm audit --omit=dev` 0 Befunde. Als root schlagen zwei bestehende Ledger-Tests fehl (chmod-basierte Schreibfehler greifen für root nicht), das war schon vor diesem Branch so.
+- **Live verifiziert:** nichts.
+- **Nächste Schritte (Fritz):** Funnel einrichten, Google-Web-Client anlegen, `perch public setup`, `perch serve --http --public`, `perch oauth pair`, claude.ai-Connector und Claude Code koppeln. Dabei prüfen: ob claude.ai die bis zu 10 Minuten lange Kopplung offenhält, welche CIMD-URL die gehosteten Claude-Apps senden, ob Funnel die Client-IP weitergibt, wie sich Codex anmeldet. Kein Merge ohne Fritz' OK.
+
+
 ## Update 2026-10-14: Öffentlicher Zugang über OAuth, nur Entwurf (Branch `claude/perch-oauth-internet-access-b0cg8c`)
 
 - **Auftrag:** Fritz' Plan „Perch aus dem Internet erreichbar, mindestens so sicher wie im Tailnet“ als Grundlage für Briefing und Spec, ausdrücklich **noch keine Umsetzung**.

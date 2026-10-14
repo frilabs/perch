@@ -6,7 +6,8 @@ import { silentNotifier, TelegramNotifier, type Notifier, type NoticeKind } from
 import { encodeQr, renderQrTerminal } from '../access/qr.js';
 import { pairingBlocker } from '../access/runtime.js';
 import { parseBaseUrl } from '../access/server.js';
-import { DEVICE_ID_PATTERN, endDevice, expireDevices, isPublicLocked, MAX_LOGIN_ALLOW, newRecoveryCodes, OAuthStore, PRECLIENT_ID_PATTERN } from '../access/state.js';
+import { DEVICE_ID_PATTERN, endDevice, expireDevices, isPublicLocked, MAX_LOGIN_ALLOW, newRecoveryCodes, OAuthStore, PRECLIENT_ID_PATTERN, sha256Hex } from '../access/state.js';
+import { randomBytes } from 'node:crypto';
 import { base32Encode } from '../access/base32.js';
 import { newTotpSecret, otpauthUri, verifyTotp } from '../access/totp.js';
 import { AuditLog } from '../audit/audit.js';
@@ -53,6 +54,46 @@ function readLine(io: CliIo): (prompt: string) => Promise<string> {
 
 const yes = (answer: string) => /^(y|yes|j|ja)$/i.test(answer.trim());
 
+/** Removes the client grants of devices that are no longer active. */
+async function releaseGrants(store: CredentialStore, oauth: OAuthStore): Promise<void> {
+  const grants: string[] = [];
+  await oauth.transact((d) => {
+    expireDevices(d);
+    for (const dev of d.devices) {
+      if (dev.status !== 'active' && dev.grantClientId) {
+        grants.push(dev.grantClientId);
+        dev.grantClientId = undefined;
+      }
+    }
+  });
+  for (const g of grants) await removeClientGrant(store, g).catch(() => {});
+}
+
+async function localPage(config: PerchConfig, io: CliIo, action: string | undefined): Promise<void> {
+  const { oauth, audit } = await open(config);
+  if (action === 'enable') {
+    const password = randomBytes(24).toString('base64url');
+    await oauth.transact((d) => {
+      d.localPage = { passwordHash: sha256Hex(password), createdAt: new Date().toISOString() };
+    });
+    await recordAudit(audit, 'oauth_local_page', undefined, 'enabled');
+    io.stdout(
+      `Local pairing page enabled: http://127.0.0.1:${config.httpPort}/local/pair (local listener only).\n` +
+        `Password (any user name; shown once, a new enable replaces it): ${password}\n`,
+    );
+    return;
+  }
+  if (action === 'disable') {
+    await oauth.transact((d) => {
+      d.localPage = undefined;
+    });
+    await recordAudit(audit, 'oauth_local_page', undefined, 'disabled');
+    io.stdout('Local pairing page disabled (/local/pair answers 404).\n');
+    return;
+  }
+  throw usage('Usage: perch oauth local-page enable|disable');
+}
+
 // ------------------------------------------------------------------ TOTP
 
 async function totpSetup(config: PerchConfig, io: CliIo): Promise<void> {
@@ -90,6 +131,7 @@ async function totpSetup(config: PerchConfig, io: CliIo): Promise<void> {
     d.totp = { secret: secret.toString('base64'), lastStep: step!, createdAt: new Date().toISOString(), recovery: records };
     d.totpFailures = [];
   });
+  await releaseGrants((await open(config)).store, oauth);
   await recordAudit(audit, 'oauth_totp_set', undefined, before.totp ? 'replaced' : 'created');
   if (before.totp) await tryNotify(config, io, 'totp_changed');
   io.stdout(
@@ -205,7 +247,8 @@ async function pair(config: PerchConfig, io: CliIo): Promise<number> {
 // ------------------------------------------------------------------ devices, grants, clients
 
 async function devices(config: PerchConfig, io: CliIo): Promise<void> {
-  const { oauth } = await open(config);
+  const { store, oauth } = await open(config);
+  await releaseGrants(store, oauth);
   const s = await oauth.read();
   const lines = ['Devices of the public access:'];
   if (!s.devices.length) lines.push('  (none)');
@@ -377,6 +420,9 @@ export async function cmdOauth(config: PerchConfig, io: CliIo, sub: string | und
     case 'devices':
       await devices(config, io);
       return 0;
+    case 'local-page':
+      await localPage(config, io, rest[0]);
+      return 0;
     case 'revoke':
       await revoke(config, io, rest[0], values.all === true);
       return 0;
@@ -410,6 +456,7 @@ export async function cmdPublic(config: PerchConfig, io: CliIo, sub: string | un
         }
       }
     });
+    await releaseGrants((await open(config)).store, oauth);
     await recordAudit(audit, 'oauth_kill_switch', undefined, 'off');
     await tryNotify(config, io, 'kill_switch');
     io.stdout(
