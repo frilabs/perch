@@ -521,6 +521,28 @@ perch whatsapp remove ID --keep-device   # nur lokal entfernen
 
   Ergebnis `accepted` (von GOWA an WhatsApp übergeben), `rejected` (GOWA hat abgelehnt, nicht gesendet) oder `indeterminate` (Antwort verloren; nie automatisch wiederholt).
 
+## 5a. Status: `perch status` und die Statusseite
+
+**Auf dem Server:**
+
+```bash
+perch status              # alle Konten mit Live-Check, Clients, Sende-Speicher, Audit
+perch status --no-check   # ohne Anfragen an die Anbieter
+perch status --json       # maschinenlesbar
+```
+
+- Pro Konto prüft Perch **nur lesend**, ob der Zugang noch funktioniert: Drive `about`, Gmail-Profil, Graph `/me`, Google `userinfo`, Notion `users/me`, Slack `auth.test`, IMAP-/SMTP-Login, GOWA-Gerätestatus.
+- Der Exit-Code ist 1, sobald ein Check fehlschlägt. Damit eignet sich der Befehl auch für Monitoring, z. B. per Cron.
+- Mit `PERCH_USER=<id>` zeigt er den Namespace eines Nutzers.
+
+**Im Browser:** Läuft `perch serve --http`, zeigt `GET /status` dieselbe Übersicht als nur lesende Seite, z. B. `https://homeserver.tailnet-xyz.ts.net/status` (Tailscale Serve) oder `http://127.0.0.1:8765/status` (SSH-Tunnel).
+
+- **Anmeldung:** Der Browser fragt nach Benutzername und Passwort. Benutzername egal, Passwort = das **globale Token** (`~/.config/perch/http-token`) oder das **Read-only-Token eines Nutzers**. Dieser sieht nur seinen eigenen Namespace.
+- **Client-Grants** werden abgelehnt (403), weil sie nur einen Teil des Namespace sehen dürfen.
+- **Absicherung:** Die Seite enthält keine Secrets, kein JavaScript, keine Formulare und lädt nichts von außen. Es gelten strikte Content-Security-Policy, `no-store`, `frame-ancestors 'none'` und dieselbe Host-Prüfung wie bei MCP. Anfragen von fremden Seiten (`Sec-Fetch-Site: cross-site`) werden abgewiesen.
+- **Cache:** Die Live-Checks werden 60 s wiederverwendet. Neuladen fragt die Anbieter also höchstens einmal pro Minute ab.
+- **Hinweis:** Der Browser merkt sich das Token für diese Adresse, solange er offen ist. Auf fremden oder geteilten Rechnern daher ein privates Fenster verwenden.
+
 ## 5. Konten anzeigen, trennen, widerrufen
 
 ```bash

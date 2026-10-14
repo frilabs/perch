@@ -42,6 +42,7 @@ import { CredentialStore, initStore, type ImapAccount, type StoreData } from '..
 import { createFetchTransport, Upstream, type UpstreamTransport } from '../upstream.js';
 import { NamespaceRouter } from '../users/namespaces.js';
 import { addUser, listUsers, openUserStore, removeUser, userStorePaths } from '../users/registry.js';
+import { collectStatus, failedChecks, formatStatusText } from '../status/status.js';
 import { PERCH_VERSION } from '../version.js';
 import { DEFAULT_PAIR_TIMEOUT_MS, pairWhatsappAccount, removeWhatsappAccount, setWhatsappInstance, whatsappDeviceStatus } from '../whatsapp/whatsapp.js';
 
@@ -68,6 +69,8 @@ Usage:
   perch user add --label NAME [--token-file PATH]   provision a user (own store and key; read-only token file)
   perch user list | remove ID                  remove disables membership; key and store are kept
   perch accounts                               list all connected accounts
+  perch status [--no-check] [--json]           overview of the selected namespace with a live check per account
+                                               (exit code 1 if a check failed); the same page: GET /status on serve --http
   perch google add --label NAME [--port N] [--timeout SECONDS] [--login-hint EMAIL]
   perch google list | remove ID [--revoke]
   perch notion add --label NAME                PAT is read via a masked terminal prompt
@@ -631,6 +634,14 @@ async function cmdWhatsapp(config: PerchConfig, io: CliIo, sub: string | undefin
   );
 }
 
+async function cmdStatus(config: PerchConfig, io: CliIo, values: Record<string, unknown>): Promise<number> {
+  const store = await openStore(config);
+  const ctx = createPerchContext(store, io.transport ?? createFetchTransport());
+  const report = await collectStatus(ctx, { live: values['no-check'] !== true, ...(io.imapVerify ? { imapVerify: io.imapVerify } : {}) });
+  io.stdout(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : formatStatusText(report));
+  return failedChecks(report) ? 1 : 0;
+}
+
 async function cmdClient(config: PerchConfig, io: CliIo, sub: string | undefined, rest: string[], values: Record<string, unknown>) {
   const store = await openStore(config);
   if (sub === 'list') {
@@ -838,6 +849,8 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         url: { type: 'string' },
         phone: { type: 'string' },
         'keep-device': { type: 'boolean' },
+        'no-check': { type: 'boolean' },
+        json: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
       },
@@ -864,6 +877,8 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         return 0;
       case 'serve':
         return await cmdServe(config, io, values);
+      case 'status':
+        return await cmdStatus(config, io, values);
       case 'accounts':
         io.stdout(formatAccounts(await (await openStore(config)).read(), 'all'));
         return 0;

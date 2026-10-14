@@ -1,5 +1,13 @@
 # Handoff: Perch
 
+## Update 2026-10-14: `perch status` und Statusseite (Branch `feat/perch-status`)
+
+- **Freigabe:** Fritz im Chat: „Baue perch status und eine nur anzeigende Website“ (Konzept: nur lesend, keine Secrets, gleiche Absicherung wie MCP, pro Nutzer).
+- **Implementiert:** `src/status/status.ts` (Bericht + Live-Checks über die geteilten Token-Provider des Kontexts, `PerchContext.tokens`), `src/status/page.ts` (HTML, CSP mit Style-Hash, kein Script), `GET /status` in `src/mcp/http.ts` (Basic-Auth-Passwort oder Bearer = globales bzw. Nutzer-Read-only-Token; Client-Grants 403; `Sec-Fetch-Site: cross-site` 403; 60 s Cache pro Namespace), CLI `perch status [--no-check] [--json]`. Doku: `docs/SETUP.md` §5a.
+- **Getestet (nur Mocks):** `npm run check` grün: 655 Tests (52 Dateien), Smoke 10/10, Lizenzprüfung OK.
+- **Live verifiziert:** nichts.
+
+
 ## Update 2026-10-14: Slack- und WhatsApp-Meilenstein (direkt auf `main`)
 
 - **Freigabe:** Fritz im Chat am 2026-10-13/14: Ansatz A (eigene Anbindungen statt durchgereichter MCP-Server), Slack lesen und senden, WhatsApp über GOWA lesen und (mit Grant) senden, beides für das globale Token lesbar, GOWA als Binary + systemd. Ausdrücklich „Implementiere alles auf main“ (Abweichung von der Branch/PR-Regel in `AGENTS.md`, auf Fritz' Anweisung).
