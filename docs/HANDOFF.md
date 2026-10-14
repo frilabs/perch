@@ -1,5 +1,13 @@
 # Handoff: Perch
 
+## Update 2026-10-14: Öffentlicher Zugang über OAuth, nur Entwurf (Branch `claude/perch-oauth-internet-access-b0cg8c`)
+
+- **Auftrag:** Fritz' Plan „Perch aus dem Internet erreichbar, mindestens so sicher wie im Tailnet“ als Grundlage für Briefing und Spec, ausdrücklich **noch keine Umsetzung**.
+- **Ergebnis:** `docs/PUBLIC_ACCESS_BRIEFING.md` und `docs/PUBLIC_ACCESS_SPEC.md`, beide **Entwurf, nicht freigegeben**. Kein Code geändert.
+- **Wichtigste Befunde:** Tailscale Funnel gilt pro Port, nicht pro Pfad, daher braucht es einen eigenen öffentlichen Listener. Google lässt Perch den zweiten Faktor nicht prüfen, daher Vorschlag: Perch-Passkey als Pflicht. claude.ai kommt mit CIMD aus, DCR entfällt.
+- **Nächster Schritt:** Fritz entscheidet die offenen Fragen (Spec §11) und gibt frei. Erst danach wird implementiert.
+
+
 ## Update 2026-10-14: `perch status` und Statusseite (Branch `feat/perch-status`)
 
 - **Freigabe:** Fritz im Chat: „Baue perch status und eine nur anzeigende Website“ (Konzept: nur lesend, keine Secrets, gleiche Absicherung wie MCP, pro Nutzer).
