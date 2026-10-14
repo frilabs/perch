@@ -41,6 +41,8 @@ import { ensurePrivateDir, pathExists, readPrivateFile, writePrivateFileAtomic, 
 import { CredentialStore, initStore, type ImapAccount, type StoreData } from '../store/credentialStore.js';
 import { createFetchTransport, Upstream, type UpstreamTransport } from '../upstream.js';
 import { collectStatus, failedChecks, formatStatusText } from '../status/status.js';
+import { startPublicAccess } from '../access/runtime.js';
+import { cmdOauth, cmdPublic } from './oauth.js';
 import { PERCH_VERSION } from '../version.js';
 import { DEFAULT_PAIR_TIMEOUT_MS, pairWhatsappAccount, removeWhatsappAccount, setWhatsappInstance, whatsappDeviceStatus } from '../whatsapp/whatsapp.js';
 
@@ -50,6 +52,8 @@ export interface CliIo {
   stderr: (s: string) => void;
   /** Masked secret input (TTY only in production). */
   readSecret: (prompt: string) => Promise<string>;
+  /** Visible one-line input (confirmations, one-time codes); TTY only in production. */
+  readLine?: (prompt: string) => Promise<string>;
   /** Tests inject a MOCK upstream transport; production always uses fetch to fixed origins. */
   transport?: UpstreamTransport;
   /** Tests inject a MOCK IMAP/SMTP login check; production logs in to the real servers over TLS. */
@@ -63,7 +67,15 @@ const USAGE = `perch ${PERCH_VERSION} - Google Drive + Notion + mail + Calendar/
 Usage:
   perch init                                   create key, encrypted store and HTTP token (if missing)
   perch serve --stdio                          MCP over stdio (read-only; PERCH_CLIENT_TOKEN_FILE selects a client grant)
-  perch serve --http [--host IP] [--port N]    MCP over stateless Streamable HTTP (bearer auth)
+  perch serve --http [--host IP] [--port N] [--public]   MCP over stateless Streamable HTTP (bearer auth);
+                                               --public also starts the public OAuth listener (PERCH_PUBLIC_BASE_URL)
+  perch public setup | status | on | off       public access: guided setup, state, kill switch (off signs out every device)
+  perch oauth pair                             open a pairing window (10 min, one device) and confirm the sign-in here
+  perch oauth totp setup | status | recovery-codes      the Perch code (TOTP) for every pairing
+  perch oauth login-allow add|remove EMAIL | list       Google accounts that may sign in
+  perch oauth devices | revoke ID | revoke --all        paired devices
+  perch oauth grant ID --allow CAPS --account ID ... | ungrant ID   write capabilities of a device (like perch client add)
+  perch oauth client add --name N --redirect URI | add --cimd URL | list | remove ID   extra OAuth clients
   perch accounts                               list all connected accounts
   perch status [--no-check] [--json]           overview with a live check per account
                                                (exit code 1 if a check failed); the same page: GET /status on serve --http
@@ -249,11 +261,29 @@ async function cmdServe(config: PerchConfig, io: CliIo, values: Record<string, u
   }
   const port = values.port !== undefined ? Number(values.port) : config.httpPort;
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new UsageError('--port must be a valid port');
+  let publicAccess: Awaited<ReturnType<typeof startPublicAccess>> | undefined;
+  if (values.public) {
+    if (!config.publicBaseUrl) throw new PerchError('--public needs PERCH_PUBLIC_BASE_URL (see perch public setup)', 'bad_config');
+    publicAccess = await startPublicAccess({
+      baseUrl: config.publicBaseUrl,
+      port: config.publicPort,
+      context,
+      upstream: new Upstream(io.transport ?? createFetchTransport()),
+      ...(config.googleLoginClientFile ? { googleLoginClientFile: config.googleLoginClientFile } : {}),
+      ...(config.notifyTelegramFile ? { telegramFile: config.notifyTelegramFile } : {}),
+      dcrEnabled: config.oauthDcr,
+      trustForwarded: config.publicTrustForwarded,
+      log: (l) => io.stderr(`${l}\n`),
+    });
+    io.stderr(`perch: public listener on http://127.0.0.1:${publicAccess.publicServer.port} for ${config.publicBaseUrl}/mcp (only /mcp, /.well-known/oauth-*, /oauth/*)\n`);
+  }
   const running = await startHttpServer({
     host: (values.host as string | undefined) ?? config.httpHost,
     port,
     token: await loadHttpToken(config),
     context,
+    ...(publicAccess ? { localPair: publicAccess.localPair } : {}),
+    ...(publicAccess ? { statusOptions: { pairingOpen: () => publicAccess!.pairing.isOpen } } : {}),
     allowedHosts: config.allowedHosts,
     allowedOrigins: config.allowedOrigins,
     log: (l) => io.stderr(`${l}\n`),
@@ -265,6 +295,7 @@ async function cmdServe(config: PerchConfig, io: CliIo, values: Record<string, u
     process.once('SIGTERM', stop);
   });
   await running.close();
+  await publicAccess?.close();
   return 0;
 }
 
@@ -676,7 +707,8 @@ async function cmdClient(config: PerchConfig, io: CliIo, sub: string | undefined
   );
 }
 
-const describeActor = (a: Actor) => (a.kind === 'client' ? `client ${a.clientId}` : a.kind === 'local_admin' ? 'local admin' : 'operator (read-only)');
+const describeActor = (a: Actor) =>
+  a.kind === 'client' ? `client ${a.clientId}` : a.kind === 'local_admin' ? 'local admin' : a.kind === 'oauth' ? `public access${a.deviceId ? ` ${a.deviceId}` : ''}` : 'operator (read-only)';
 
 function optOne(values: Record<string, unknown>, name: string, pattern: RegExp, what: string): string | undefined {
   const v = values[name];
@@ -811,6 +843,11 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         phone: { type: 'string' },
         'keep-device': { type: 'boolean' },
         'no-check': { type: 'boolean' },
+        public: { type: 'boolean' },
+        name: { type: 'string' },
+        redirect: { type: 'string', multiple: true },
+        cimd: { type: 'string' },
+        all: { type: 'boolean' },
         json: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
@@ -838,6 +875,10 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         return 0;
       case 'serve':
         return await cmdServe(config, io, values);
+      case 'oauth':
+        return await cmdOauth(config, io, sub, rest, values);
+      case 'public':
+        return await cmdPublic(config, io, sub);
       case 'status':
         return await cmdStatus(config, io, values);
       case 'accounts':

@@ -9,11 +9,24 @@ import { PerchError } from './errors.js';
  * never the origins.
  */
 
-export type Service = 'drive' | 'oauth' | 'notion' | 'gmail' | 'graph' | 'msauth' | 'calendar' | 'people' | 'openid' | 'slack' | 'gowa';
+export type Service =
+  | 'drive'
+  | 'oauth'
+  | 'notion'
+  | 'gmail'
+  | 'graph'
+  | 'msauth'
+  | 'calendar'
+  | 'people'
+  | 'openid'
+  | 'slack'
+  | 'gowa'
+  | 'cimd'
+  | 'telegram';
 /**
  * `admin` routes (GOWA device pairing/removal) are only ever passed by the local CLI, never by an MCP tool.
  */
-export type RouteCapability = 'read' | 'draft' | 'send' | 'calendar_write' | 'slack_send' | 'whatsapp_send' | 'admin';
+export type RouteCapability = 'read' | 'draft' | 'send' | 'calendar_write' | 'slack_send' | 'whatsapp_send' | 'admin' | 'notify';
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
 export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
@@ -34,10 +47,17 @@ export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
    * is never used for a request.
    */
   gowa: 'http://127.0.0.1',
+  /**
+   * Client ID Metadata Documents of OAuth clients of the public access: the origin comes from an
+   * allowlisted client_id URL and must pass validateCimdOrigin. Placeholder, never used for a request.
+   */
+  cimd: 'https://claude.ai',
+  /** Optional operator notifications of the public access (Telegram Bot API). */
+  telegram: 'https://api.telegram.org',
 });
 
 /** Services whose origin is configured per namespace instead of fixed (see validateGowaOrigin). */
-const DYNAMIC_ORIGIN: ReadonlySet<Service> = new Set(['gowa']);
+const DYNAMIC_ORIGIN: ReadonlySet<Service> = new Set(['gowa', 'cimd']);
 
 const SERVICE_NAMES: Record<Service, string> = {
   drive: 'Google Drive API',
@@ -51,6 +71,8 @@ const SERVICE_NAMES: Record<Service, string> = {
   openid: 'Google OpenID Connect',
   slack: 'Slack Web API',
   gowa: 'WhatsApp bridge (GOWA)',
+  cimd: 'OAuth client metadata document',
+  telegram: 'Telegram Bot API',
 };
 
 const NOTION_ID = '[0-9a-fA-F-]{32,36}';
@@ -161,7 +183,28 @@ const ROUTES: Record<Service, Route[]> = {
     ['GET', new RegExp(`^/devices/${DEVICE_PATH}/status$`), 'admin'],
     ['DELETE', new RegExp(`^/devices/${DEVICE_PATH}$`), 'admin'],
   ],
+  cimd: [['GET', /^\/(?!.*\.\.)[A-Za-z0-9._~\/-]{1,256}$/]],
+  telegram: [['POST', /^\/bot[0-9]{5,15}:[A-Za-z0-9_-]{30,64}\/sendMessage$/, 'notify']],
 };
+
+/**
+ * Origin of an allowlisted client_id URL (public access, CIMD): https on the default port, a DNS host name
+ * (never an IP literal, localhost or a single-label name). Returns the normalised origin.
+ */
+export function validateCimdOrigin(raw: string): string {
+  const bad = () => new PerchError('A client metadata URL must be https://<dns name>/<path> on the default port', 'bad_argument');
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    throw bad();
+  }
+  if (url.protocol !== 'https:' || url.port || url.username || url.password) throw bad();
+  const host = url.hostname.toLowerCase();
+  if (!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(host)) throw bad();
+  if (host === 'localhost' || host.endsWith('.localhost')) throw bad();
+  return url.origin;
+}
 
 /**
  * A GOWA instance origin: http(s) on loopback (127.0.0.1, ::1, localhost) or a Tailscale address
@@ -348,7 +391,7 @@ export class Upstream {
     let origin = ORIGINS[service];
     if (DYNAMIC_ORIGIN.has(service)) {
       if (!opts.origin) throw new PerchError(`Blocked ${SERVICE_NAMES[service]} call without a configured origin`, 'route_not_allowed');
-      origin = validateGowaOrigin(opts.origin);
+      origin = service === 'cimd' ? validateCimdOrigin(opts.origin) : validateGowaOrigin(opts.origin);
     } else if (opts.origin !== undefined) {
       throw new PerchError(`Blocked ${SERVICE_NAMES[service]} call to a non-fixed origin`, 'route_not_allowed');
     }

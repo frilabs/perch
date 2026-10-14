@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readSecretFromTty } from './cli/prompt.js';
+import { readLineFromTty, readSecretFromTty } from './cli/prompt.js';
 import { runCli } from './cli/run.js';
 
 process.umask(0o077);
@@ -9,6 +9,7 @@ runCli(process.argv.slice(2), {
   stdout: (s) => process.stdout.write(s),
   stderr: (s) => process.stderr.write(s),
   readSecret: readSecretFromTty,
+  readLine: readLineFromTty,
 }).then(
   (code) => process.exit(code),
   () => {
