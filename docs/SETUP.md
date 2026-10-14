@@ -652,7 +652,7 @@ Spezifikation: `docs/PUBLIC_ACCESS_SPEC.md`. **Nur mit Mocks getestet, nicht liv
 3. Im Browser: Kopplungscode, Google-Anmeldung, Perch-Code.
 4. Im Terminal erscheinen Client, Rücksprungadresse, Google-Konto, Browser und (falls verfügbar) IP. Nur mit `y` bestätigen, wenn das genau das Gerät ist, das gerade gekoppelt wird. Danach meldet das Terminal den ersten Zugriff des neuen Geräts.
 
-Alternativ zeigt `http://127.0.0.1:8765/local/pair` (lokaler Listener, Benutzername egal, Passwort = globales Token) dieselbe Kopplung als Seite mit Knöpfen, etwa vom Handy über das Tailnet oder einen SSH-Tunnel.
+Alternativ zeigt `http://127.0.0.1:8765/local/pair` (nur am lokalen Listener) dieselbe Kopplung als Seite mit Knöpfen, etwa vom Handy über das Tailnet oder einen SSH-Tunnel. Die Seite ist standardmäßig aus und hat ein **eigenes Passwort** (nicht das globale Token, das MCP-Clients kennen): `perch oauth local-page enable` zeigt es einmal an, `disable` schaltet die Seite wieder ab.
 
 Ein claude.ai-Connector gilt für das ganze claude.ai-Konto (Web, Desktop, Handy) und muss also nur einmal gekoppelt werden.
 
@@ -673,7 +673,7 @@ perch audit list                                      # alle Kopplungsschritte, 
 ```
 
 - **Clients ohne Metadaten-Dokument** (z. B. Codex) können sich per Dynamic Client Registration selbst eintragen, aber nur während eines offenen Kopplungsfensters (höchstens 3 pro Fenster). `PERCH_OAUTH_DCR=off` schaltet das ab.
-- **Sperren:** 3 falsche Kopplungscodes schließen das Fenster; 5 falsche Perch-Codes in 15 Minuten sperren das Koppeln für 15 Minuten (bei Wiederholung länger). Ein zweiter Anmeldeversuch im selben Fenster schließt es sofort für beide (Alarm).
+- **Sperren:** 3 falsche Kopplungscodes schließen das Fenster; ein Neustart der Anmeldung nach bestandenem Kopplungscode ebenfalls; 5 falsche Perch-Codes in 15 Minuten sperren das Koppeln für 15 Minuten (bei Wiederholung länger). Ein zweiter Anmeldeversuch im selben Fenster schließt es sofort für beide (Alarm).
 
 ### 6a.5 Notschalter
 

@@ -245,7 +245,7 @@ describe('pairing window', () => {
     expect(w.status).toBe(200);
     expect(w.body).toContain('Confirm this sign-in in your terminal');
     expect(w.body).toContain('http-equiv="refresh"');
-    h.pairing.answer(true);
+    h.pairing.answer(true, h.pairing.windowId!, (h.events.find((e) => e.type === 'confirm') as { confirmId: string }).confirmId);
     await waitFor(() => h.events.some((e) => e.type === 'paired'));
     const done = await h.http('GET', '/oauth/wait', { cookie });
     const u = new URL(done.location!);
@@ -396,17 +396,21 @@ describe('revocation, kill switch and rights', () => {
     expect((await mcpCall(h, a.tokens.access_token!, 'tools/list')).status).toBe(401);
   });
 
-  it('17: rate limits and the invalid-bearer block', async () => {
+  it('17: rate limits and the invalid-bearer block (known devices keep working)', async () => {
+    // Without a window the fixed page costs nothing: nobody can exhaust the limit in advance.
+    for (let i = 0; i < 30; i++) expect((await h.http('GET', authorizeUrl({ challenge: 'x'.repeat(43) }))).status).toBe(403);
+    openWindow(h, 'manual');
     for (let i = 0; i < 10; i++) await h.http('GET', authorizeUrl({ challenge: 'x'.repeat(43) }));
     expect((await h.http('GET', authorizeUrl({ challenge: 'x'.repeat(43) }))).status).toBe(429);
+    h.pairing.close('aborted');
     const { tokens } = await (async () => {
       h.clock.now += 120_000; // refill
       return pairAndExchange(h);
     })();
+    expect((await listAccounts(tokens.access_token!)).status).toBe(200); // now known
     for (let i = 0; i < 20; i++) await listAccounts('B'.repeat(43));
-    expect((await listAccounts(tokens.access_token!)).status).toBe(401); // blocked for 5 minutes, without state access
-    h.clock.now += 5 * 60 * 1000 + 1000;
-    expect((await listAccounts(tokens.access_token!)).status).toBe(200); // block over, the 1-hour access token still valid
+    expect((await listAccounts('D'.repeat(43))).status).toBe(401); // blocked for 5 minutes
+    expect((await listAccounts(tokens.access_token!)).status).toBe(200); // a known device is not locked out
   });
 
   it('17b: every pairing step leaves a secret-free audit trail; notifications carry no links or secrets', async () => {
@@ -457,5 +461,59 @@ describe('ID token claims (unit)', () => {
     ]) {
       expect(() => checkIdTokenClaims(bad, GOOGLE, 'n', now)).toThrow(/Google sign-in rejected/);
     }
+  });
+});
+
+describe('regressions from the independent review', () => {
+  it('the browser that passed the pairing code cannot restart and let another browser join', async () => {
+    const code = openWindow(h, 'manual');
+    const a = await throughCode(code);
+    expect(a.google.status).toBe(303);
+    const { challenge } = pkce();
+    const restart = await h.http('GET', authorizeUrl({ challenge }), { cookie: a.cookie });
+    expect(restart.status).toBe(403);
+    expect(h.pairing.isOpen).toBe(false);
+    expect(h.events).toContainEqual({ type: 'closed', reason: 'replaced' });
+  });
+
+  it('an answer only applies to the confirmation that was shown', async () => {
+    const code = openWindow(h, 'manual');
+    const { cookie } = await throughGoogle(code);
+    const page = await h.http('GET', '/oauth/totp', { cookie });
+    await h.http('POST', '/oauth/totp', { cookie, body: form({ csrf: csrfOf(page.body), code: h.nextTotp() }) });
+    expect(() => h.pairing.answer(true, h.pairing.windowId!, 'not-the-shown-one')).toThrow(/Nothing is waiting/);
+    expect(() => h.pairing.answer(true, 'other-window', (h.events.find((e) => e.type === 'confirm') as { confirmId: string }).confirmId)).toThrow(/Nothing is waiting/);
+    expect((await h.oauth.read()).devices).toEqual([]);
+  });
+
+  it('reusing an exchanged authorization code signs the device out', async () => {
+    const code = openWindow(h);
+    const r = await runBrowserFlow(h, code);
+    const t = await exchange(h, r);
+    expect(t.status).toBe(200);
+    expect((await exchange(h, r)).json.error).toBe('invalid_grant');
+    expect((await listAccounts(t.json.access_token!)).status).toBe(401);
+    expect((await h.oauth.read()).devices[0]).toMatchObject({ status: 'revoked', endedReason: 'code_reuse' });
+  });
+
+  it('a self-registered client never gets an error redirect (no open redirect)', async () => {
+    openWindow(h, 'manual');
+    const reg = await h.http('POST', '/oauth/register', { type: 'application/json', body: JSON.stringify({ redirect_uris: ['https://attacker.example/cb'] }) });
+    const clientId = JSON.parse(reg.body).client_id as string;
+    const { challenge } = pkce();
+    const r = await h.http('GET', authorizeUrl({ challenge, clientId, redirectUri: 'https://attacker.example/cb', responseType: 'token' }));
+    expect(r.status).toBe(400);
+    expect(r.location).toBeUndefined();
+  });
+
+  it('a paired device whose code is never exchanged expires after 10 minutes', async () => {
+    const code = openWindow(h);
+    await runBrowserFlow(h, code);
+    h.clock.now += 11 * 60 * 1000;
+    const { tokens } = await pairAndExchange(h); // any state write expires the unused one
+    expect(tokens.access_token).toBeDefined();
+    const devs = (await h.oauth.read()).devices;
+    expect(devs[0]).toMatchObject({ status: 'expired', endedReason: 'unused' });
+    expect(devs[1]!.status).toBe('active');
   });
 });

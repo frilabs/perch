@@ -76,6 +76,7 @@ Usage:
   perch oauth devices | revoke ID | revoke --all        paired devices
   perch oauth grant ID --allow CAPS --account ID ... | ungrant ID   write capabilities of a device (like perch client add)
   perch oauth client add --name N --redirect URI | add --cimd URL | list | remove ID   extra OAuth clients
+  perch oauth local-page enable | disable       local pairing page /local/pair with its own password
   perch accounts                               list all connected accounts
   perch status [--no-check] [--json]           overview with a live check per account
                                                (exit code 1 if a check failed); the same page: GET /status on serve --http

@@ -40,6 +40,8 @@ const MAX_PREVIOUS_REFRESH = 100;
 export const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000;
 export const REFRESH_IDLE_MS = 14 * 24 * 60 * 60 * 1000;
 export const DEVICE_ABSOLUTE_MS = 90 * 24 * 60 * 60 * 1000;
+/** A paired device whose authorization code was never exchanged expires after this. */
+export const UNUSED_DEVICE_MS = 10 * 60 * 1000;
 
 const HEX64 = /^[a-f0-9]{64}$/;
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -94,7 +96,7 @@ const DeviceSchema = z.strictObject({
   lastSeenAt: z.string().regex(ISO).optional(),
   status: z.enum(['active', 'revoked', 'expired']),
   endedAt: z.string().regex(ISO).optional(),
-  endedReason: z.enum(['revoked', 'refresh_reuse', 'idle', 'absolute', 'kill_switch', 'totp_changed']).optional(),
+  endedReason: z.enum(['revoked', 'refresh_reuse', 'idle', 'absolute', 'kill_switch', 'totp_changed', 'unused', 'code_reuse']).optional(),
   /** Client grant (store.enc) with write capabilities; without one the device reads like the global token. */
   grantClientId: z.string().regex(/^client-[a-f0-9]{8}$/).optional(),
   family: FamilySchema,
@@ -121,6 +123,8 @@ const OAuthStateSchema = z.strictObject({
   /** Wrong Perch codes (timestamps) and the resulting pairing lockout (Spec §9). */
   totpFailures: z.array(z.string().regex(ISO)).max(50),
   pairLock: z.strictObject({ until: z.string().regex(ISO), level: z.number().int().min(1).max(20) }).optional(),
+  /** Local pairing page (/local/pair): SHA-256 of its own password; absent = page disabled. */
+  localPage: z.strictObject({ passwordHash: z.string().regex(HEX64), createdAt: z.string().regex(ISO) }).optional(),
 });
 
 export type OAuthState = z.infer<typeof OAuthStateSchema>;
@@ -265,7 +269,7 @@ export class OAuthStore {
 /** Ends a device (no tokens work afterwards). */
 export function endDevice(d: Device, reason: NonNullable<Device['endedReason']>, now = new Date()): void {
   if (d.status !== 'active') return;
-  d.status = reason === 'idle' || reason === 'absolute' ? 'expired' : 'revoked';
+  d.status = reason === 'idle' || reason === 'absolute' || reason === 'unused' ? 'expired' : 'revoked';
   d.endedAt = now.toISOString();
   d.endedReason = reason;
   d.family = { previousRefresh: d.family.previousRefresh };
@@ -276,7 +280,10 @@ export function expireDevices(data: OAuthState, now = new Date()): boolean {
   let changed = false;
   for (const d of data.devices) {
     if (d.status !== 'active') continue;
-    if (Date.parse(d.expiresAt) <= now.getTime()) {
+    if (!d.family.refreshHash && Date.parse(d.pairedAt) + UNUSED_DEVICE_MS <= now.getTime()) {
+      endDevice(d, 'unused', now);
+      changed = true;
+    } else if (Date.parse(d.expiresAt) <= now.getTime()) {
       endDevice(d, 'absolute', now);
       changed = true;
     } else if (Date.parse(d.family.refreshedAt ?? d.pairedAt) + REFRESH_IDLE_MS <= now.getTime()) {

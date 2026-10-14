@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { hasWriteCapability, principalForGrantId, READONLY_PRINCIPAL, type Principal } from '../auth/grants.js';
+import { hasWriteCapability, principalForGrantId, READONLY_PRINCIPAL, removeClientGrant, type Principal } from '../auth/grants.js';
 import type { PerchContext } from '../context.js';
 import { PerchError } from '../errors.js';
 import { validateBindHost } from '../mcp/http.js';
@@ -149,13 +149,21 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
   const log = opts.log ?? ((l: string) => process.stderr.write(`${l}\n`));
   const { oauth, pairing, context } = opts;
 
-  const buckets = {
-    pages: new Bucket(10, now),
-    wait: new Bucket(60, now),
-    register: new Bucket(5, now),
-    token: new Bucket(30, now),
-    all: new Bucket(300, now),
+  // Per client IP when the proxy's X-Forwarded-For is trusted, otherwise global (Spec §9).
+  const LIMITS = { pages: 10, wait: 60, register: 5, token: 30, all: 300 } as const;
+  type Kind = keyof typeof LIMITS;
+  const bucketMap = new Map<string, Bucket>();
+  const take = (kind: Kind, req: IncomingMessage): boolean => {
+    const key = `${kind}|${clientIp(req) ?? '*'}`;
+    let b = bucketMap.get(key);
+    if (!b) {
+      if (bucketMap.size > 5000) bucketMap.clear();
+      bucketMap.set(key, (b = new Bucket(LIMITS[kind], now)));
+    }
+    return b.take();
   };
+  /** Access-token hashes seen valid recently: known devices pass the invalid-bearer block. */
+  const knownAccess = new Map<string, number>();
   const deviceBuckets = new Map<string, Bucket>();
   let invalidBearer: number[] = [];
   let bearerBlockedUntil = 0;
@@ -256,9 +264,10 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
 
   // ---------------------------------------------------------------- authorize flow
   async function authorize(req: IncomingMessage, res: ServerResponse, url: URL) {
-    if (!buckets.pages.take()) return tooMany(res);
-    // No window: a fixed page, no Google redirect, no metadata fetch, no state access (Spec §3).
+    // No window: a fixed page, no Google redirect, no metadata fetch, no state access (Spec §3), and no
+    // rate-limit cost (otherwise anyone could keep the limit exhausted while no window is open).
     if (!pairing.isOpen) return html(res, 403, noWindowPage(origin));
+    if (!take('pages', req)) return tooMany(res);
     const state = await readState(res);
     if (!state) return;
     const q = url.searchParams;
@@ -274,6 +283,8 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
       return html(res, 400, errorPage(origin, 'Invalid request', 'The return address of this client is not registered. Nothing was connected.'));
     }
     const back = (error: string) => {
+      // Self-registered clients may name any https redirect: never redirect them with an error (no open redirect).
+      if (client.registration === 'dcr') return html(res, 400, errorPage(origin, 'Invalid request', `The sign-in request is invalid (${error}). Nothing was connected.`));
       const u = new URL(redirectUri);
       u.searchParams.set('error', error);
       if (q.get('state')) u.searchParams.set('state', q.get('state')!);
@@ -339,7 +350,7 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
   }
 
   async function pairCode(req: IncomingMessage, res: ServerResponse) {
-    if (!buckets.pages.take()) return tooMany(res);
+    if (!take('pages', req)) return tooMany(res);
     if (req.method === 'GET') {
       const s = session(req);
       if (!s || s.step !== 'code') return html(res, 403, notConfirmedPage(origin));
@@ -374,7 +385,7 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
   }
 
   async function googleCallback(req: IncomingMessage, res: ServerResponse, url: URL) {
-    if (!buckets.pages.take()) return tooMany(res);
+    if (!take('pages', req)) return tooMany(res);
     const state = await readState(res);
     if (!state) return;
     const s = session(req);
@@ -418,7 +429,7 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
   }
 
   async function totpStep(req: IncomingMessage, res: ServerResponse) {
-    if (!buckets.pages.take()) return tooMany(res);
+    if (!take('pages', req)) return tooMany(res);
     if (req.method === 'GET') {
       const s = session(req);
       if (!s || s.step !== 'totp' || !s.identity) return html(res, 403, notConfirmedPage(origin));
@@ -476,8 +487,42 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
     }
     if (result === 'recovery') notify('recovery_code_used');
     await audit('oauth_totp', 'ok', undefined, result === 'recovery' ? 'recovery_code' : undefined);
-    pairing.totpDone(s, result === 'recovery', (sess) => createDevice(sess));
+    try {
+      pairing.totpDone(s, result === 'recovery', (sess) => createDevice(sess), (deviceId) => void endDevices([deviceId], 'unused'));
+    } catch (err) {
+      if (err instanceof PerchError && err.code === 'second_pairing_attempt') {
+        notify('second_pairing_attempt');
+        await audit('oauth_pair_second_attempt', 'denied', undefined, 'second_pairing_attempt');
+        return html(res, 403, errorPage(origin, 'Pairing closed', 'A second sign-in attempt was made in the same pairing window. Both were discarded and the window was closed.'));
+      }
+      return html(res, 403, notConfirmedPage(origin));
+    }
     redirect(res, '/oauth/wait');
+  }
+
+  /** Removes the client grants of devices that are no longer active (they fail closed anyway). */
+  async function releaseGrants(): Promise<void> {
+    const grants: string[] = [];
+    await oauth.transact((d) => {
+      for (const dev of d.devices) {
+        if (dev.status !== 'active' && dev.grantClientId) {
+          grants.push(dev.grantClientId);
+          dev.grantClientId = undefined;
+        }
+      }
+    });
+    for (const g of grants) await removeClientGrant(context.store, g).catch(() => {});
+  }
+
+  async function endDevices(ids: string[], reason: NonNullable<Device['endedReason']>): Promise<void> {
+    try {
+      await oauth.transact((d) => {
+        for (const dev of d.devices) if (ids.includes(dev.id)) endDevice(dev, reason, new Date(now()));
+      });
+      await releaseGrants();
+    } catch {
+      log('perch: could not end a device');
+    }
   }
 
   async function createDevice(s: PairSession): Promise<string> {
@@ -508,7 +553,7 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
   }
 
   async function wait(req: IncomingMessage, res: ServerResponse) {
-    if (!buckets.wait.take()) return tooMany(res);
+    if (!take('wait', req)) return tooMany(res);
     const s = session(req);
     if (!s) return html(res, 403, notConfirmedPage(origin));
     if (s.step === 'confirm') return html(res, 200, waitPage(origin, clientView(s.client, s.auth.redirectUri)));
@@ -523,7 +568,7 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
 
   // ---------------------------------------------------------------- DCR
   async function register(req: IncomingMessage, res: ServerResponse) {
-    if (!buckets.register.take()) return tooMany(res);
+    if (!take('register', req)) return tooMany(res);
     if (!opts.dcrEnabled) return json(res, 404, { error: 'not_found' });
     // Closed outside a pairing window (Spec §4).
     if (!pairing.isOpen) return json(res, 403, { error: 'access_denied', error_description: 'Registration is only possible while a pairing window is open' });
@@ -571,7 +616,7 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
   };
 
   async function token(req: IncomingMessage, res: ServerResponse) {
-    if (!buckets.token.take()) return tooMany(res);
+    if (!take('token', req)) return tooMany(res);
     const state = await readState(res);
     if (!state) return;
     const form = await readForm(req, res);
@@ -579,7 +624,14 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
     const grant = form.get('grant_type');
     const t = now();
     if (grant === 'authorization_code') {
-      const issued = pairing.takeCode(form.get('code') ?? '');
+      const taken = pairing.takeCode(form.get('code') ?? '');
+      if (taken && 'reused' in taken) {
+        // A second use of an exchanged code: the tokens issued for it are no longer trustworthy.
+        await endDevices([taken.reused], 'code_reuse');
+        await audit('oauth_code_reuse', 'denied', taken.reused, 'code_reuse');
+        return oauthError(res, 'invalid_grant');
+      }
+      const issued = taken;
       const verifier = form.get('code_verifier') ?? '';
       const requested = form.get('resource');
       if (
@@ -629,6 +681,7 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
       });
       const o = outcome as RefreshOutcome;
       if (o.kind === 'reuse') {
+        await releaseGrants();
         notify('refresh_reuse', o.id);
         await audit('oauth_refresh_reuse', 'denied', o.id, 'refresh_reuse');
         return oauthError(res, 'invalid_grant');
@@ -644,7 +697,7 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
   }
 
   async function revoke(req: IncomingMessage, res: ServerResponse) {
-    if (!buckets.token.take()) return tooMany(res);
+    if (!take('token', req)) return tooMany(res);
     const state = await readState(res);
     if (!state) return;
     const form = await readForm(req, res);
@@ -662,7 +715,10 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
           ended = dev.id;
         }
       });
-      if (ended) await audit('oauth_device_revoked', 'ok', ended, 'client_revocation');
+      if (ended) {
+        await releaseGrants();
+        await audit('oauth_device_revoked', 'ok', ended, 'client_revocation');
+      }
     }
     res.writeHead(200, { 'cache-control': 'no-store' });
     res.end();
@@ -685,8 +741,9 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
     const o = req.headers.origin;
     if (o !== undefined && o !== origin) return json(res, 403, { error: 'forbidden_origin' });
     const t = now();
-    if (t < bearerBlockedUntil) return unauthorized(res);
     const m = /^Bearer\s+([A-Za-z0-9_-]{43,64})\s*$/i.exec(String(req.headers.authorization ?? ''));
+    // While blocked, unknown tokens get 401 without any state access; recently valid tokens still pass.
+    if (t < bearerBlockedUntil && !(m && (knownAccess.get(sha256Hex(m[1]!)) ?? 0) > t)) return unauthorized(res);
     const countInvalid = () => {
       invalidBearer = [...invalidBearer.filter((x) => t - x < 60_000), t];
       if (invalidBearer.length >= INVALID_BEARER_LIMIT) {
@@ -704,9 +761,12 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
     if (!state) return;
     const device = deviceForAccess(state, h, t);
     if (!device) {
+      knownAccess.delete(h);
       countInvalid();
       return unauthorized(res, true);
     }
+    if (knownAccess.size > 500) knownAccess.clear();
+    knownAccess.set(h, Date.parse(device.family.accessExpiresAt!));
     let bucket = deviceBuckets.get(device.id);
     if (!bucket) deviceBuckets.set(device.id, (bucket = new Bucket(120, now)));
     if (!bucket.take()) return tooMany(res);
@@ -757,10 +817,11 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
   // ---------------------------------------------------------------- routing
   const server = createServer(async (req, res) => {
     try {
-      if (!buckets.all.take()) return tooMany(res);
       if (String(req.headers.host ?? '').toLowerCase() !== base.host) return json(res, 403, { error: 'forbidden_host' });
       const url = new URL(req.url ?? '/', origin);
       const path = url.pathname;
+      // /mcp has its own per-device limit; the overall limit protects the unauthenticated routes.
+      if (path !== '/mcp' && !take('all', req)) return tooMany(res);
       const get = req.method === 'GET' || req.method === 'HEAD';
       if (path === '/.well-known/oauth-protected-resource' || path === '/.well-known/oauth-protected-resource/mcp') {
         return get ? json(res, 200, protectedResource(), { 'cache-control': 'public, max-age=300' }) : json(res, 405, { error: 'method_not_allowed' });

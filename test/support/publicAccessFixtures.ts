@@ -204,7 +204,7 @@ export function openWindow(h: Harness, onConfirm: 'approve' | 'reject' | 'manual
   h.clock.now += 60_000;
   const { code } = h.pairing.open((ev) => {
     h.events.push(ev);
-    if (ev.type === 'confirm' && onConfirm !== 'manual') queueMicrotask(() => h.pairing.answer(onConfirm === 'approve'));
+    if (ev.type === 'confirm' && onConfirm !== 'manual') queueMicrotask(() => h.pairing.answer(onConfirm === 'approve', h.pairing.windowId!, ev.confirmId));
   });
   return code;
 }

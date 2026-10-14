@@ -57,7 +57,7 @@ export interface ConfirmDetails {
 export type PairEvent =
   | { type: 'opened'; windowId: string; code: string; expiresAt: string }
   | { type: 'progress'; step: 'started' | 'code_ok' | 'google_ok' | 'totp_ok' }
-  | { type: 'confirm'; details: ConfirmDetails }
+  | { type: 'confirm'; confirmId: string; details: ConfirmDetails }
   | { type: 'paired'; deviceId: string }
   | { type: 'first_use'; deviceId: string }
   | { type: 'alarm'; kind: 'second_pairing_attempt' | 'pairing_code_wrong' | 'pairing_locked' }
@@ -77,7 +77,9 @@ interface PairWindow {
   /** Session that passed the pairing code (at most one per window). */
   codeSession?: string;
   dcr: Map<string, DcrRegistration>;
-  confirming?: { sessionId: string; onAnswer: (approved: boolean) => void };
+  confirming?: { sessionId: string; confirmId: string; onAnswer: (approved: boolean) => void };
+  /** A device was already issued in this window (one device per window). */
+  issued: boolean;
   listener: PairListener;
   timer: NodeJS.Timeout;
 }
@@ -99,6 +101,8 @@ export const newPairingCode = () => base32Encode(randomBytes(5), { pad: false })
 export class PairingManager {
   private window: PairWindow | null = null;
   private readonly codes = new Map<string, IssuedCode>();
+  /** Exchanged codes (10 min): a second use ends the device (RFC 6749 §4.1.2). */
+  private readonly usedCodes = new Map<string, { deviceId: string; until: number }>();
   /** After a pairing: who waits for the first /mcp call of which device (Gegenprobe). */
   private readonly firstUseWatch = new Map<string, { listener: PairListener; until: number }>();
 
@@ -122,6 +126,7 @@ export class PairingManager {
       codeFailures: 0,
       sessions: new Map(),
       dcr: new Map(),
+      issued: false,
       listener,
       timer: setTimeout(() => this.close('expired'), PAIR_WINDOW_MS),
     };
@@ -176,6 +181,12 @@ export class PairingManager {
       this.alarmSecondAttempt();
       throw new PerchError('A second sign-in attempt in this pairing window; the window was closed', 'second_pairing_attempt');
     }
+    if (same && w.codeSession === same.id) {
+      // The browser that passed the pairing code started over: never reset its progress (that would let
+      // another browser join without an alarm). The window is closed; the operator opens a new one.
+      this.close('replaced');
+      throw new PerchError('This sign-in was started again after the pairing code; the window was closed. Open a new one.', 'pairing_restarted');
+    }
     if (!same && w.sessions.size >= MAX_SESSIONS_PER_WINDOW) throw new PerchError('Too many sign-in attempts in this pairing window', 'too_many_sessions');
     const session: PairSession = {
       id: same?.id ?? random(24),
@@ -187,7 +198,6 @@ export class PairingManager {
       ...(input.userAgent ? { userAgent: input.userAgent } : {}),
       ...(input.ip ? { ip: input.ip } : {}),
     };
-    if (same && w.codeSession === same.id) w.codeSession = undefined;
     w.sessions.set(session.id, session);
     this.emit({ type: 'progress', step: 'started' });
     return session;
@@ -245,9 +255,13 @@ export class PairingManager {
    * Step 6 passed: asks the operator for the final confirmation (Spec §6 step 7). `onApproved` creates the
    * device (and returns its id); the authorization code is issued only after it resolves.
    */
-  totpDone(s: PairSession, usedRecoveryCode: boolean, onApproved: (s: PairSession) => Promise<string>): void {
+  totpDone(s: PairSession, usedRecoveryCode: boolean, onApproved: (s: PairSession) => Promise<string>, onAbandoned: (deviceId: string) => void = () => {}): void {
     this.assertCurrent(s, 'totp');
     const w = this.window!;
+    if (w.confirming || w.issued) {
+      this.alarmSecondAttempt();
+      throw new PerchError('A second sign-in attempt in this pairing window; the window was closed', 'second_pairing_attempt');
+    }
     s.usedRecoveryCode = usedRecoveryCode;
     s.step = 'confirm';
     this.emit({ type: 'progress', step: 'totp_ok' });
@@ -262,17 +276,23 @@ export class PairingManager {
       secondsSinceOpen: Math.round((this.now() - w.openedAt) / 1000),
       usedRecoveryCode,
     };
+    const confirmId = random(12);
     w.confirming = {
       sessionId: s.id,
+      confirmId,
       onAnswer: (approved) => {
         w.confirming = undefined;
         if (!approved) {
           if (this.window === w) this.close('rejected');
           return;
         }
+        w.issued = true;
         void onApproved(s).then(
           (deviceId) => {
-            if (this.window !== w) return;
+            if (this.window !== w) {
+              onAbandoned(deviceId); // the window closed meanwhile: the device must not stay active
+              return;
+            }
             s.deviceId = deviceId;
             s.authCode = random(32);
             this.codes.set(s.authCode, {
@@ -284,6 +304,7 @@ export class PairingManager {
               expiresAt: this.now() + AUTH_CODE_TTL_MS,
             });
             s.step = 'approved';
+            for (const [id, fw] of this.firstUseWatch) if (fw.until <= this.now()) this.firstUseWatch.delete(id);
             this.firstUseWatch.set(deviceId, { listener: w.listener, until: this.now() + FIRST_USE_WAIT_MS });
             this.emit({ type: 'paired', deviceId });
           },
@@ -293,13 +314,17 @@ export class PairingManager {
         );
       },
     };
-    this.emit({ type: 'confirm', details });
+    this.emit({ type: 'confirm', confirmId, details });
   }
 
   /** The operator's answer (control channel or local page) for the open window. */
-  answer(approved: boolean, windowId?: string): void {
+  /**
+   * The operator's answer for exactly the confirmation they were shown (window id and confirmation id
+   * from the 'confirm' event). A stale or foreign answer is refused.
+   */
+  answer(approved: boolean, windowId: string, confirmId: string): void {
     const w = this.window;
-    if (!w || (windowId !== undefined && w.id !== windowId) || !w.confirming) throw new PerchError('Nothing is waiting for confirmation', 'nothing_to_confirm');
+    if (!w || w.id !== windowId || !w.confirming || w.confirming.confirmId !== confirmId) throw new PerchError('Nothing is waiting for this confirmation', 'nothing_to_confirm');
     w.confirming.onAnswer(approved);
   }
 
@@ -311,11 +336,16 @@ export class PairingManager {
   }
 
   /** Single-use authorization code (Spec §6 step 8). */
-  takeCode(code: string): IssuedCode | null {
+  takeCode(code: string): IssuedCode | { reused: string } | null {
+    const t = this.now();
+    for (const [k, v] of this.usedCodes) if (v.until <= t) this.usedCodes.delete(k);
+    const used = this.usedCodes.get(code);
+    if (used) return { reused: used.deviceId };
     const c = this.codes.get(code);
     if (!c) return null;
     this.codes.delete(code);
-    return c.expiresAt > this.now() ? c : null;
+    this.usedCodes.set(code, { deviceId: c.deviceId, until: t + 10 * 60 * 1000 });
+    return c.expiresAt > t ? c : null;
   }
 
   /** TOTP lockout or kill switch: close without pairing. */
@@ -341,6 +371,12 @@ export class PairingManager {
     if (!this.window || !this.window.sessions.has(s.id) || s.step !== step || this.window.codeSession !== s.id) {
       throw new PerchError('This sign-in is no longer valid', 'pairing_session_invalid');
     }
+  }
+
+  /** Id of the open window, if any. */
+  get windowId(): string | undefined {
+    this.expireIfDue();
+    return this.window?.id;
   }
 
   /** For status output. */

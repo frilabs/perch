@@ -219,21 +219,35 @@ describe('perch oauth pair (end to end over the control socket)', () => {
     expect((await rejection(connectControl(dirs.dataDir))).message).toMatch(/not a socket/);
   });
 
-  it('the local pairing page needs the global token and a same-origin form', async () => {
+  it('the local pairing page has its own password (never the global token) and needs a same-origin form', async () => {
     const token = generateHttpToken();
     const server: RunningHttpServer = await startHttpServer({ host: '127.0.0.1', port: 0, token, context: createPerchContext(store, transport), localPair: access.localPair, log: () => {} });
     try {
       const port = server.port;
-      const basic = `Basic ${Buffer.from(`perch:${token}`).toString('base64')}`;
       const local = { host: `127.0.0.1:${port}` };
+      const basicOf = (pw: string) => `Basic ${Buffer.from(`perch:${pw}`).toString('base64')}`;
+      expect((await http(port, 'GET', '/local/pair', { ...local, headers: { authorization: basicOf(token) } })).status).toBe(404); // disabled
+      const en = cliIo(() => '');
+      expect(await runCli(['oauth', 'local-page', 'enable'], en)).toBe(0);
+      const password = /Password \(any user name; shown once, a new enable replaces it\): (\S+)/.exec(en.out())![1]!;
       expect((await http(port, 'GET', '/local/pair', local)).status).toBe(401);
+      expect((await http(port, 'GET', '/local/pair', { ...local, headers: { authorization: basicOf(token) } })).status).toBe(401); // global token: no
+      expect((await http(port, 'GET', '/local/pair', { ...local, headers: { authorization: `Bearer ${token}` } })).status).toBe(401);
+      const basic = basicOf(password);
       const page = await http(port, 'GET', '/local/pair', { ...local, headers: { authorization: basic } });
       expect(page.status).toBe(200);
       expect(page.body).toContain('Open a pairing window');
       expect((await http(port, 'GET', '/local/pair', { ...local, headers: { authorization: basic, 'sec-fetch-site': 'cross-site' } })).status).toBe(403);
       const bad = await http(port, 'POST', '/local/pair', { ...local, body: form({ csrf: 'nope', action: 'open' }), headers: { authorization: basic, origin: `http://127.0.0.1:${port}` } });
       expect(bad.status).toBe(403);
-      const open = await http(port, 'POST', '/local/pair', { ...local, body: form({ csrf: csrfOf(page.body), action: 'open' }), headers: { authorization: basic, origin: `http://127.0.0.1:${port}` } });
+      // Approve without an own window is refused (never blind on a terminal's window).
+      access.pairing.open(() => {});
+      const blind = await http(port, 'POST', '/local/pair', { ...local, body: form({ csrf: csrfOf(page.body), action: 'approve' }), headers: { authorization: basic, origin: `http://127.0.0.1:${port}` } });
+      expect(blind.status).toBe(303);
+      expect(access.pairing.isOpen).toBe(true);
+      access.pairing.close('aborted');
+      const page2 = await http(port, 'GET', '/local/pair', { ...local, headers: { authorization: basic } });
+      const open = await http(port, 'POST', '/local/pair', { ...local, body: form({ csrf: csrfOf(page2.body), action: 'open' }), headers: { authorization: basic, origin: `http://127.0.0.1:${port}` } });
       expect(open.status).toBe(303);
       const shown = await http(port, 'GET', '/local/pair', { ...local, headers: { authorization: basic } });
       expect(shown.body).toMatch(/class="mono code">[A-Z2-7]{8}</);
@@ -242,6 +256,24 @@ describe('perch oauth pair (end to end over the control socket)', () => {
     } finally {
       await server.close();
     }
+  });
+
+  it('perch public off closes an open window within seconds', async () => {
+    const events: string[] = [];
+    access.pairing.open((ev) => events.push(ev.type === 'closed' ? `closed:${ev.reason}` : ev.type));
+    expect(await runCli(['public', 'off'], cliIo(() => ''))).toBe(0);
+    await waitFor(() => events.includes('closed:kill_switch'), 5000);
+  });
+
+  it('a malformed control message does not crash the server', async () => {
+    const ctl = await connectControl(dirs.dataDir);
+    ctl.socket.write('null\n');
+    ctl.socket.write('42\n');
+    const msgs: Array<Record<string, unknown>> = [];
+    ctl.onMessage((m) => msgs.push(m));
+    await waitFor(() => msgs.length >= 2);
+    expect(msgs.every((m) => m.type === 'error')).toBe(true);
+    ctl.socket.end();
   });
 
   it('perch status shows the public access without secrets', async () => {

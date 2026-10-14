@@ -10,7 +10,7 @@ import { silentNotifier, TelegramNotifier, type Notifier } from './notify.js';
 import { localPairPage, pageHeaders } from './pages.js';
 import { PairingManager, type ConfirmDetails, type PairEvent } from './pairing.js';
 import { parseBaseUrl, startPublicServer, type RunningPublicServer } from './server.js';
-import { isPublicLocked, OAuthStore, type OAuthState } from './state.js';
+import { hexEqual, isPublicLocked, OAuthStore, sha256Hex, type OAuthState } from './state.js';
 
 /**
  * Wires the public access for `perch serve --http --public`: state, pairing manager, control socket,
@@ -97,12 +97,25 @@ export async function startPublicAccess(opts: PublicAccessOptions): Promise<Publ
     throw err;
   }
 
+  // perch public off runs in another process: while a window is open, notice the marker within seconds.
+  const killWatch = setInterval(() => {
+    if (!pairing.isOpen) return;
+    oauth.read().then(
+      (st) => {
+        if (isPublicLocked(st)) pairing.lockout('kill_switch');
+      },
+      () => pairing.close('aborted'),
+    );
+  }, 2000);
+  killWatch.unref();
+
   // ------------------------------------------------------------ local pairing page
   const page = {
     windowId: undefined as string | undefined,
     code: undefined as string | undefined,
     expiresAt: undefined as string | undefined,
     details: undefined as ConfirmDetails | undefined,
+    confirmId: undefined as string | undefined,
     paired: undefined as string | undefined,
     events: [] as string[],
   };
@@ -140,6 +153,7 @@ export async function startPublicAccess(opts: PublicAccessOptions): Promise<Publ
     } else if (ev.type === 'progress') line(`progress: ${ev.step}`);
     else if (ev.type === 'confirm') {
       page.details = ev.details;
+      page.confirmId = ev.confirmId;
       line('waiting for your confirmation');
     } else if (ev.type === 'paired') {
       page.paired = ev.deviceId;
@@ -155,7 +169,28 @@ export async function startPublicAccess(opts: PublicAccessOptions): Promise<Publ
     }
   };
 
+  /**
+   * The local page has its own password (perch oauth local-page enable), never the global token: an MCP
+   * client holding the global token must not be able to open or confirm pairings. Disabled: 404.
+   */
+  const localAuth = async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
+    const s = await oauth.read();
+    if (!s.localPage) {
+      res.writeHead(404, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end('{"error":"not_found"}');
+      return false;
+    }
+    const m = /^Basic\s+([A-Za-z0-9+/=]{1,1024})\s*$/i.exec(String(req.headers.authorization ?? ''));
+    const decoded = m ? Buffer.from(m[1]!, 'base64').toString('utf8') : '';
+    const password = decoded.slice(decoded.indexOf(':') + 1);
+    if (!m || decoded.indexOf(':') < 0 || !hexEqual(sha256Hex(password), s.localPage.passwordHash)) {
+      res.writeHead(401, { 'www-authenticate': 'Basic realm="Perch pairing", charset="UTF-8"', 'cache-control': 'no-store' }).end();
+      return false;
+    }
+    return true;
+  };
+
   const localPair = async (req: IncomingMessage, res: ServerResponse) => {
+    if (!(await localAuth(req, res))) return;
     let message: string | undefined;
     if (req.method === 'POST') {
       const chunks: Buffer[] = [];
@@ -178,9 +213,16 @@ export async function startPublicAccess(opts: PublicAccessOptions): Promise<Publ
         if (action === 'open') {
           await canOpen();
           page.windowId = pairing.open(pageListener).windowId;
-        } else if (action === 'close') pairing.close('aborted', page.windowId);
-        else if (action === 'approve') pairing.answer(true, page.windowId);
-        else if (action === 'reject') pairing.answer(false, page.windowId);
+        } else if (action === 'close' || action === 'approve' || action === 'reject') {
+          // Only the window this page opened, and only the confirmation it showed.
+          if (!page.windowId) throw new PerchError('This page has no open pairing window', 'nothing_to_confirm');
+          if (action === 'close') pairing.close('aborted', page.windowId);
+          else {
+            if (!page.confirmId) throw new PerchError('Nothing is waiting for confirmation', 'nothing_to_confirm');
+            pairing.answer(action === 'approve', page.windowId, page.confirmId);
+            page.confirmId = undefined;
+          }
+        }
       } catch (err) {
         message = err instanceof PerchError ? err.message : 'Action failed';
       }
@@ -212,6 +254,7 @@ export async function startPublicAccess(opts: PublicAccessOptions): Promise<Publ
     publicServer,
     localPair,
     close: async () => {
+      clearInterval(killWatch);
       pairing.close('aborted');
       await publicServer.close();
       await control.close();

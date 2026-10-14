@@ -262,11 +262,26 @@ Fritz' Entscheidung vom 2026-10-14: Perch hat genau einen Betreiber pro Installa
 ## 15. Abweichungen und Präzisierungen in der Umsetzung (2026-10-14)
 
 1. **Gerät mit Schreib-Grant:** `perch oauth grant` legt einen Client-Grant an (wie `perch client add`, ohne eigenes Bearer-Token: der gespeicherte Hash hat kein bekanntes Urbild). Ein Gerät mit Grant ist danach dieser Client-Grant und sieht nur, was der Grant abdeckt, statt „alles lesen plus Schreibrechte“. Das ist enger und nutzt die bestehende, getestete Grant-Prüfung; wer weiter lesen will, nimmt die Lese-Capabilities in den Grant auf. Ohne Grant liest ein Gerät alles wie das globale Token.
-2. **`/local/totp` entfällt:** Der Perch-Code wird nur per CLI eingerichtet (QR im Terminal). `/local/pair` ist umgesetzt.
+2. **`/local/totp` entfällt:** Der Perch-Code wird nur per CLI eingerichtet (QR im Terminal). `/local/pair` ist umgesetzt, aber mit **eigenem Passwort** (`perch oauth local-page enable`, standardmäßig aus) statt des globalen Tokens: Sonst könnte jeder MCP-Client mit dem globalen Token per Skript Fenster öffnen und Kopplungen bestätigen (Review-Befund).
 3. **CIMD-Allowlist:** Die Adresse des Metadaten-Dokuments der gehosteten Claude-Apps ist nicht dokumentiert. Statt exakter URLs gilt deshalb das Muster `https://claude.ai/oauth/…` und `https://claude.com/oauth/…`; abgerufen wird nur von diesen beiden Hosts. Nicht-Loopback-Redirects aus diesen Dokumenten müssen auf `claude.ai` oder `claude.com` liegen; die Zustimmung zeigt den Host der `client_id`-URL statt des selbst angegebenen Namens.
 4. **Rate-Limit der Warteseite:** `/oauth/wait` lädt sich alle 2 Sekunden neu und hat deshalb ein eigenes Limit (60/min) statt der 10/min der übrigen Anmeldeseiten.
 5. **Falsches Google-Konto:** Eine abgelehnte Google-Anmeldung (Konto nicht auf der Liste, `sub` abweichend, Claims ungültig) schließt das Fenster.
 6. **Start:** Der öffentliche Listener startet nur mit `perch serve --http --public` und gesetztem `PERCH_PUBLIC_BASE_URL`; `PERCH_PUBLIC_BASE_URL` muss `https://` sein (eigene Domains sind erlaubt).
 7. **Fenster-Status in `perch status`:** Ob gerade ein Fenster offen ist, kennt nur der laufende Server; die Statusseite zeigt es, `perch status` auf der Kommandozeile nicht.
 8. **Rückbau Nutzer-Isolation (§11a):** als eigener Commit auf demselben Branch umgesetzt, nicht als eigener PR, weil für diese Arbeit genau ein Branch vorgegeben war.
+9. **Weitere Präzisierungen nach dem unabhängigen Review (2026-10-14):**
+   - Startet der Browser, der den Kopplungscode schon bestanden hat, die Anmeldung neu, schließt das Fenster (Grund `replaced`), statt den Fortschritt zurückzusetzen. Eine zweite Bestätigung im selben Fenster schließt es mit Alarm. Die Antwort des Betreibers gilt nur für genau die angezeigte Bestätigung (Fenster-ID und Bestätigungs-ID).
+   - Ein zweiter Einsatz eines bereits eingelösten Autorisierungscodes meldet das Gerät ab (RFC 6749 §4.1.2).
+   - Ein gekoppeltes Gerät, dessen Code nie eingelöst wurde, läuft nach 10 Minuten ab (`unused`); schließt das Fenster zwischen Bestätigung und Code, wird es sofort beendet.
+   - Selbst registrierte Clients (DCR) bekommen bei ungültigen Parametern eine Fehlerseite statt einer Weiterleitung (kein offener Redirect).
+   - Ohne offenes Fenster kostet `/oauth/authorize` kein Rate-Limit (sonst ließe sich das Limit vorab erschöpfen). Bei `PERCH_PUBLIC_TRUST_FORWARDED=on` gelten die Limits pro IP. `/mcp` hat nur das Limit pro Gerät; bereits gültige Access-Tokens sind von der Sperre nach ungültigen Tokens ausgenommen.
+   - Client-Grants beendeter Geräte werden entfernt.
+   - `perch public off` schließt ein offenes Fenster innerhalb von etwa 2 Sekunden.
+   - Der Abruf eines Metadaten-Dokuments bricht nach 5 Sekunden ab.
+10. **Bekannte, bewusst offene Punkte:**
+    - Refresh-Rotation ohne Kulanzfenster: Zwei gleichzeitige Refreshes oder eine Wiederholung nach verlorener Antwort gelten als Wiederverwendung und melden das Gerät ab (streng nach §7). Für die Wiederverwendungs-Erkennung werden die letzten 100 Refresh-Hashes pro Gerät gehalten.
+    - Audit-Einträge enthalten keine Fenster-ID und keine IP (das Audit-Schema kennt nur feste Felder); die Details stehen im Terminal.
+    - Die CSP der Anmeldeseiten ist `form-action 'self' https://accounts.google.com`, weil das Formular mit dem Kopplungscode per 303 zu Google weiterleitet.
+    - Mit `PERCH_OAUTH_DCR=off` antwortet `/oauth/register` mit `404`.
+    - Der Kontroll-Socket stützt sich auf die Rechte von Datenverzeichnis (0700) und Socket (0600); eine Prüfung der Peer-Credentials gibt es nicht.
 
