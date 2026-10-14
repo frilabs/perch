@@ -4,7 +4,7 @@
 
 - **Auftrag:** Fritz' Plan „Perch aus dem Internet erreichbar, mindestens so sicher wie im Tailnet“ als Grundlage für Briefing und Spec, ausdrücklich **noch keine Umsetzung**.
 - **Ergebnis:** `docs/PUBLIC_ACCESS_BRIEFING.md` und `docs/PUBLIC_ACCESS_SPEC.md`, beide **Entwurf, nicht freigegeben**. Kein Code geändert.
-- **Wichtigste Befunde:** Tailscale Funnel gilt pro Port, nicht pro Pfad, daher braucht es einen eigenen öffentlichen Listener. Google lässt Perch den zweiten Faktor nicht prüfen, daher ein eigener zweiter Faktor in Perch. claude.ai kommt mit CIMD aus, DCR entfällt.
+- **Wichtigste Befunde:** Tailscale Funnel gilt pro Port, nicht pro Pfad, daher braucht es einen eigenen öffentlichen Listener. Google lässt Perch den zweiten Faktor nicht prüfen, daher ein eigener zweiter Faktor in Perch. claude.ai kommt mit CIMD aus; DCR nur für andere Clients.
 - **Entscheidungen (Fritz, 2026-10-14), eingearbeitet:**
   - Zweiter Faktor Pflicht, als eigener Perch-Code (TOTP) statt Passkey.
   - Geräte werden lokal freigegeben, Telegram nur als Hinweis; friagent ist keine Abhängigkeit.
