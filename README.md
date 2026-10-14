@@ -5,116 +5,151 @@
 
 # Perch
 
-Perch ist ein MCP-Server. Er bündelt **mehrere Google-Drive-Konten**, **mehrere Notion-Workspaces**, **mehrere Mail-Konten** (Gmail, Outlook.com/Microsoft 365, GMX bzw. IMAP/SMTP), **mehrere Google-Calendar/Contacts-Konten**, **mehrere Slack-Workspaces** und **WhatsApp** (über eine selbst gehostete GOWA-Bridge) hinter **einem** Connector, für Claude Code, Codex und andere MCP-Clients. Standardmäßig ist alles read-only. Mail-Entwürfe, Versand (Mail, Slack, WhatsApp) und das Anlegen/Ändern privater Kalendertermine gibt es nur über explizite lokale Client-Grants pro Konto.
+Perch is an MCP server. It puts **several Google Drive accounts**, **several Notion workspaces**, **several mail accounts** (Gmail, Outlook.com/Microsoft 365, GMX and other IMAP/SMTP), **several Google Calendar/Contacts accounts**, **several Slack workspaces** and **WhatsApp** (through a self-hosted GOWA bridge) behind **one** connector for Claude Code, Codex and other MCP clients.
 
-- Läuft auf dem Heimserver.
-- Claude Code auf dem Laptop bindet ihn einmal ein, per Tailscale Serve (HTTPS) oder SSH-Tunnel.
-- Kein Kontowechsel, kein Teilen einzelner Dateien.
-- Jedes Ergebnis trägt Konto- bzw. Workspace-ID und Label als Herkunftsangabe.
+Everything is read-only by default. Writing (mail drafts, sending mail, Slack and WhatsApp messages, creating or changing private calendar events) is only possible through an explicit client grant (see [Read-only by default](#read-only-by-default-writes-through-client-grants)).
 
-Stand 2026-10-14:
-- Drive/Notion, Mail, Calendar/Contacts, Nutzer-Isolation, Mail-Workflow und Slack/WhatsApp sind implementiert und lokal mit Mock-Upstreams bzw. lokalen Testservern getestet.
-- **Nicht** live gegen Google, Notion, Microsoft oder GMX verifiziert.
-- Nicht deployed.
+- Runs on a home server.
+- Claude Code (or Codex) on the laptop connects once, through Tailscale Serve (HTTPS) or an SSH tunnel.
+- No switching accounts, no sharing individual files.
+- Every result carries the account or workspace id and label, so you always know where it came from.
 
-## Funktionen
+Status as of 2026-10-14:
+- Drive/Notion, mail, Calendar/Contacts, user isolation, the mail workflow and Slack/WhatsApp are implemented and tested locally against mock upstreams and local test servers.
+- **Not** verified live against Google, Notion, Microsoft, GMX, Slack or WhatsApp.
+- Not deployed.
 
-- **Google Drive** (`drive.readonly`, je Konto ein eigener OAuth-Grant):
-  - suchen und listen, optional über alle Konten
-  - Metadaten
-  - Text lesen, Base64-Download
-  - Export von Docs, Sheets und Slides in validierte Formate
-  - Größenlimit: Default 48 KiB wegen der Client-Ausgabelimits, explizit bis 10 MiB
-  - nie ins Dateisystem
-- **Notion** (je Workspace ein Personal Access Token):
-  - Titelsuche über Seiten und Data Sources (keine Volltextsuche)
-  - Seiten und paginierte, verschachtelte Blockinhalte
-  - Databases, Data Sources und Data-Source-Abfragen
+## Read-only by default, writes through client grants
+
+Perch has two kinds of access tokens:
+
+- **The global token** (`~/.config/perch/http-token`, or plain stdio) can **only read**, but across all connected accounts. Write tools are not even listed for it.
+- **A client grant** is a separate token you create on the server for one client, e.g. "Claude Code on the laptop" or "Codex". It names exactly which capabilities it has and for which accounts:
+
+  ```bash
+  perch client add --label "Claude Code" --allow read,send --account gmail-1a2b3c4d
+  perch client add --label "Codex" --allow slack_read,slack_send --account slack-5e6f7a8b
+  ```
+
+  The first client can read and send mail from that one Gmail account only; it cannot write anywhere else. "Local" means the grant is created with the CLI on the server itself; it cannot be created or widened over MCP.
+
+Capabilities, per account family:
+
+| Accounts | Capabilities |
+| --- | --- |
+| Mail (`gmail-…`, `microsoft-…`, `imap-…`) | `read`, `draft`, `send` |
+| Google Calendar/Contacts (`gprod-…`) | `calendar_read`, `calendar_write`, `contacts_read` |
+| Slack (`slack-…`) | `slack_read`, `slack_send` |
+| WhatsApp (`whatsapp-…`) | `whatsapp_read`, `whatsapp_send` |
+
+Perch re-checks the grant before every tool call, so `perch client remove ID` takes effect immediately, even on open connections. Every send needs a `requestId`: repeating the same request never sends twice. All calls are written to a body-free audit log (`perch audit list`). Note that client grants cover these families only; Drive and Notion stay readable through the global token.
+
+## Features
+
+- **Google Drive** (`drive.readonly`, a separate OAuth grant per account):
+  - search and list, optionally across all accounts
+  - metadata
+  - read text, base64 download
+  - export Docs, Sheets and Slides to validated formats
+  - size limit: 48 KiB by default because of client output limits, up to 10 MiB on request
+  - never written to disk
+- **Notion** (one personal access token per workspace):
+  - title search over pages and data sources (no full-text search)
+  - pages and paginated, nested block content
+  - databases, data sources and data source queries
 - **Mail** (`docs/EMAIL_MILESTONE.md`):
-  - Gmail: eigener OAuth-Grant, Default `gmail.readonly`, Opt-in `gmail.send`/`gmail.compose`
-  - Microsoft Graph: delegiert mit PKCE, Default `Mail.Read`, Opt-in `Mail.ReadWrite`/`Mail.Send`
-  - IMAP/SMTP (GMX-Presets): Passwort nur maskiert, TLS ≥ 1.2 mit Zertifikatsprüfung
-  - suchen, lesen, Anhänge; Entwürfe und Senden mit explizitem Absenderkonto
-  - Threading-Header; Ergebnis `accepted`/`rejected`/`indeterminate`, kein Blind-Retry
+  - Gmail: its own OAuth grant, `gmail.readonly` by default, opt-in `gmail.send`/`gmail.compose`
+  - Microsoft Graph: delegated with PKCE, `Mail.Read` by default, opt-in `Mail.ReadWrite`/`Mail.Send`
+  - IMAP/SMTP (GMX presets): password only through a masked prompt, TLS ≥ 1.2 with certificate verification
+  - search, read, attachments; drafts and sending from an explicitly chosen sender account
+  - threading headers; outcome `accepted`/`rejected`/`indeterminate`, never a blind retry
 - **Google Calendar/Contacts** (`docs/GOOGLE_PRODUCTIVITY_MILESTONE.md`):
-  - eigener OAuth-Grant, Dienste explizit per `--services calendar,contacts`, Default `calendar.readonly`/`contacts.readonly`, Opt-in `calendar.events.owned`
-  - Kalender und Termine lesen; private Termine anlegen (idempotent per `requestId`) und ändern (`If-Match`), ohne Teilnehmer, Einladungen oder Benachrichtigungen
-  - Kontakte seitenweise lesen (keine Suche)
-- **Slack** (`docs/SLACK_WHATSAPP_MILESTONE.md`, je Workspace eine interne App mit User-Token, Manifest in `docs/slack-app-manifest.json`):
-  - Kanäle, private Kanäle, DMs und Gruppen-DMs auflisten; Verlauf und Threads lesen; Slack-Suche über alle Workspaces
-  - Posten als der verbundene Nutzer (auch in Threads), nur mit Client-Grant `slack_send`, idempotent per `requestId`
-- **WhatsApp** über GOWA (inoffiziell, selbst gehostet, nur localhost):
-  - Koppeln per Kopplungscode über die CLI, mehrere Konten in getrennten Geräte-Slots
-  - Chats auflisten, Nachrichten lesen und durchsuchen (Suche über die jüngsten Chats); Medien nur als Metadaten
-  - Textnachrichten senden nur mit Client-Grant `whatsapp_send`, idempotent per `requestId`
-- **Client-Grants:** `perch client add --allow read,draft,send|calendar_read,calendar_write,contacts_read|slack_read,slack_send|whatsapp_read,whatsapp_send --account …`. Das globale HTTP-Token bleibt read-only.
-- **Admin-angelegte Nutzer** (`docs/USER_ISOLATION_MILESTONE.md`, nur mit Mocks getestet): `perch user add|list|remove`. Jeder Nutzer bekommt einen eigenen verschlüsselten Store und Schlüssel, ein Read-only-Token und eigene Client-Grants (`PERCH_USER=<id> perch …`). Jedes Token gilt in genau einem Namespace; Mitgliedschaft und Grants prüft Perch vor jedem Tool-Aufruf neu. Keine öffentliche Registrierung, keine gehärtete Mandantenfähigkeit.
-- **Transporte:** stdio und zustandsloses Streamable HTTP (`POST /mcp`)
-- **Sicherheit:**
-  - verschlüsselter Credential Store (AES-256-GCM, Schlüssel separat abgelegt)
-  - Bearer-Auth, die bei Fehlern sperrt
-  - Allowlists für Host und Origin
-  - nur Loopback oder eine explizite Tailscale-IP
-  - Read-only-Allowlist für alle Upstream-Endpunkte
-  - feste Upstream-Origins, bereinigte Fehlermeldungen
+  - its own OAuth grant, services chosen explicitly with `--services calendar,contacts`, `calendar.readonly`/`contacts.readonly` by default, opt-in `calendar.events.owned`
+  - read calendars and events; create private events (idempotent per `requestId`) and change them (`If-Match`), without attendees, invitations or notifications
+  - read contacts page by page (no search)
+- **Slack** (`docs/SLACK_WHATSAPP_MILESTONE.md`; one internal app with a user token per workspace, manifest in `docs/slack-app-manifest.json`):
+  - list channels, private channels, DMs and group DMs; read history and threads; Slack search across all workspaces
+  - post as the connected user (also in threads), only with a `slack_send` grant, idempotent per `requestId`
+- **WhatsApp** through GOWA (unofficial, self-hosted, localhost only):
+  - pair with a pairing code from the CLI; several accounts in separate device slots
+  - list chats, read and search messages (search covers the most recent chats); media as metadata only
+  - send text messages only with a `whatsapp_send` grant, idempotent per `requestId`
+- **Admin-provisioned users** (`docs/USER_ISOLATION_MILESTONE.md`, mock-tested only): `perch user add|list|remove`. Every user gets their own encrypted store and key, a read-only token and their own client grants (`PERCH_USER=<id> perch …`). Each token is valid in exactly one namespace; Perch re-checks membership and grants before every tool call. No public sign-up, no hardened multi-tenancy.
+- **Transports:** stdio and stateless Streamable HTTP (`POST /mcp`)
+- **Security:**
+  - encrypted credential store (AES-256-GCM, key stored separately)
+  - bearer auth that fails closed
+  - allowlists for Host and Origin
+  - binds to loopback or an explicit Tailscale IP only
+  - allowlist of upstream endpoints; write endpoints only for the matching grant
+  - fixed upstream origins, sanitised error messages
 
-## Schnellstart
+## Quick start
 
 ```bash
 git clone https://github.com/FritzKuermayr/perch.git perch && cd perch
 npm ci && npm run build
 node dist/cli.js init
-node dist/cli.js notion add --label "Privat"          # PAT maskiert eingeben
+node dist/cli.js notion add --label "Personal"         # enter the PAT at the masked prompt
 PERCH_GOOGLE_CLIENT_FILE=~/.config/perch/google-client.json \
-  node dist/cli.js google add --label "Privat" --port 8766
-node dist/cli.js serve --http                          # 127.0.0.1:8765, Bearer-Token aus ~/.config/perch/http-token
+  node dist/cli.js google add --label "Personal" --port 8766
+node dist/cli.js serve --http                          # 127.0.0.1:8765, bearer token in ~/.config/perch/http-token
 ```
 
-Die vollständige Anleitung steht in [`docs/SETUP.md`](docs/SETUP.md): Google-Cloud-Einrichtung, Tailscale bzw. SSH, Claude-Code-Konfiguration, Widerruf und Grenzen.
+The full guide is [`docs/SETUP.md`](docs/SETUP.md) (German): Google Cloud setup, Slack and GOWA, Tailscale or SSH, Claude Code and Codex configuration, revocation and limits.
 
-## Entwicklung
+## Development
 
 ```bash
 npm run typecheck
-npm test          # vitest; Google (Drive/Gmail/Calendar/People)/Notion/Graph/Slack/GOWA nur als klar markierte Mocks, IMAP/SMTP gegen lokale Testserver
-npm run smoke     # baut und testet dist/cli.js über stdio und HTTP
+npm test          # vitest; Google (Drive/Gmail/Calendar/People), Notion, Graph, Slack and GOWA only as clearly marked mocks, IMAP/SMTP against local test servers
+npm run smoke     # builds and tests dist/cli.js over stdio and HTTP
 ```
 
-| Datei | Zweck |
+| Path | Purpose |
 | --- | --- |
-| `src/cli.ts`, `src/cli/` | CLI (`init`, `serve`, `google`, `notion`, `gmail`, `microsoft`, `imap`, `google-productivity`, `slack`, `whatsapp`, `client`, `accounts`, `token`) |
-| `src/slack/` | Slack Web API (User-Token pro Workspace), App-Manifest |
-| `src/whatsapp/` | GOWA-Bridge: Instanz, Koppeln, Chats, Nachrichten, Senden |
-| `src/messaging/` | idempotenter Sende-Ablauf für Slack und WhatsApp (gemeinsamer Ledger mit Mail) |
-| `src/auth/` | Client-Grants (read/draft/send pro Mail-Konto, calendar_read/calendar_write/contacts_read pro Calendar/Contacts-Konto), Principals |
-| `src/oauth/` | PKCE-Loopback, Refresh mit Single-Flight und Rotation (fail closed) |
-| `src/mail/` | MailService, MIME-Bau, Gmail-, Graph- und IMAP/SMTP-Adapter, GMX-Presets |
-| `src/microsoft/` | Microsoft-OAuth und -Konten |
-| `src/store/` | verschlüsselter Credential Store, Lock |
-| `src/secureFs.ts` | Rechte, Symlinks, atomares Schreiben |
-| `src/upstream.ts` | feste Origins, Allowlist mit Capability-Tags (read/draft/send/calendar_write), Timeouts und Größenlimits, bereinigte Fehler |
-| `src/google/` | OAuth (Loopback und PKCE), Token-Refresh, Drive, Calendar, Contacts, Productivity-Grant |
+| `src/cli.ts`, `src/cli/` | CLI (`init`, `serve`, `google`, `notion`, `gmail`, `microsoft`, `imap`, `google-productivity`, `slack`, `whatsapp`, `client`, `user`, `accounts`, `audit`, `token`) |
+| `src/auth/` | client grants (capabilities per account family), principals |
+| `src/slack/` | Slack Web API (user token per workspace), app manifest |
+| `src/whatsapp/` | GOWA bridge: instance, pairing, chats, messages, sending |
+| `src/messaging/` | idempotent send flow for Slack and WhatsApp (shares the ledger with mail) |
+| `src/oauth/` | PKCE loopback, refresh with single-flight and rotation (fail closed) |
+| `src/mail/` | MailService, MIME building, Gmail, Graph and IMAP/SMTP adapters, GMX presets, send workflow and ledger |
+| `src/microsoft/` | Microsoft OAuth and accounts |
+| `src/store/` | encrypted credential store, lock |
+| `src/secureFs.ts` | permissions, symlinks, atomic writes |
+| `src/upstream.ts` | fixed origins, allowlist with capability tags, timeouts and size limits, sanitised errors |
+| `src/google/` | OAuth (loopback and PKCE), token refresh, Drive, Calendar, Contacts, productivity grant |
 | `src/notion/` | Notion (PAT, `Notion-Version: 2026-03-11`) |
-| `src/fanout.ts` | Abfragen über mehrere Konten, zusammengesetzte Cursor, Teilergebnisse |
-| `src/mcp/` | MCP-Tools, HTTP-Server |
+| `src/fanout.ts` | queries across several accounts, composite cursors, partial results |
+| `src/mcp/` | MCP tools, HTTP server |
 
-## Dokumente
+## Documents
 
-- [`docs/BRIEFING.md`](docs/BRIEFING.md): Briefing (freigegeben)
-- [`docs/SPEC.md`](docs/SPEC.md): Spezifikation
-- [`docs/SETUP.md`](docs/SETUP.md): Setup und Betrieb
-- [`docs/EMAIL_MILESTONE.md`](docs/EMAIL_MILESTONE.md): E-Mail-Meilenstein (Spezifikation, TDD-Nachweise)
-- [`docs/GOOGLE_PRODUCTIVITY_MILESTONE.md`](docs/GOOGLE_PRODUCTIVITY_MILESTONE.md): Calendar/Contacts-Meilenstein (Spezifikation, TDD-Nachweise)
-- [`docs/USER_ISOLATION_MILESTONE.md`](docs/USER_ISOLATION_MILESTONE.md): Nutzer-Isolations-Meilenstein (Spezifikation, TDD-Nachweise)
-- [`docs/SLACK_WHATSAPP_MILESTONE.md`](docs/SLACK_WHATSAPP_MILESTONE.md): Slack/WhatsApp-Meilenstein (Entscheidungen, Allowlist, Grenzen)
-- [`docs/PROJECT_SCOPE.md`](docs/PROJECT_SCOPE.md): erweiterte Projektrichtung
-- [`docs/HANDOFF.md`](docs/HANDOFF.md): aktueller Stand
-- [`AGENTS.md`](AGENTS.md): Arbeitsregeln
-- `brand/logo/`: Perch-Logo (Ast mit zwei Zweigen, frilabs-Standard: schwarz/weiß, Symbol, Favicon, App-Icon)
+The detailed documents are in German.
+
+- [`docs/BRIEFING.md`](docs/BRIEFING.md): briefing (approved)
+- [`docs/SPEC.md`](docs/SPEC.md): specification
+- [`docs/SETUP.md`](docs/SETUP.md): setup and operation
+- [`docs/EMAIL_MILESTONE.md`](docs/EMAIL_MILESTONE.md): email milestone (specification, TDD evidence)
+- [`docs/GOOGLE_PRODUCTIVITY_MILESTONE.md`](docs/GOOGLE_PRODUCTIVITY_MILESTONE.md): Calendar/Contacts milestone (specification, TDD evidence)
+- [`docs/USER_ISOLATION_MILESTONE.md`](docs/USER_ISOLATION_MILESTONE.md): user isolation milestone (specification, TDD evidence)
+- [`docs/MAIL_WORKFLOW_MILESTONE.md`](docs/MAIL_WORKFLOW_MILESTONE.md): audit log and idempotent sending
+- [`docs/SLACK_WHATSAPP_MILESTONE.md`](docs/SLACK_WHATSAPP_MILESTONE.md): Slack/WhatsApp milestone (decisions, allowlist, limits)
+- [`docs/PROJECT_SCOPE.md`](docs/PROJECT_SCOPE.md): broader project direction
+- [`docs/HANDOFF.md`](docs/HANDOFF.md): current state
+- [`AGENTS.md`](AGENTS.md): working rules
+- `brand/logo/`: Perch logo (a branch with two twigs, frilabs standard: black/white, symbol, favicon, app icon)
 
 ## Roadmap
 
-- Body-freies Audit-Log und idempotenter Sende-Workflow; Docker/Compose, Backup, Migrationen
-- Kalender-Einladungen, Serien, Löschen; Kontakte schreiben
-- Live-Test Slack und WhatsApp; ältere WhatsApp-Historie nachladen
-- LinkedIn ausgeschlossen
+- Docker/Compose, backup, migrations
+- `perch status` with live checks per account, then a read-only status page
+- Rollover for the send ledger (Mail, Slack and WhatsApp share 1000 send records per namespace)
+- Calendar invitations, recurring events, deleting; writing contacts
+- Live tests for Slack and WhatsApp; loading older WhatsApp history
+- LinkedIn is out of scope
+
+## License
+
+MIT, see [`LICENSE`](LICENSE) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
