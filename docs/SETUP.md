@@ -597,6 +597,99 @@ bearer_token_env_var = "PERCH_TOKEN"
 
 `PERCH_TOKEN` in der Shell setzen, aus der Codex startet. Für Codex am besten ein **eigener Client-Grant** (`perch client add --label Codex …`): Dann lassen sich Claude Code und Codex getrennt freigeben und widerrufen, und das Audit-Log unterscheidet sie. Ein Client-Grant sieht allerdings weder Drive noch Notion; dafür bleibt das globale Read-only-Token.
 
+## 6a. Öffentlicher Zugang über OAuth (claude.ai, Uni-Laptop)
+
+Spezifikation: `docs/PUBLIC_ACCESS_SPEC.md`. **Nur mit Mocks getestet, nicht live verifiziert.** Perch ändert weder Tailscale noch einen Proxy; die Befehle unten führt der Betreiber selbst aus.
+
+### 6a.1 Modell in Kürze
+
+- `perch serve --http --public` startet zusätzlich einen **öffentlichen Listener** auf `127.0.0.1:8767` (`PERCH_PUBLIC_PORT`). Er kennt nur `/mcp`, `/.well-known/oauth-*` und `/oauth/*`; die Statusseite, `/local/pair` und alles andere gibt es dort nicht (`404`).
+- Am öffentlichen `/mcp` gelten **nur OAuth-Tokens**. Das globale Token und Client-Grant-Tokens werden dort abgelehnt; am lokalen Listener (`8765`) gilt alles wie bisher.
+- Neue Geräte entstehen **nur in einem Kopplungsfenster**, das der Betreiber auf dem Server öffnet (`perch oauth pair`, 10 Minuten, genau ein Gerät). Im Browser gibt man den Kopplungscode aus dem Terminal ein, meldet sich mit Google an (nur Konten aus der Allowlist), gibt den Perch-Code (TOTP) ein und bestätigt danach **im Terminal** mit `y`. Erst dann gibt es Tokens.
+- Ein gekoppeltes Gerät liest alles, was das globale Token liest. Schreiben nur über `perch oauth grant` (wie `perch client add`; das Gerät sieht dann nur, was der Grant abdeckt).
+- Access-Token 1 Stunde, Refresh-Token rotiert bei jeder Nutzung; nach 14 Tagen ohne Nutzung oder spätestens nach 90 Tagen ist eine neue Kopplung nötig. Ein wiederverwendetes altes Refresh-Token sperrt das Gerät sofort.
+- **Perch fordert nie per Nachricht zur Anmeldung auf.** Jede Kopplung beginnt mit `perch oauth pair` auf dem eigenen Server.
+
+### 6a.2 Einmalig einrichten (Nutzeraufgaben)
+
+1. **Öffentliche Adresse:** Tailscale Funnel aktivieren (Node-Attribut `funnel` in der Tailnet-Policy, MagicDNS und HTTPS-Zertifikate; laut Tailscale-Doku, nicht live getestet). Funnel gilt pro Port und kennt nur 443, 8443 und 10000. In `.env`:
+   ```bash
+   PERCH_PUBLIC_BASE_URL=https://homeserver.tailnet-xyz.ts.net
+   ```
+2. **Google-Client für die Anmeldung:** In der Google Cloud Console einen OAuth-Client vom Typ **„Web application“** anlegen (getrennt vom Desktop-Client für Konten), Redirect-URI `https://homeserver.tailnet-xyz.ts.net/oauth/google/callback`, Scopes nur `openid` und `email`. JSON herunterladen, `chmod 600`, in `.env`:
+   ```bash
+   PERCH_GOOGLE_LOGIN_CLIENT_FILE=/home/USER/.config/perch/google-web-client.json
+   ```
+   Den zweiten Faktor für dieses Google-Konto in Google selbst einschalten; Perch kann ihn nicht prüfen, verlangt aber zusätzlich den Perch-Code.
+3. **Geführte Einrichtung** auf dem Server (fragt die erlaubte Google-Adresse ab und richtet den Perch-Code per QR-Code im Terminal ein; dazu 10 Notfall-Codes, einmal angezeigt, offline aufbewahren):
+   ```bash
+   perch public setup
+   ```
+4. **Optional, Telegram-Hinweise:** Bot über @BotFather anlegen, eigene Chat-ID ermitteln, Datei `0600` anlegen und in `.env` eintragen:
+   ```json
+   {"botToken": "123456789:AA…", "chatId": 123456789}
+   ```
+   ```bash
+   PERCH_NOTIFY_TELEGRAM_FILE=/home/USER/.config/perch/telegram.json
+   ```
+   Die Nachrichten sind nur Hinweise (Fenster geöffnet, Gerät gekoppelt, Alarme). Sie enthalten keine Links, keine Codes und keine Tokens, und man kann darüber nichts freigeben.
+5. **Proxy und Server starten:**
+   ```bash
+   sudo tailscale funnel --bg --https=443 http://127.0.0.1:8767     # öffentlich: NUR der öffentliche Listener
+   sudo tailscale serve --bg --https=8443 http://127.0.0.1:8765     # optional, privat: der lokale Listener
+   perch serve --http --public
+   ```
+   Ohne Tailscale geht jeder TLS-Reverse-Proxy mit eigener Domain (z. B. Caddy, Cloudflare Tunnel), der **nur** auf `127.0.0.1:8767` weiterleitet (dokumentiert, nicht getestet). Der lokale Listener bleibt dann per SSH-Tunnel erreichbar. In der systemd-Unit `serve --http --public` eintragen.
+
+### 6a.3 Ein Gerät koppeln
+
+1. Auf dem Server (z. B. per SSH, auch vom Handy aus):
+   ```bash
+   perch oauth pair
+   ```
+   Der Befehl zeigt den Kopplungscode und wartet.
+2. Auf dem Gerät die Verbindung starten, z. B. in claude.ai unter **Customize → Connectors → Add custom connector** die Adresse `https://homeserver.tailnet-xyz.ts.net/mcp` eintragen. Claude Code: `claude mcp add --transport http perch https://homeserver.tailnet-xyz.ts.net/mcp`, dann `/mcp` zum Anmelden.
+3. Im Browser: Kopplungscode, Google-Anmeldung, Perch-Code.
+4. Im Terminal erscheinen Client, Rücksprungadresse, Google-Konto, Browser und (falls verfügbar) IP. Nur mit `y` bestätigen, wenn das genau das Gerät ist, das gerade gekoppelt wird. Danach meldet das Terminal den ersten Zugriff des neuen Geräts.
+
+Alternativ zeigt `http://127.0.0.1:8765/local/pair` (lokaler Listener, Benutzername egal, Passwort = globales Token) dieselbe Kopplung als Seite mit Knöpfen, etwa vom Handy über das Tailnet oder einen SSH-Tunnel.
+
+Ein claude.ai-Connector gilt für das ganze claude.ai-Konto (Web, Desktop, Handy) und muss also nur einmal gekoppelt werden.
+
+### 6a.4 Verwalten
+
+```bash
+perch oauth devices                                   # Geräteliste (Status, gekoppelt, zuletzt gesehen, läuft ab)
+perch oauth revoke oc-0123456789abcdef                # ein Gerät abmelden (wirkt beim nächsten Request)
+perch oauth revoke --all
+perch oauth grant oc-0123456789abcdef --allow read,send --account imap-1a2b3c4d   # Schreibrechte (wie perch client add)
+perch oauth ungrant oc-0123456789abcdef
+perch oauth login-allow add|remove EMAIL | list
+perch oauth totp setup | status | recovery-codes      # setup erneut = neuer Code, alle Geräte werden abgemeldet
+perch oauth client add --name Codex --redirect http://127.0.0.1/callback   # Client ohne Metadaten-Dokument, fest registriert
+perch oauth client add --cimd https://example.com/oauth/client.json         # zusätzliches Metadaten-Dokument
+perch public status
+perch audit list                                      # alle Kopplungsschritte, ohne Geheimnisse
+```
+
+- **Clients ohne Metadaten-Dokument** (z. B. Codex) können sich per Dynamic Client Registration selbst eintragen, aber nur während eines offenen Kopplungsfensters (höchstens 3 pro Fenster). `PERCH_OAUTH_DCR=off` schaltet das ab.
+- **Sperren:** 3 falsche Kopplungscodes schließen das Fenster; 5 falsche Perch-Codes in 15 Minuten sperren das Koppeln für 15 Minuten (bei Wiederholung länger). Ein zweiter Anmeldeversuch im selben Fenster schließt es sofort für beide (Alarm).
+
+### 6a.5 Notschalter
+
+```bash
+perch public off     # öffentlicher Listener antwortet 503 (auch nach Neustart), offenes Fenster zu, alle Geräte abgemeldet
+sudo tailscale funnel --https=443 off
+perch public on      # wieder an; Geräte müssen neu gekoppelt werden
+```
+
+### 6a.6 Grenzen
+
+- Der Perch-Code (TOTP) ist nicht phishing-resistent. Ein Angreifer, der den Betreiber genau im eigenen Kopplungsfenster auf eine gefälschte Seite lockt und dort Kopplungscode, Google-Login und Perch-Code abfischt, wird nur an den Details im Terminal erkannt. Er bekäme genau ein Gerät mit Leserechten, das in `perch oauth devices` steht und sofort widerrufbar ist (Spec §0a).
+- Ob Funnel die Client-IP weitergibt, ist nicht geprüft. Erst wenn das live bestätigt ist, `PERCH_PUBLIC_TRUST_FORWARDED=on` setzen; sonst zeigt das Terminal „IP unknown“, und die Rate-Limits gelten global.
+- Die CIMD-Adresse der gehosteten Claude-Apps ist nicht dokumentiert. Perch erlaubt deshalb Metadaten-Dokumente unter `https://claude.ai/oauth/…` und `https://claude.com/oauth/…` und holt nur von diesen beiden Hosts.
+- Den Perch-Code richtet man nur per CLI ein; eine Seite `/local/totp` gibt es nicht.
+
 ## 7. Tools und Grenzen
 
 | Tool | Hinweise |
