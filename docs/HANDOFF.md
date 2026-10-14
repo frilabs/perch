@@ -4,8 +4,16 @@
 
 - **Auftrag:** Fritz' Plan „Perch aus dem Internet erreichbar, mindestens so sicher wie im Tailnet“ als Grundlage für Briefing und Spec, ausdrücklich **noch keine Umsetzung**.
 - **Ergebnis:** `docs/PUBLIC_ACCESS_BRIEFING.md` und `docs/PUBLIC_ACCESS_SPEC.md`, beide **Entwurf, nicht freigegeben**. Kein Code geändert.
-- **Wichtigste Befunde:** Tailscale Funnel gilt pro Port, nicht pro Pfad, daher braucht es einen eigenen öffentlichen Listener. Google lässt Perch den zweiten Faktor nicht prüfen, daher Vorschlag: Perch-Passkey als Pflicht. claude.ai kommt mit CIMD aus, DCR entfällt.
-- **Nächster Schritt:** Fritz entscheidet die offenen Fragen (Spec §11) und gibt frei. Erst danach wird implementiert.
+- **Wichtigste Befunde:** Tailscale Funnel gilt pro Port, nicht pro Pfad, daher braucht es einen eigenen öffentlichen Listener. Google lässt Perch den zweiten Faktor nicht prüfen, daher ein eigener zweiter Faktor in Perch. claude.ai kommt mit CIMD aus, DCR entfällt.
+- **Entscheidungen (Fritz, 2026-10-14), eingearbeitet:**
+  - Zweiter Faktor Pflicht, als eigener Perch-Code (TOTP) statt Passkey.
+  - Geräte werden lokal freigegeben, Telegram nur als Hinweis; friagent ist keine Abhängigkeit.
+  - OAuth-Clients lesen standardmäßig alles.
+  - Tailnet ist nicht Pflicht: Funnel auf 443 als Standard, beliebiger TLS-Proxy möglich.
+  - Nur Root, als Grundsatz (Produkt zum Selbsthosten, eine Person pro Installation).
+  - Clients ohne Metadaten-Dokument werden über DCR unterstützt, die ohne lokale Freigabe wirkungslos bleibt.
+  - Keine neuen Abhängigkeiten; das Google-ID-Token wird nach OIDC Core §3.1.3.7 ohne Signaturprüfung geprüft.
+- **Nächster Schritt:** Fritz bestätigt Lebensdauern und Limits (Spec §13) und gibt die Spec frei. Vor der Umsetzung werden die Primärquellen aus §13.2 geprüft.
 
 
 ## Update 2026-10-14: `perch status` und Statusseite (Branch `feat/perch-status`)

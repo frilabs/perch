@@ -1,6 +1,14 @@
 # Briefing: Öffentlicher Zugang zu Perch über OAuth
 
-Stand 2026-10-14. **Status: Entwurf, nicht freigegeben.** Grundlage ist Fritz' Plan vom 2026-10-14 („Perch aus dem Internet erreichbar, mindestens so sicher wie heute im Tailnet“). Laut `AGENTS.md` wird erst nach Fritz' Freigabe dieses Briefings und der Spezifikation `docs/PUBLIC_ACCESS_SPEC.md` Code geschrieben.
+Stand 2026-10-14. **Status: Entwurf, Entscheidungen eingearbeitet, Freigabe der Spezifikation steht aus.** Grundlage ist Fritz' Plan vom 2026-10-14 („Perch aus dem Internet erreichbar, mindestens so sicher wie heute im Tailnet“). Fritz' Entscheidungen zu den offenen Fragen vom selben Tag stehen unten. Laut `AGENTS.md` wird erst nach Fritz' Freigabe der Spezifikation `docs/PUBLIC_ACCESS_SPEC.md` Code geschrieben.
+
+## Produktrahmen
+
+Perch ist ein Produkt zum **Selbsthosten**: installieren, Konten verbinden, auf dem eigenen Server betreiben. Wer Perch installiert, ist Eigentümer und einziger Nutzer seiner Installation (der **Betreiber**, Root-Namespace). Ein Ausrollen an weitere Personen ist nicht geplant. Deshalb ist nichts fest auf Fritz zugeschnitten:
+
+- Google-Allowlist, Google-OAuth-Client, Perch-Code (TOTP), öffentliche Adresse und Benachrichtigungskanal richtet jeder Betreiber selbst ein.
+- Perch liefert keine gemeinsame OAuth-App und keinen gemeinsamen Dienst mit.
+- friagent ist Fritz' persönliches System und keine Abhängigkeit von Perch. Später bekommt friagent eine MCP-Schnittstelle und verbindet sich damit wie jeder andere Client mit Perch (eigenes Vorhaben, nicht Teil dieses Plans).
 
 ## Problem
 
@@ -11,52 +19,47 @@ Perch ist heute nur im Tailnet erreichbar (Tailscale Serve oder SSH-Tunnel). Auf
 Ein Angreifer braucht heute **beides**:
 
 1. ein Gerät im Tailnet (Tailscale-Login, Geräte-Autorisierung, ACLs) und
-2. ein Perch-Token (globales Read-only-Token, Nutzer-Token oder Client-Grant-Token mit 256 Bit Entropie).
+2. ein Perch-Token (256 Bit Entropie).
 
 Schreibrechte (Senden, Kalender-Schreiben) gibt es nur über lokale Client-Grants pro Konto (`perch client add`). Konten werden nur lokal per CLI verbunden.
 
 ## Zielbild
 
-- Perch ist unter einer öffentlichen HTTPS-Adresse (Tailscale Funnel) als MCP-Server nach der **MCP-Autorisierung (OAuth 2.1)** erreichbar. In claude.ai trägt Fritz die Adresse ein, meldet sich im Browser an und ist verbunden. Claude Code am Uni-Laptop funktioniert genauso.
-- Die weggefallene Tailnet-Schicht wird durch eine **gleich starke Anmeldung** ersetzt: nur Fritz, mit zweitem Faktor, pro Gerät, einzeln widerrufbar.
-- Öffentlich sind **nur** `/mcp` und die Anmelde- und OAuth-Endpunkte. Statusseite, Konten verbinden und alles Administrative bleiben im Tailnet bzw. in der lokalen CLI.
-- Das bestehende Rechtemodell bleibt: Ein über OAuth angemeldeter Client liest standardmäßig nur. Schreiben braucht weiterhin eine ausdrückliche Freigabe pro Konto.
-- Ein Notschalter macht Perch sofort wieder rein tailnet-intern und alle OAuth-Tokens ungültig.
+- Perch ist unter einer öffentlichen HTTPS-Adresse als MCP-Server nach der **MCP-Autorisierung (OAuth 2.1)** erreichbar. In claude.ai trägt der Betreiber die Adresse ein, meldet sich im Browser an und ist verbunden. Claude Code am Uni-Laptop und andere MCP-Clients funktionieren genauso.
+- Die weggefallene Tailnet-Schicht wird durch eine **gleich starke Anmeldung** ersetzt: Google-Konto aus der Allowlist **plus** eigener Perch-Code **plus** Geräte-Freigabe, pro Gerät widerrufbar.
+- Öffentlich sind **nur** `/mcp` und die Anmelde- und OAuth-Endpunkte. Statusseite, Konten verbinden und alles Administrative bleiben lokal (CLI auf dem Server, Loopback, optional Tailnet).
+- Tailscale ist **nicht** Voraussetzung. Der dokumentierte Standardweg ist Tailscale Funnel; jeder andere TLS-Reverse-Proxy mit eigener Domain geht auch.
+- Rechtemodell wie heute: Ein OAuth-Client liest standardmäßig alles, was das globale Token liest. Schreiben braucht weiterhin eine ausdrückliche Freigabe pro Konto.
+- Ein Notschalter sperrt den öffentlichen Zugang sofort und macht alle OAuth-Tokens ungültig.
 
-## Bausteine (aus Fritz' Plan)
+## Entscheidungen (Fritz, 2026-10-14)
 
-1. **Anmeldung über Google** (OpenID Connect) gegen eine feste Allowlist von Fritz' Google-Konten. Perch speichert kein Passwort.
-2. **Passkey direkt in Perch** (WebAuthn). Im Plan optional. Der Spec-Entwurf schlägt ihn als **Pflicht** vor, siehe unten.
-3. **Kurzlebige Tokens:** Access-Token ca. 1 Stunde, Refresh-Token rotieren bei jeder Nutzung. Wird ein altes Refresh-Token erneut benutzt, wird die ganze Token-Kette gesperrt.
-4. **Geräteliste mit Freigabe:** Jeder neue Client ist ein eigener Eintrag (Name, Datum, Herkunft). Neue Einträge müssen bestätigt werden, einzeln widerrufbar.
-5. **Rechte wie heute:** standardmäßig nur lesen; Senden und Kalender-Schreiben nur per ausdrücklichem Grant pro Konto.
-6. **Bremsen:** Rate-Limits, Sperre nach Fehlversuchen, Protokoll jeder Anmeldung, Benachrichtigung bei neuem Gerät oder Ort.
-7. **Minimale Angriffsfläche:** nur `/mcp` und die Anmeldeseiten öffentlich.
-8. **Notschalter:** ein Befehl sperrt den öffentlichen Zugang und widerruft alle OAuth-Tokens.
+| Frage | Entscheidung |
+| --- | --- |
+| Zweiter Faktor | **Pflicht**, als eigener **Perch-Code (TOTP)** aus einer Authenticator-App, nicht als Passkey. Einrichtung lokal per QR-Code, dazu Notfall-Codes. |
+| Freigabe neuer Geräte | lokal (CLI bzw. Tailnet/Loopback-Seite). Telegram nur als **Hinweis**. |
+| Benachrichtigung | optional und austauschbar. Erster Kanal: Telegram-Bot direkt, vom Betreiber eingerichtet. friagent wird keine Abhängigkeit. |
+| Leseumfang eines OAuth-Clients | **alles**, was das globale Token liest |
+| Öffentliche Adresse | „was am besten passt“; Tailnet nicht zwingend. Umsetzung: Funnel auf 443 als Standard, beliebiger TLS-Proxy möglich (Spec §1). |
+| Namespaces | **nur Root**, als Grundsatz (eine Person pro Installation) |
+| Clients ohne Metadaten-Dokument (z. B. Codex) | **ja, unterstützen** (Spec §4) |
+| Bibliotheken | **selbst bauen**, keine neuen Abhängigkeiten (Spec §5, §11) |
 
 ## Befunde aus der Quellenprüfung (2026-10-14)
 
-Die Quellen sind dokumentationsgeprüft, nicht live getestet. Einzelheiten und Links stehen in der Spec, §12.
+Die Quellen sind dokumentationsgeprüft, nicht live getestet. Einzelheiten stehen in der Spec, §14.
 
-- **Funnel gilt pro Port, nicht pro Pfad.** Ein Port ist entweder ganz privat (Serve) oder ganz öffentlich (Funnel). Erlaubt sind nur die Ports 443, 8443 und 10000. „Nur `/mcp` öffentlich, `/status` privat“ geht also nur mit **zwei getrennten Ports**. Der Spec-Entwurf löst das mit einem eigenen öffentlichen Listener in Perch, der die Admin-Routen gar nicht kennt.
-- **Google lässt Perch den zweiten Faktor nicht prüfen.** Bei privaten Google-Konten kann eine Anwendung keine Zwei-Faktor-Anmeldung erzwingen und bekommt auch keinen verlässlichen Nachweis, dass eine stattgefunden hat. „Google erzwingt den zweiten Faktor“ hängt allein an Fritz' Kontoeinstellungen. Deshalb schlägt der Entwurf den Perch-Passkey als Pflicht vor, damit die Messlatte unabhängig von Google erreicht wird.
-- **claude.ai verlangt** PKCE (S256), Protected Resource Metadata (RFC 9728), einen `401` mit `resource_metadata`, die Callback-URL `https://claude.ai/api/mcp/auth_callback` und rotierende Refresh-Tokens für öffentliche Clients. Als Registrierung reichen **Client ID Metadata Documents (CIMD)**. Dynamic Client Registration wird damit unnötig, was einen offenen Schreib-Endpunkt erspart.
-- **Neuere MCP-Spec-Revision:** Eine Sekundärquelle nennt eine Revision 2026-07-28, die DCR zugunsten von CIMD abkündigt. Die Primärquelle war aus der Prüfumgebung nicht erreichbar und muss vor der Umsetzung gelesen werden.
+- **Funnel gilt pro Port, nicht pro Pfad**, und nur auf den Ports 443, 8443 und 10000. Deshalb hat Perch einen eigenen öffentlichen Listener, der die Admin-Routen gar nicht kennt.
+- **Google lässt Perch den zweiten Faktor nicht prüfen.** Deshalb der eigene Perch-Code.
+- **claude.ai verlangt** PKCE (S256), Protected Resource Metadata (RFC 9728), einen `401` mit `resource_metadata`, die Callback-URL `https://claude.ai/api/mcp/auth_callback` und rotierende Refresh-Tokens.
+- **Neuere MCP-Spec-Revision:** Eine Sekundärquelle nennt eine Revision 2026-07-28. Die Primärquelle muss vor der Umsetzung gelesen werden.
 
 ## Nicht im Umfang
 
-- Änderungen an Tailscale durch Perch selbst (Funnel/Serve richtet Fritz ein; Perch dokumentiert die Befehle)
+- Änderungen an Tailscale oder am Reverse-Proxy durch Perch selbst (Perch dokumentiert die Befehle)
 - Konten verbinden, Nutzerverwaltung oder Statusseite über das Internet
-- Andere Identitätsanbieter als Google, Passwort-Login
-- Öffentlicher Zugang für admin-angelegte Nutzer-Namespaces (erste Version nur Root-Namespace, siehe offene Fragen)
-- Gehärteter Multi-Tenant-Betrieb, Listing im Claude-Connector-Verzeichnis
-- Deployment, Live-Tests mit echten Konten (macht Fritz)
-
-## Offene Entscheidungen für Fritz
-
-Siehe `docs/PUBLIC_ACCESS_SPEC.md` §11. Die wichtigsten:
-
-1. Ist der Perch-Passkey Pflicht (Empfehlung) oder optional?
-2. Wie wird ein neues Gerät freigegeben: im Tailnet bzw. per CLI (Empfehlung) oder per Telegram über friagent?
-3. Wie viel darf ein OAuth-Client standardmäßig lesen: alles wie das globale Token, oder ohne WhatsApp und Slack?
-4. Welcher Port wird öffentlich: 443 für Funnel (Tailnet-Serve zieht auf 8443 um) oder 8443 für Funnel?
+- Öffentlicher Zugang für admin-angelegte Nutzer (`perch user add`). Ob diese Funktion im Produkt bleibt, ist eine eigene Entscheidung.
+- Andere Identitätsanbieter als Google, Passwort-Login, Passkeys
+- MCP-Schnittstelle für friagent
+- Listing im Claude-Connector-Verzeichnis
+- Deployment, Live-Tests mit echten Konten (macht der Betreiber)
