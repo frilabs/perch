@@ -13,7 +13,11 @@
   - Nur Root, als Grundsatz (Produkt zum Selbsthosten, eine Person pro Installation).
   - Clients ohne Metadaten-Dokument werden über DCR unterstützt, die ohne lokale Freigabe wirkungslos bleibt.
   - Keine neuen Abhängigkeiten; das Google-ID-Token wird nach OIDC Core §3.1.3.7 ohne Signaturprüfung geprüft.
-- **Nächster Schritt:** Fritz bestätigt Lebensdauern und Limits (Spec §13) und gibt die Spec frei. Vor der Umsetzung werden die Primärquellen aus §13.2 geprüft.
+- **Nachtrag (Fritz, 2026-10-14):** Die Phishing-Schwäche von TOTP „so sicher wie möglich“ beheben; Lebensdauern und Limits bestätigt; `perch user add` entfernen.
+  - Eingearbeitet als Kopplungsfenster (Spec §0a, §6): Anmeldung nur in einem lokal per `perch oauth pair` geöffneten Fenster mit Kopplungscode, ein Gerät pro Fenster (zweiter Versuch: Alarm, beide verworfen), Code erst nach lokaler Bestätigung mit Details, jede neue Anmeldung ist eine neue Kopplung, DCR nur im Fenster.
+  - Restrisiko dokumentiert: Echtzeit-Phishing genau im eigenen Fenster, inklusive Kopplungscode.
+  - Rückbau der Nutzer-Isolation als eigener erster Schritt mit eigenem PR (Spec §11a).
+- **Nächster Schritt:** Fritz gibt die Spec frei. Vor der Umsetzung werden die Punkte aus Spec §13 geprüft.
 
 
 ## Update 2026-10-14: `perch status` und Statusseite (Branch `feat/perch-status`)
