@@ -6,6 +6,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { hasWriteCapability, principalForClientToken, READONLY_PRINCIPAL, type Principal } from '../auth/grants.js';
 import type { PerchContext } from '../context.js';
 import { PerchError } from '../errors.js';
+import { renderStatusPage, statusPageHeaders } from '../status/page.js';
+import { collectStatus, type StatusOptions, type StatusReport } from '../status/status.js';
 import type { NamespaceRouter, SessionScope } from '../users/namespaces.js';
 import { createMcpServer } from './server.js';
 
@@ -14,6 +16,21 @@ const MAX_BODY_BYTES = 1024 * 1024;
 /** Draft/send clients may upload inline base64 attachments (10 MiB decoded is ~13.4 MiB base64). */
 const MAX_WRITE_BODY_BYTES = 16 * 1024 * 1024;
 const MCP_PATH = '/mcp';
+const STATUS_PATH = '/status';
+/** Live checks of the status page are reused for this long (page reloads never hammer the providers). */
+export const STATUS_CACHE_SECONDS = 60;
+
+/**
+ * The status page accepts the same tokens as MCP, as a bearer token or as the password of HTTP Basic auth
+ * (so a browser can show its own login prompt; the user name is ignored). Returns a Bearer header value.
+ */
+function statusCredential(header: string | undefined): string | undefined {
+  const basic = /^Basic\s+([A-Za-z0-9+/=]{1,1024})\s*$/i.exec(header ?? '');
+  if (!basic) return header;
+  const decoded = Buffer.from(basic[1]!, 'base64').toString('utf8');
+  const colon = decoded.indexOf(':');
+  return colon < 0 ? undefined : `Bearer ${decoded.slice(colon + 1)}`;
+}
 
 export function generateHttpToken(): string {
   return randomBytes(32).toString('base64url');
@@ -101,6 +118,8 @@ export interface HttpServerOptions {
   /** Exact Origin values; a request carrying any other Origin is rejected. */
   allowedOrigins?: string[];
   log?: (line: string) => void;
+  /** Tests only: MOCK IMAP/SMTP login for the status page's live checks. */
+  statusOptions?: Pick<StatusOptions, 'imapVerify'>;
 }
 
 export interface RunningHttpServer {
@@ -141,6 +160,16 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
   const log = opts.log ?? ((line: string) => process.stderr.write(`${line}\n`));
   const allowedOrigins = new Set(opts.allowedOrigins ?? []);
   let allowedHosts = new Set<string>();
+  // One cached live report per namespace context (single-flight while it runs).
+  const statusCache = new WeakMap<PerchContext, { at: number; report: Promise<StatusReport> }>();
+  const cachedStatus = (ctx: PerchContext) => {
+    const hit = statusCache.get(ctx);
+    if (hit && Date.now() - hit.at < STATUS_CACHE_SECONDS * 1000) return hit.report;
+    const report = collectStatus(ctx, opts.statusOptions);
+    statusCache.set(ctx, { at: Date.now(), report });
+    report.catch(() => statusCache.delete(ctx));
+    return report;
+  };
 
   const server = createServer(async (req, res) => {
     try {
@@ -154,9 +183,17 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
         log('perch: rejected request with a disallowed Origin');
         return sendJson(res, 403, rpcError(-32000, 'Forbidden origin'));
       }
+      const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+      const isStatus = path === STATUS_PATH || path === `${STATUS_PATH}/`;
+      if (isStatus) {
+        if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: 'Method not allowed' }, { allow: 'GET, HEAD' });
+        // Navigations and same-origin loads only: another site must not be able to trigger live checks.
+        const site = req.headers['sec-fetch-site'];
+        if (site !== undefined && site !== 'same-origin' && site !== 'none') return sendJson(res, 403, { error: 'Forbidden' });
+      }
       let auth: Authenticated | null;
       try {
-        auth = await authenticate(req.headers.authorization, tokenDigest, opts.context, opts.namespaces);
+        auth = await authenticate(isStatus ? statusCredential(req.headers.authorization) : req.headers.authorization, tokenDigest, opts.context, opts.namespaces);
       } catch (err) {
         if (err instanceof PerchError && err.code === 'ambiguous_token') {
           log('perch: rejected a bearer token that matches more than one grant (ambiguous token hash; check perch user list / perch client list)');
@@ -167,10 +204,23 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
         } else throw err;
       }
       if (!auth) {
+        if (isStatus) return sendJson(res, 401, { error: 'Unauthorized' }, { 'www-authenticate': 'Basic realm="Perch status", charset="UTF-8"' });
         return sendJson(res, 401, rpcError(-32001, 'Unauthorized'), { 'www-authenticate': 'Bearer realm="perch"' });
       }
       const { principal } = auth;
-      const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+      if (isStatus) {
+        // A client grant is narrower than its namespace: only the namespace's read-only token sees the overview.
+        if (principal.kind !== 'operator_readonly') return sendJson(res, 403, { error: 'The status page needs the global or a user read-only token, not a client grant' });
+        try {
+          await auth.scope.guard?.();
+        } catch {
+          return sendJson(res, 403, { error: 'Forbidden' });
+        }
+        const html = renderStatusPage(await cachedStatus(auth.context), { cachedSeconds: STATUS_CACHE_SECONDS });
+        res.writeHead(200, statusPageHeaders());
+        res.end(req.method === 'HEAD' ? undefined : html);
+        return;
+      }
       if (path !== MCP_PATH) return sendJson(res, 404, rpcError(-32000, 'Not found'));
       if (req.method !== 'POST') {
         return sendJson(res, 405, rpcError(-32000, 'Method not allowed (stateless server: POST only)'), { allow: 'POST' });

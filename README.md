@@ -75,6 +75,7 @@ Perch re-checks the grant before every tool call, so `perch client remove ID` ta
   - list chats, read and search messages (search covers the most recent chats); media as metadata only
   - send text messages only with a `whatsapp_send` grant, idempotent per `requestId`
 - **Admin-provisioned users** (`docs/USER_ISOLATION_MILESTONE.md`, mock-tested only): `perch user add|list|remove`. Every user gets their own encrypted store and key, a read-only token and their own client grants (`PERCH_USER=<id> perch …`). Each token is valid in exactly one namespace; Perch re-checks membership and grants before every tool call. No public sign-up, no hardened multi-tenancy.
+- **Status:** `perch status` lists every connected account with a live, read-only check (exit code 1 if one fails), client grants, the send ledger fill level and recent activity. `GET /status` on the HTTP server shows the same as a read-only page (no secrets, no script; global or user read-only token as the browser password; see `docs/SETUP.md` §5a).
 - **Transports:** stdio and stateless Streamable HTTP (`POST /mcp`)
 - **Security:**
   - encrypted credential store (AES-256-GCM, key stored separately)
@@ -108,7 +109,8 @@ npm run smoke     # builds and tests dist/cli.js over stdio and HTTP
 
 | Path | Purpose |
 | --- | --- |
-| `src/cli.ts`, `src/cli/` | CLI (`init`, `serve`, `google`, `notion`, `gmail`, `microsoft`, `imap`, `google-productivity`, `slack`, `whatsapp`, `client`, `user`, `accounts`, `audit`, `token`) |
+| `src/cli.ts`, `src/cli/` | CLI (`init`, `serve`, `google`, `notion`, `gmail`, `microsoft`, `imap`, `google-productivity`, `slack`, `whatsapp`, `client`, `user`, `accounts`, `status`, `audit`, `token`) |
+| `src/status/` | `perch status` report and the read-only `/status` page |
 | `src/auth/` | client grants (capabilities per account family), principals |
 | `src/slack/` | Slack Web API (user token per workspace), app manifest |
 | `src/whatsapp/` | GOWA bridge: instance, pairing, chats, messages, sending |
@@ -144,7 +146,6 @@ The detailed documents are in German.
 ## Roadmap
 
 - Docker/Compose, backup, migrations
-- `perch status` with live checks per account, then a read-only status page
 - Rollover for the send ledger (Mail, Slack and WhatsApp share 1000 send records per namespace)
 - Calendar invitations, recurring events, deleting; writing contacts
 - Live tests for Slack and WhatsApp; loading older WhatsApp history
