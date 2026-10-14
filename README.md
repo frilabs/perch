@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="brand/logo/perch-logo-white.svg">
+  <img alt="Perch" src="brand/logo/perch-logo-black.svg" width="220">
+</picture>
+
 # Perch
 
 Perch ist ein MCP-Server. Er bündelt **mehrere Google-Drive-Konten**, **mehrere Notion-Workspaces**, **mehrere Mail-Konten** (Gmail, Outlook.com/Microsoft 365, GMX bzw. IMAP/SMTP), **mehrere Google-Calendar/Contacts-Konten**, **mehrere Slack-Workspaces** und **WhatsApp** (über eine selbst gehostete GOWA-Bridge) hinter **einem** Connector, für Claude Code, Codex und andere MCP-Clients. Standardmäßig ist alles read-only. Mail-Entwürfe, Versand (Mail, Slack, WhatsApp) und das Anlegen/Ändern privater Kalendertermine gibt es nur über explizite lokale Client-Grants pro Konto.
@@ -105,6 +110,7 @@ npm run smoke     # baut und testet dist/cli.js über stdio und HTTP
 - [`docs/PROJECT_SCOPE.md`](docs/PROJECT_SCOPE.md): erweiterte Projektrichtung
 - [`docs/HANDOFF.md`](docs/HANDOFF.md): aktueller Stand
 - [`AGENTS.md`](AGENTS.md): Arbeitsregeln
+- `brand/logo/`: Perch-Logo (Ast mit zwei Zweigen, frilabs-Standard: schwarz/weiß, Symbol, Favicon, App-Icon)
 
 ## Roadmap
 
