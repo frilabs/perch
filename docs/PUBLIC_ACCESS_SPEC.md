@@ -1,6 +1,6 @@
 # Spezifikation (Entwurf): Öffentlicher Zugang über MCP-OAuth
 
-Stand 2026-10-14. **Status: Entwurf mit allen Entscheidungen von Fritz vom 2026-10-14 (inklusive Lebensdauern und Limits), Freigabe steht aus.** Briefing und Entscheidungstabelle: `docs/PUBLIC_ACCESS_BRIEFING.md`. Werte in *kursiv* sind bestätigte Startwerte. Vor der Umsetzung zu prüfende Quellen stehen in §13.
+Stand 2026-10-14. **Status: Freigegeben** (Fritz am 2026-10-14: „Passt alles, implementiere“). **Umgesetzt** auf Branch `claude/perch-oauth-internet-access-b0cg8c`, nur mit Mocks getestet; Abweichungen in der Umsetzung stehen in §15. Briefing und Entscheidungstabelle: `docs/PUBLIC_ACCESS_BRIEFING.md`. Werte in *kursiv* sind bestätigte Startwerte. Vor der Umsetzung zu prüfende Quellen stehen in §13.
 
 „Betreiber“ ist die Person, die Perch installiert hat (Root-Namespace). Es gibt genau einen Betreiber pro Installation.
 
@@ -258,3 +258,15 @@ Fritz' Entscheidung vom 2026-10-14: Perch hat genau einen Betreiber pro Installa
 - Tailscale Funnel: <https://tailscale.com/kb/1223/funnel>. Ports nur 443, 8443, 10000; ein Port ist ganz Serve (privat) oder ganz Funnel (öffentlich); braucht MagicDNS, HTTPS-Zertifikate und das Node-Attribut `funnel` in der Policy. Nur über Suchergebnisse bestätigt (DNS); das Header-Verhalten (Client-IP) ist **nicht** belegt.
 - OpenID Connect Core 1.0, §3.1.3.7 (ID-Token-Prüfung, TLS statt Signatur bei direktem Token-Endpunkt-Abruf): <https://openid.net/specs/openid-connect-core-1_0.html>. Aus dem Gedächtnis zitiert, vor der Umsetzung nachlesen.
 - RFC 6238 (TOTP), RFC 4648 (Base32), RFC 7591 (DCR), RFC 9728 (Protected Resource Metadata), RFC 8414 (AS Metadata), RFC 8707 (Resource Indicators), RFC 7636 (PKCE), RFC 7009 (Revocation), RFC 8252 (Native Apps), OAuth 2.1 Draft (Refresh-Rotation), ISO/IEC 18004 (QR-Code).
+
+## 15. Abweichungen und Präzisierungen in der Umsetzung (2026-10-14)
+
+1. **Gerät mit Schreib-Grant:** `perch oauth grant` legt einen Client-Grant an (wie `perch client add`, ohne eigenes Bearer-Token: der gespeicherte Hash hat kein bekanntes Urbild). Ein Gerät mit Grant ist danach dieser Client-Grant und sieht nur, was der Grant abdeckt, statt „alles lesen plus Schreibrechte“. Das ist enger und nutzt die bestehende, getestete Grant-Prüfung; wer weiter lesen will, nimmt die Lese-Capabilities in den Grant auf. Ohne Grant liest ein Gerät alles wie das globale Token.
+2. **`/local/totp` entfällt:** Der Perch-Code wird nur per CLI eingerichtet (QR im Terminal). `/local/pair` ist umgesetzt.
+3. **CIMD-Allowlist:** Die Adresse des Metadaten-Dokuments der gehosteten Claude-Apps ist nicht dokumentiert. Statt exakter URLs gilt deshalb das Muster `https://claude.ai/oauth/…` und `https://claude.com/oauth/…`; abgerufen wird nur von diesen beiden Hosts. Nicht-Loopback-Redirects aus diesen Dokumenten müssen auf `claude.ai` oder `claude.com` liegen; die Zustimmung zeigt den Host der `client_id`-URL statt des selbst angegebenen Namens.
+4. **Rate-Limit der Warteseite:** `/oauth/wait` lädt sich alle 2 Sekunden neu und hat deshalb ein eigenes Limit (60/min) statt der 10/min der übrigen Anmeldeseiten.
+5. **Falsches Google-Konto:** Eine abgelehnte Google-Anmeldung (Konto nicht auf der Liste, `sub` abweichend, Claims ungültig) schließt das Fenster.
+6. **Start:** Der öffentliche Listener startet nur mit `perch serve --http --public` und gesetztem `PERCH_PUBLIC_BASE_URL`; `PERCH_PUBLIC_BASE_URL` muss `https://` sein (eigene Domains sind erlaubt).
+7. **Fenster-Status in `perch status`:** Ob gerade ein Fenster offen ist, kennt nur der laufende Server; die Statusseite zeigt es, `perch status` auf der Kommandozeile nicht.
+8. **Rückbau Nutzer-Isolation (§11a):** als eigener Commit auf demselben Branch umgesetzt, nicht als eigener PR, weil für diese Arbeit genau ein Branch vorgegeben war.
+

@@ -77,11 +77,12 @@ Perch re-checks the grant before every tool call, so `perch client remove ID` ta
 - **One operator per installation:** Perch is self-hosted by the person whose accounts it serves. The earlier admin-provisioned users (`perch user add`, `PERCH_USER`) were removed; see `docs/SETUP.md` §4c for leftover files.
 - **Status:** `perch status` lists every connected account with a live, read-only check (exit code 1 if one fails), client grants, the send ledger fill level and recent activity. `GET /status` on the HTTP server shows the same as a read-only page (no secrets, no script; the global read-only token as the browser password; see `docs/SETUP.md` §5a).
 - **Transports:** stdio and stateless Streamable HTTP (`POST /mcp`)
+- **Public access (optional, mock-tested only):** `perch serve --http --public` adds a public OAuth 2.1 listener (MCP authorization) for claude.ai custom connectors and Claude Code without Tailscale. New devices are paired only inside a pairing window opened on the server (`perch oauth pair`): pairing code from the terminal, Google sign-in (allowlist), a Perch code (TOTP) and a final confirmation in the terminal. Rotating refresh tokens, per-device revocation, a kill switch (`perch public off`). See `docs/SETUP.md` §6a and `docs/PUBLIC_ACCESS_SPEC.md`.
 - **Security:**
   - encrypted credential store (AES-256-GCM, key stored separately)
   - bearer auth that fails closed
   - allowlists for Host and Origin
-  - binds to loopback or an explicit Tailscale IP only
+  - binds to loopback or an explicit Tailscale IP only (the public listener too; a TLS proxy such as Tailscale Funnel exposes it)
   - allowlist of upstream endpoints; write endpoints only for the matching grant
   - fixed upstream origins, sanitised error messages
 

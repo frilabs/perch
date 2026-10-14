@@ -1,6 +1,6 @@
 # Briefing: Öffentlicher Zugang zu Perch über OAuth
 
-Stand 2026-10-14. **Status: Entwurf, alle Entscheidungen eingearbeitet, Freigabe der Spezifikation steht aus.** Grundlage ist Fritz' Plan vom 2026-10-14 („Perch aus dem Internet erreichbar, mindestens so sicher wie heute im Tailnet“). Fritz' Entscheidungen zu den offenen Fragen vom selben Tag stehen unten. Laut `AGENTS.md` wird erst nach Fritz' Freigabe der Spezifikation `docs/PUBLIC_ACCESS_SPEC.md` Code geschrieben.
+Stand 2026-10-14. **Status: freigegeben und umgesetzt** (Fritz am 2026-10-14: „Passt alles, implementiere“; Umsetzung siehe `docs/PUBLIC_ACCESS_SPEC.md` §15 und `docs/SETUP.md` §6a). Grundlage ist Fritz' Plan vom 2026-10-14 („Perch aus dem Internet erreichbar, mindestens so sicher wie heute im Tailnet“). Fritz' Entscheidungen zu den offenen Fragen vom selben Tag stehen unten. Laut `AGENTS.md` wird erst nach Fritz' Freigabe der Spezifikation `docs/PUBLIC_ACCESS_SPEC.md` Code geschrieben.
 
 ## Produktrahmen
 
