@@ -15,7 +15,7 @@ Everything is read-only by default. Writing (mail drafts, sending mail, Slack an
 - Every result carries the account or workspace id and label, so you always know where it came from.
 
 Status as of 2026-10-14:
-- Drive/Notion, mail, Calendar/Contacts, user isolation, the mail workflow and Slack/WhatsApp are implemented and tested locally against mock upstreams and local test servers.
+- Drive/Notion, mail, Calendar/Contacts, the mail workflow and Slack/WhatsApp are implemented and tested locally against mock upstreams and local test servers.
 - **Not** verified live against Google, Notion, Microsoft, GMX, Slack or WhatsApp.
 - Not deployed.
 
@@ -74,8 +74,8 @@ Perch re-checks the grant before every tool call, so `perch client remove ID` ta
   - pair with a pairing code from the CLI; several accounts in separate device slots
   - list chats, read and search messages (search covers the most recent chats); media as metadata only
   - send text messages only with a `whatsapp_send` grant, idempotent per `requestId`
-- **Admin-provisioned users** (`docs/USER_ISOLATION_MILESTONE.md`, mock-tested only): `perch user add|list|remove`. Every user gets their own encrypted store and key, a read-only token and their own client grants (`PERCH_USER=<id> perch …`). Each token is valid in exactly one namespace; Perch re-checks membership and grants before every tool call. No public sign-up, no hardened multi-tenancy.
-- **Status:** `perch status` lists every connected account with a live, read-only check (exit code 1 if one fails), client grants, the send ledger fill level and recent activity. `GET /status` on the HTTP server shows the same as a read-only page (no secrets, no script; global or user read-only token as the browser password; see `docs/SETUP.md` §5a).
+- **One operator per installation:** Perch is self-hosted by the person whose accounts it serves. The earlier admin-provisioned users (`perch user add`, `PERCH_USER`) were removed; see `docs/SETUP.md` §4c for leftover files.
+- **Status:** `perch status` lists every connected account with a live, read-only check (exit code 1 if one fails), client grants, the send ledger fill level and recent activity. `GET /status` on the HTTP server shows the same as a read-only page (no secrets, no script; the global read-only token as the browser password; see `docs/SETUP.md` §5a).
 - **Transports:** stdio and stateless Streamable HTTP (`POST /mcp`)
 - **Security:**
   - encrypted credential store (AES-256-GCM, key stored separately)
@@ -135,7 +135,7 @@ The detailed documents are in German.
 - [`docs/SETUP.md`](docs/SETUP.md): setup and operation
 - [`docs/EMAIL_MILESTONE.md`](docs/EMAIL_MILESTONE.md): email milestone (specification, TDD evidence)
 - [`docs/GOOGLE_PRODUCTIVITY_MILESTONE.md`](docs/GOOGLE_PRODUCTIVITY_MILESTONE.md): Calendar/Contacts milestone (specification, TDD evidence)
-- [`docs/USER_ISOLATION_MILESTONE.md`](docs/USER_ISOLATION_MILESTONE.md): user isolation milestone (specification, TDD evidence)
+- [`docs/USER_ISOLATION_MILESTONE.md`](docs/USER_ISOLATION_MILESTONE.md): user isolation milestone (historical; removed 2026-10-14)
 - [`docs/MAIL_WORKFLOW_MILESTONE.md`](docs/MAIL_WORKFLOW_MILESTONE.md): audit log and idempotent sending
 - [`docs/SLACK_WHATSAPP_MILESTONE.md`](docs/SLACK_WHATSAPP_MILESTONE.md): Slack/WhatsApp milestone (decisions, allowlist, limits)
 - [`docs/PROJECT_SCOPE.md`](docs/PROJECT_SCOPE.md): broader project direction

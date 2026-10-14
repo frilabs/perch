@@ -111,8 +111,7 @@ const provenance = (e: Entry): MailProvenance => ({ accountId: e.account.id, acc
 
 export interface MailServiceOptions {
   /**
-   * Namespace guard (user still active, namespace paths/key/store intact). Set for user namespaces by
-   * NamespaceRouter; runs on every call and again right before a provider write.
+   * Optional service guard; runs on every call and again right before a provider write.
    */
   guard?: () => Promise<void>;
 }

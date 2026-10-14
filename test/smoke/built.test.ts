@@ -5,6 +5,7 @@
 // preloaded with --import): its fetch, outbound sockets and DNS APIs are blocked and logged. The suite first proves
 // the guard is active in a child and finally asserts that the smoke run itself made zero network attempts.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -18,7 +19,6 @@ import { MailService, type MailProviders } from '../../src/mail/service.js';
 import type { MailProvider } from '../../src/mail/types.js';
 import { MailWorkflowLedger } from '../../src/mail/workflowLedger.js';
 import { CredentialStore } from '../../src/store/credentialStore.js';
-import { openUserStore } from '../../src/users/registry.js';
 import { dummySecret, makeTempDirs, type TempDirs } from '../support/fixtures.js';
 
 /** Read-only tool count (Drive/Notion 14 + mail read 3 + Calendar read 3 + Contacts read 2 + Slack read 4 + WhatsApp read 3). Write tools need a client grant. */
@@ -339,105 +339,54 @@ describe('built artifact', () => {
     await client.close();
   });
 
-  it('provisions users and routes HTTP by token; PERCH_USER stdio sees only its namespace and stops on user removal', async () => {
-    // Root already holds imap-0000000a (seeded above); both users get the SAME id with their own label.
-    const ids: Record<string, string> = {};
-    for (const label of ['Alice', 'Bob']) {
-      const add = spawnSync(process.execPath, [CLI, 'user', 'add', '--label', label], { env, encoding: 'utf8' });
-      expect(add.status, add.stderr).toBe(0);
-      ids[label] = /Created user (user-[a-f0-9]{16})/.exec(add.stdout)![1]!;
-      const store = await openUserStore(await CredentialStore.open({ dataDir: dirs.dataDir, keyFile: dirs.keyFile }), ids[label]!);
-      const now = new Date().toISOString();
-      await store.update((d) => {
-        d.imap.push({
-          id: 'imap-0000000a',
-          label: `${label} GMX`,
-          email: `${label.toLowerCase()}@example.test`,
-          username: `${label.toLowerCase()}@example.test`,
-          password: dummySecret('PW'),
-          imap: { host: 'imap.invalid.example', port: 993 },
-          smtp: { host: 'smtp.invalid.example', port: 465, security: 'tls' },
-          allowDrafts: false,
-          allowSend: false,
-          createdAt: now,
-          updatedAt: now,
-        });
-      });
-    }
-    const userToken = async (label: string) => (await readFile(path.join(path.dirname(dirs.tokenFile), 'users', `${ids[label]}.token`), 'utf8')).trim();
-    const labelsOf = (listed: { mail: Array<{ accountLabel: string }> }) => listed.mail.map((m) => m.accountLabel).sort();
-
-    // A malformed or unknown selector never falls back to root.
+  it('has no user namespaces: PERCH_USER and perch user fail, a leftover user record is warned about and its token is rejected', async () => {
     for (const bad of ['', 'user-0123456789abcdef', '../x']) {
       const r = spawnSync(process.execPath, [CLI, 'accounts'], { env: { ...env, PERCH_USER: bad }, encoding: 'utf8' });
       expect(r.status, bad).not.toBe(0);
       expect(r.stdout).toBe('');
+      expect(r.stderr).toMatch(/PERCH_USER is no longer supported/);
     }
+    const add = spawnSync(process.execPath, [CLI, 'user', 'add', '--label', 'Alice'], { env, encoding: 'utf8' });
+    expect(add.status).not.toBe(0);
 
+    // A store written by the removed user-isolation milestone still opens; its user token is not accepted.
+    const legacyToken = randomBytes(32).toString('base64url');
+    const store = await CredentialStore.open({ dataDir: dirs.dataDir, keyFile: dirs.keyFile });
+    await store.update((d) => {
+      d.users.push({
+        id: 'user-0123456789abcdef',
+        label: 'Alice',
+        status: 'active',
+        readTokenSha256: createHash('sha256').update(legacyToken).digest('hex'),
+        createdAt: new Date().toISOString(),
+      });
+    });
     const child: ChildProcess = spawn(process.execPath, [CLI, 'serve', '--http', '--port', '0'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
-    const stdio = new Client({ name: 'smoke-user-stdio', version: '0.0.0' });
     try {
+      let stderr = '';
       const url = await new Promise<string>((resolve, reject) => {
-        let buf = '';
         child.stderr!.on('data', (c: Buffer) => {
-          buf += c.toString();
-          const m = /listening on (http:\/\/\S+)/.exec(buf);
+          stderr += c.toString();
+          const m = /listening on (http:\/\/\S+)/.exec(stderr);
           if (m) resolve(m[1]!);
         });
-        child.once('exit', (code) => reject(new Error(`exited early (${code}): ${buf}`)));
+        child.once('exit', (code) => reject(new Error(`exited early (${code}): ${stderr}`)));
       });
-      const listOver = async (token: string) => {
-        const c = new Client({ name: 'smoke-user-http', version: '0.0.0' });
-        await c.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
-        const listed = JSON.parse(text(await c.callTool({ name: 'perch_list_accounts', arguments: {} })));
-        await c.close();
-        return listed;
-      };
-      const alice = await listOver(await userToken('Alice'));
-      expect(labelsOf(alice)).toEqual(['Alice GMX']);
-      expect(alice.connection).toMatchObject({ kind: 'operator_readonly', user: ids.Alice });
-      expect(labelsOf(await listOver(await userToken('Bob')))).toEqual(['Bob GMX']);
-      const root = await listOver((await readFile(dirs.tokenFile, 'utf8')).trim());
-      expect(labelsOf(root)).not.toContain('Alice GMX');
-      expect(JSON.stringify(root)).not.toMatch(/Alice|Bob|user-[a-f0-9]{16}/);
-
-      await stdio.connect(
-        new StdioClientTransport({ command: process.execPath, args: [CLI, 'serve', '--stdio'], env: { ...env, PERCH_USER: ids.Alice! }, stderr: 'pipe' }),
-      );
-      expect(labelsOf(JSON.parse(text(await stdio.callTool({ name: 'perch_list_accounts', arguments: {} }))))).toEqual(['Alice GMX']);
-
-      const remove = spawnSync(process.execPath, [CLI, 'user', 'remove', ids.Alice!], { env, encoding: 'utf8' });
-      expect(remove.status, remove.stderr).toBe(0);
-      // The running stdio session fails on its next tool call, before any provider I/O (mail_search would
-      // otherwise try to reach the unresolvable IMAP host and be logged by the offline guard).
-      const results: Array<[string, boolean, string]> = [];
-      for (const [name, args] of [
-        ['mail_search', {}],
-        ['perch_list_accounts', {}],
-        ['drive_search', { query: 'x' }],
-      ] as const) {
-        const r = await stdio.callTool({ name, arguments: args });
-        results.push([name, r.isError === true, text(r)]);
-      }
-      for (const [name, isError, body] of results) {
-        expect(isError, name).toBe(true);
-        expect(body, name).toMatch(/removed or disabled/i);
-      }
-      const after = await fetch(url, {
+      expect(stderr).toMatch(/still lists 1 provisioned user\(s\) \(user-0123456789abcdef\)/);
+      const res = await fetch(url, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${await userToken('Alice')}` },
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${legacyToken}` },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'raw', version: '0' } } }),
       });
-      expect(after.status).toBe(401);
-      expect(labelsOf(await listOver(await userToken('Bob')))).toEqual(['Bob GMX']);
-      const reselect = spawnSync(process.execPath, [CLI, 'accounts'], { env: { ...env, PERCH_USER: ids.Alice! }, encoding: 'utf8' });
-      expect(reselect.status).not.toBe(0);
+      expect(res.status).toBe(401);
     } finally {
-      await stdio.close().catch(() => {});
       const exited = new Promise<number | null>((r) => child.once('exit', (code) => r(code)));
       child.kill('SIGTERM');
       expect(await exited).toBe(0);
     }
+    // Nothing under users/ or user-keys/ was created.
+    expect(existsSync(path.join(dirs.dataDir, 'users'))).toBe(false);
+    expect(existsSync(path.join(path.dirname(dirs.keyFile), 'user-keys'))).toBe(false);
   });
 
   it('keeps idempotent send records and a body-free audit trail in the built artifact (stdio + HTTP), without network', async () => {

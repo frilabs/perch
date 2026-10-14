@@ -12,7 +12,6 @@ import {
   type Principal,
 } from '../auth/grants.js';
 import type { PerchContext } from '../context.js';
-import type { SessionScope } from '../users/namespaces.js';
 import { PerchError, safeMessage } from '../errors.js';
 import { MAX_CALENDAR_PAGE_SIZE } from '../google/calendar.js';
 import { MAX_DESCRIPTION_LENGTH, MAX_LOCATION_LENGTH, MAX_SUMMARY_LENGTH } from '../google/calendarWrite.js';
@@ -227,17 +226,23 @@ const outgoing = {
  * tool invocation the client grant is re-resolved from the store, so a removed or narrowed grant
  * fails closed on long-lived connections (stdio) before any provider call.
  */
+/** What createMcpServer needs besides context and principal to keep a session valid. */
+export interface SessionScope {
+  /** Runs before EVERY tool invocation; throws if the session's credential was revoked (OAuth devices). */
+  guard?: () => Promise<void>;
+}
+
 export function createMcpServer(ctx: PerchContext, principal: Principal = READONLY_PRINCIPAL, scope: SessionScope = {}): McpServer {
   const operator = principal.kind === 'operator_readonly';
   const writes = hasWriteCapability(principal);
-  // Before EVERY tool call: the namespace guard (user membership, user token) and the client grant are
+  // Before EVERY tool call: the session guard (OAuth device and token) and the client grant are
   // re-read, so revocation applies to long-lived sessions before any provider I/O.
   //
-  // Shared audit runner: every tool call that passes the namespace guard is recorded in the namespace's
+  // Shared audit runner: every tool call that passes the session guard is recorded in the
   // encrypted ledger with allowlisted fields only (see src/audit/audit.ts): tool name, actor, Perch account
   // id/provider, outcome and error code; never arguments or results. Writes record their attempt BEFORE the
   // provider call (fail closed); read results are withheld if their audit record cannot be written. A call
-  // rejected by the namespace guard is not recorded: that namespace cannot be trusted to be written to.
+  // rejected by the session guard is not recorded.
   const tool = (name: string, args: unknown, fn: (p: Principal) => Promise<unknown>) =>
     run(async () => {
       await scope.guard?.();
@@ -306,7 +311,6 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
       tool('perch_list_accounts', {}, async (p) => {
         const connection = {
           kind: p.kind,
-          ...(scope.userId ? { user: scope.userId } : {}),
           ...(p.clientId ? { clientId: p.clientId, clientLabel: p.clientLabel } : {}),
           capabilities: [...p.capabilities].sort(),
         };
