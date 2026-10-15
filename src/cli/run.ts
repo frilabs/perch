@@ -43,6 +43,8 @@ import { createFetchTransport, Upstream, type UpstreamTransport } from '../upstr
 import { collectStatus, failedChecks, formatStatusText } from '../status/status.js';
 import { startPublicAccess } from '../access/runtime.js';
 import { cmdOauth, cmdPublic } from './oauth.js';
+import { cmdLuma, lumaMcpFor } from './luma.js';
+import type { FetchLike } from '../luma/client.js';
 import { PERCH_VERSION } from '../version.js';
 import { DEFAULT_PAIR_TIMEOUT_MS, pairWhatsappAccount, removeWhatsappAccount, setWhatsappInstance, whatsappDeviceStatus } from '../whatsapp/whatsapp.js';
 
@@ -54,6 +56,8 @@ export interface CliIo {
   readSecret: (prompt: string) => Promise<string>;
   /** Visible one-line input (confirmations, one-time codes); TTY only in production. */
   readLine?: (prompt: string) => Promise<string>;
+  /** Tests inject a fetch serving a MOCK Luma MCP server; production uses fetch behind guardedLumaFetch. */
+  lumaFetch?: FetchLike;
   /** Tests inject a MOCK upstream transport; production always uses fetch to fixed origins. */
   transport?: UpstreamTransport;
   /** Tests inject a MOCK IMAP/SMTP login check; production logs in to the real servers over TLS. */
@@ -76,6 +80,8 @@ Usage:
   perch oauth devices | revoke ID | revoke --all        paired devices
   perch oauth grant ID --allow CAPS --account ID ... | ungrant ID --read-all   write capabilities of a device (like perch client add)
   perch oauth client add --name N --redirect URI | add --cimd URL | list | remove ID   extra OAuth clients
+  perch luma add --label NAME [--port N] [--timeout SECONDS]   connect a Luma account (official Luma MCP, OAuth)
+  perch luma list | remove ID [--revoke] | tools ID [--accept]   tools: approved vs live tool schemas
   perch oauth local-page enable | disable       local pairing page /local/pair with its own password
   perch accounts                               list all connected accounts
   perch status [--no-check] [--json]           overview with a live check per account
@@ -105,7 +111,8 @@ Usage:
   perch whatsapp list | status | remove ID [--keep-device]
   perch client add --label NAME --allow CAPS --account ID [--account ID ...] [--token-file PATH]
                       CAPS: read,draft,send (mail accounts); calendar_read,calendar_write,contacts_read (gprod accounts);
-                            slack_read,slack_send (slack accounts); whatsapp_read,whatsapp_send (whatsapp accounts)
+                            slack_read,slack_send (slack accounts); whatsapp_read,whatsapp_send (whatsapp accounts);
+                            luma_read,luma_events,luma_guests,luma_blast (luma accounts)
   perch client list | remove ID
   perch token rotate                           replace the HTTP bearer token file
   perch audit list [--limit N] [--client ID] [--account ID]   body-free audit trail
@@ -245,12 +252,13 @@ async function cmdServe(config: PerchConfig, io: CliIo, values: Record<string, u
   if (Boolean(values.stdio) === Boolean(values.http)) throw new UsageError('Choose exactly one of --stdio or --http');
   const store = await openRootStore(config);
   await warnAboutProvisionedUsers(store, io);
-  const context = createPerchContext(store, io.transport ?? createFetchTransport());
+  const context = createPerchContext(store, io.transport ?? createFetchTransport(), undefined, lumaMcpFor(io));
   if (values.stdio) {
     // Plain stdio is the read-only operator; a client token file selects one of the client grants.
     const token = config.clientTokenFile ? (await readPrivateFile(config.clientTokenFile)).toString('utf8').trim() : undefined;
     const principal = token === undefined ? READONLY_PRINCIPAL : await principalForClientToken(store, token);
     if (!principal) throw new PerchError('PERCH_CLIENT_TOKEN_FILE does not hold a known client token (perch client list)', 'unknown_client');
+    await context.luma.refresh();
     const server = createMcpServer(context, principal);
     const closed = new Promise<void>((resolve) => {
       server.server.onclose = () => resolve();
@@ -663,7 +671,7 @@ async function cmdWhatsapp(config: PerchConfig, io: CliIo, sub: string | undefin
 
 async function cmdStatus(config: PerchConfig, io: CliIo, values: Record<string, unknown>): Promise<number> {
   const store = await openStore(config);
-  const ctx = createPerchContext(store, io.transport ?? createFetchTransport());
+  const ctx = createPerchContext(store, io.transport ?? createFetchTransport(), undefined, lumaMcpFor(io));
   const report = await collectStatus(ctx, { live: values['no-check'] !== true, ...(io.imapVerify ? { imapVerify: io.imapVerify } : {}) });
   io.stdout(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : formatStatusText(report));
   return failedChecks(report) ? 1 : 0;
@@ -850,6 +858,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         redirect: { type: 'string', multiple: true },
         cimd: { type: 'string' },
         all: { type: 'boolean' },
+        accept: { type: 'boolean' },
         json: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
@@ -879,6 +888,9 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         return await cmdServe(config, io, values);
       case 'oauth':
         return await cmdOauth(config, io, sub, rest, values);
+      case 'luma':
+        await cmdLuma(config, io, sub, rest, values);
+        return 0;
       case 'public':
         return await cmdPublic(config, io, sub);
       case 'status':

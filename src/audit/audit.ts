@@ -38,6 +38,7 @@ const PROVIDER_BY_PREFIX: Record<string, AuditProvider> = {
   gprod: 'google_productivity',
   slack: 'slack',
   whatsapp: 'whatsapp',
+  luma: 'luma',
 };
 
 export function actorOf(p: Principal): Actor {

@@ -9,6 +9,7 @@ import {
   PRODUCTIVITY_CAPABILITIES,
   SLACK_CAPABILITIES,
   WHATSAPP_CAPABILITIES,
+  LUMA_CAPABILITIES,
   type Capability,
   type ClientGrant,
   type CredentialStore,
@@ -16,6 +17,7 @@ import {
   type SlackCapability,
   type StoreData,
   type WhatsappCapability,
+  type LumaCapability,
 } from '../store/credentialStore.js';
 
 /**
@@ -43,36 +45,42 @@ export interface Principal {
   slackAccounts: ReadonlySet<string> | 'all';
   /** WhatsApp accounts; 'all' only for the read-only operator. */
   whatsappAccounts: ReadonlySet<string> | 'all';
+  /** Luma accounts; 'all' only for the read-only operator. */
+  lumaAccounts: ReadonlySet<string> | 'all';
 }
 
 export const READONLY_PRINCIPAL: Principal = Object.freeze({
   kind: 'operator_readonly',
-  capabilities: new Set<Capability>(['read', 'calendar_read', 'contacts_read', 'slack_read', 'whatsapp_read']),
+  capabilities: new Set<Capability>(['read', 'calendar_read', 'contacts_read', 'slack_read', 'whatsapp_read', 'luma_read']),
   mailAccounts: 'all',
   productivityAccounts: 'all',
   slackAccounts: 'all',
   whatsappAccounts: 'all',
+  lumaAccounts: 'all',
 }) as Principal;
 
 /** Account families: each capability applies to exactly one family, recognised by the account id prefix. */
-export type AccountFamily = 'mail' | 'productivity' | 'slack' | 'whatsapp';
+export type AccountFamily = 'mail' | 'productivity' | 'slack' | 'whatsapp' | 'luma';
 const FAMILY_CAPS: Record<AccountFamily, readonly string[]> = {
   mail: MAIL_CAPABILITIES,
   productivity: PRODUCTIVITY_CAPABILITIES,
   slack: SLACK_CAPABILITIES,
   whatsapp: WHATSAPP_CAPABILITIES,
+  luma: LUMA_CAPABILITIES,
 };
 const FAMILY_HINT: Record<AccountFamily, string> = {
   mail: 'Mail capabilities (read, draft, send) need at least one mail account (gmail-…, microsoft-…, imap-…)',
   productivity: 'Calendar/contacts capabilities need at least one Google productivity account (gprod-…)',
   slack: 'Slack capabilities (slack_read, slack_send) need at least one Slack workspace (slack-…)',
   whatsapp: 'WhatsApp capabilities (whatsapp_read, whatsapp_send) need at least one WhatsApp account (whatsapp-…)',
+  luma: 'Luma capabilities (luma_read, luma_events, luma_guests, luma_blast) need at least one Luma account (luma-…)',
 };
 
 export function familyOf(id: string): AccountFamily {
   if (id.startsWith('gprod-')) return 'productivity';
   if (id.startsWith('slack-')) return 'slack';
   if (id.startsWith('whatsapp-')) return 'whatsapp';
+  if (id.startsWith('luma-')) return 'luma';
   return 'mail';
 }
 const capFamily = (c: Capability): AccountFamily => (Object.keys(FAMILY_CAPS) as AccountFamily[]).find((f) => FAMILY_CAPS[f].includes(c))!;
@@ -95,6 +103,7 @@ function accountIdsOf(data: StoreData, family: AccountFamily): string[] {
   if (family === 'mail') return mailAccountIds(data);
   if (family === 'productivity') return productivityAccountIds(data);
   if (family === 'slack') return data.slack.map((w) => w.id);
+  if (family === 'luma') return data.luma.map((a) => a.id);
   return data.whatsapp.map((a) => a.id);
 }
 
@@ -110,6 +119,7 @@ export function principalFromGrant(grant: ClientGrant): Principal {
     productivityAccounts: of('productivity'),
     slackAccounts: of('slack'),
     whatsappAccounts: of('whatsapp'),
+    lumaAccounts: of('luma'),
   };
 }
 
@@ -125,6 +135,17 @@ export function assertSlackCapability(p: Principal, accountId: string, cap: Slac
   const accountOk = p.slackAccounts === 'all' || p.slackAccounts.has(accountId);
   if (!p.capabilities.has(cap) || !accountOk) {
     throw new PerchError(`Capability "${cap}" is not granted to this client for workspace ${accountId}`, 'capability_denied');
+  }
+}
+
+/** Throws unless the principal holds `cap` for the Luma account `accountId`. The operator only reads. */
+export function assertLumaCapability(p: Principal, accountId: string, cap: LumaCapability): void {
+  if (p.kind === 'operator_readonly' && cap !== 'luma_read') {
+    throw new PerchError(`This connection is read-only. "${cap}" on Luma needs a client grant: perch client add --allow ${cap}`, 'capability_denied');
+  }
+  const accountOk = p.lumaAccounts === 'all' || p.lumaAccounts.has(accountId);
+  if (!p.capabilities.has(cap) || !accountOk) {
+    throw new PerchError(`Capability "${cap}" is not granted to this client for Luma account ${accountId}`, 'capability_denied');
   }
 }
 
@@ -270,6 +291,7 @@ const UNKNOWN_ACCOUNT: Record<AccountFamily, string> = {
   productivity: 'Unknown Google productivity account',
   slack: 'Unknown Slack workspace',
   whatsapp: 'Unknown WhatsApp account',
+  luma: 'Unknown Luma account',
 };
 
 function validateGrantShape(data: StoreData, capabilities: Capability[], accountIds: string[]): void {
