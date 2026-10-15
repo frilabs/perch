@@ -40,8 +40,9 @@ export async function cmdLuma(config: PerchConfig, io: CliIo, sub: string | unde
   if (sub === 'remove') {
     const id = rest[0];
     if (!id) throw usage('Usage: perch luma remove ID [--revoke]');
-    const revoked = await removeLumaAccount(store, upstream, id, Boolean(values.revoke));
+    const { revoked, removedGrants } = await removeLumaAccount(store, upstream, id, Boolean(values.revoke));
     io.stdout(`Removed ${id} locally.${revoked ? ' The token was revoked at Luma.' : values.revoke ? ' Luma offers no revocation endpoint; remove the app in your Luma settings.' : ''}\n`);
+    if (removedGrants.length) io.stdout(`Client grants that covered only this account were removed: ${removedGrants.join(', ')}\n`);
     return;
   }
   if (sub === 'tools') {

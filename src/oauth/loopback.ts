@@ -54,6 +54,7 @@ export async function runPkceLoopback<T>(opts: PkceLoopbackOptions<T>): Promise<
 
   let settle!: { resolve: (code: string) => void; reject: (e: Error) => void };
   const codePromise = new Promise<string>((resolve, reject) => (settle = { resolve, reject }));
+  codePromise.catch(() => {}); // a timeout during prepare() must not become an unhandled rejection
   let done = false;
 
   const server = createServer((req, res) => {

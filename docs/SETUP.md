@@ -474,7 +474,7 @@ Luma erkennt Perch an seinem Client ID Metadata Document `https://fritzkuermayr.
 2. Den Workflow **Pages** einmal laufen lassen (läuft automatisch bei Änderungen an `pages/` auf `main`).
 3. Prüfen: `curl -s https://fritzkuermayr.github.io/perch/luma-client.json`.
 
-Bietet Luma statt CIMD nur Dynamic Client Registration an, nutzt Perch das automatisch; dann wird das Dokument nicht gebraucht. Andere Betreiber können mit `PERCH_LUMA_CLIENT_ID` ein eigenes Dokument angeben.
+Bietet Luma Dynamic Client Registration an, registriert sich Perch dort selbst (bevorzugt, Spec §3); dann wird das Dokument nicht gebraucht. Andere Betreiber können mit `PERCH_LUMA_CLIENT_ID` ein eigenes Dokument angeben.
 
 ### 4g.2 Konto verbinden
 
@@ -509,14 +509,14 @@ perch client add --label "Claude Gäste" --allow luma_read,luma_guests,luma_blas
 perch oauth grant oc-0123456789abcdef --allow luma_read,luma_events --account luma-1a2b3c4d   # öffentliches Gerät
 ```
 
-- `update_event` mit `email_guests: true` schreibt Gästen und braucht deshalb zusätzlich `luma_guests`.
-- **Blasts:** Der Client nennt in `confirmRecipientCount`, wie viele Gäste die Rundmail erreichen soll. Perch zählt die Gäste der gewählten Status unmittelbar vor dem Senden über `list_guests` und sendet nur bei Übereinstimmung. Ticket-Filter und `checked_in` kann Perch nicht nachzählen; solche Blasts gehen nur in Luma selbst.
+- E-Mails an Dritte brauchen zusätzlich `luma_guests`: `update_event` mit `email_guests: true`, `approve_calendar_events` (benachrichtigt immer die Einreichenden) und `reject_calendar_events` mit Benachrichtigung.
+- **Blasts:** nur sofort (kein `scheduled_for`) und nur mit ausdrücklichem `recipient_groups`, z. B. `[{"status": "approved"}]`. Der Client nennt in `confirmRecipientCount`, wie viele Gäste die Rundmail erreichen soll. Perch zählt die Gäste dieser Status unmittelbar vor dem Senden über `list_guests` und sendet nur bei Übereinstimmung. Ticket-Filter und `checked_in` kann Perch nicht nachzählen; solche Blasts gehen nur in Luma selbst.
 - **Schreiben ist idempotent** pro `requestId` (wie Mail, Slack, WhatsApp). Ergebnis `accepted`, `rejected` oder `indeterminate`; Perch wiederholt nie selbst. `luma_write_status` zeigt den Ausgang.
 
 ### 4g.4 Grenzen
 
 - Perch hängt an Lumas Toolnamen und Schemas. Ändert Luma ein erlaubtes Tool, sperrt Perch es, bis `perch luma tools <id> --accept` die neue Fassung übernimmt. Tools mit neuen, Perch unbekannten Feldern bleiben gesperrt, bis Perch aktualisiert ist. Die Prüfung erkennt Änderungen an der Struktur, nicht an Beschreibungen.
-- Verschachtelte Felder reicht Perch so weiter, wie Lumas Schema sie erlaubt; geprüft wird die oberste Ebene.
+- Felder, die das freigegebene Schema nicht nennt, lehnt Perch ab, auch verschachtelt.
 - Luma-Tools haben keine eigene Idempotenz. Bricht ein Aufruf mittendrin ab, ist der Ausgang unklar; dann in Luma nachsehen.
 - Zwischen Zählen und Senden eines Blasts können sich Gäste an- oder abmelden.
 

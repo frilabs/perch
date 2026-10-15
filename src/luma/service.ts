@@ -16,6 +16,8 @@ const LIVE_TTL_MS = 10 * 60 * 1000;
 /** Blast check: at most this many guest pages (50 each) are counted. */
 const MAX_COUNT_PAGES = 100;
 const BLAST_STATUSES = new Set(['approved', 'pending_approval', 'waitlist', 'invited']);
+/** Per account result handed to the MCP client (~1 MB of JSON text). */
+const MAX_RESULT_CHARS = 1_000_000;
 
 export interface LumaProvenance {
   accountId: string;
@@ -100,24 +102,29 @@ export async function registerLumaAccount(
   return { account, blocked, missing };
 }
 
-export async function removeLumaAccount(store: CredentialStore, upstream: Upstream, id: string, revoke: boolean): Promise<boolean> {
+export async function removeLumaAccount(store: CredentialStore, upstream: Upstream, id: string, revoke: boolean): Promise<{ revoked: boolean; removedGrants: string[] }> {
   const account = (await store.read()).luma.find((a) => a.id === id);
   if (!account) throw new PerchError(`Unknown Luma account: ${id}`, 'unknown_account');
   let revoked = false;
   if (revoke) revoked = await revokeLumaToken(upstream, account).catch(() => false);
+  const removedGrants: string[] = [];
   await store.update((data) => {
     data.luma = data.luma.filter((a) => a.id !== id);
     data.clients = data.clients
       .map((c) => ({ ...c, accountIds: c.accountIds.filter((x) => x !== id) }))
-      .filter((c) => c.accountIds.length > 0 || !c.capabilities.some((cap) => cap.startsWith('luma_')));
+      .filter((c) => {
+        const keep = c.accountIds.length > 0;
+        if (!keep) removedGrants.push(c.id);
+        return keep;
+      });
   });
-  return revoked;
+  return { revoked, removedGrants };
 }
 
 export class LumaService {
   private readonly live = new Map<string, { at: number; tools: Map<string, string> }>();
-  /** Approved schemas by Luma tool name (from the store; refreshed before each MCP server is built). */
-  private approved = new Map<string, { schema: Record<string, unknown>; description?: string }>();
+  /** Approved tools per account (from the store; refreshed before each MCP server is built). */
+  private approved: Array<{ accountId: string; tools: LumaToolSnapshot[] }> = [];
 
   constructor(
     private readonly store: CredentialStore,
@@ -130,14 +137,25 @@ export class LumaService {
 
   /** Re-reads the approved tool schemas (call before building an MCP server). */
   async refresh(): Promise<void> {
-    const next = new Map<string, { schema: Record<string, unknown>; description?: string }>();
-    for (const a of (await this.store.read()).luma) for (const t of a.tools) if (!next.has(t.name)) next.set(t.name, { schema: t.schema, ...(t.description ? { description: t.description } : {}) });
-    this.approved = next;
+    this.approved = (await this.store.read()).luma.map((a) => ({ accountId: a.id, tools: a.tools }));
   }
 
-  /** Approved tools to expose (name and JSON input schema), synchronous for createMcpServer. */
-  exposed(): Array<{ name: string; schema: Record<string, unknown>; description?: string }> {
-    return [...this.approved].filter(([n]) => LUMA_TOOLS[n]).map(([name, t]) => ({ name, ...t }));
+  /**
+   * Tools to expose to `p` (synchronous for createMcpServer): approved for at least one account `p` may use.
+   * If those accounts approved different schemas for a tool, it is not offered (one schema must fit all).
+   */
+  exposed(p: Principal): Array<{ name: string; schema: Record<string, unknown>; description?: string }> {
+    const byName = new Map<string, LumaToolSnapshot | null>();
+    for (const a of this.approved) {
+      if (!(p.lumaAccounts === 'all' || p.lumaAccounts.has(a.accountId))) continue;
+      for (const t of a.tools) {
+        if (!LUMA_TOOLS[t.name]) continue;
+        const seen = byName.get(t.name);
+        if (seen === undefined) byName.set(t.name, t);
+        else if (seen !== null && seen.hash !== t.hash) byName.set(t.name, null);
+      }
+    }
+    return [...byName.values()].filter((t): t is LumaToolSnapshot => t !== null).map((t) => ({ name: t.name, schema: t.schema, ...(t.description ? { description: t.description } : {}) }));
   }
 
   private async account(id: unknown): Promise<LumaAccount> {
@@ -171,10 +189,10 @@ export class LumaService {
   }
 
   /** The tool's live schema must still equal the approved one (trust on first use). */
-  private async assertUsable(a: LumaAccount, name: string, token: string): Promise<void> {
+  private async assertUsable(a: LumaAccount, name: string, token: string, fresh = false): Promise<void> {
     const approved = a.tools.find((t) => t.name === name);
     if (!approved) throw new PerchError(`Luma tool ${name} is not approved for ${a.id} (perch luma tools ${a.id})`, 'luma_tool_blocked');
-    const live = (await this.liveHashes(a, token)).get(name);
+    const live = (await this.liveHashes(a, token, fresh)).get(name);
     if (live !== approved.hash) {
       throw new PerchError(`Luma changed or removed the tool ${name}; it is blocked until the operator reviews it (perch luma tools ${a.id} --accept)`, 'luma_tool_changed');
     }
@@ -198,7 +216,10 @@ export class LumaService {
         await this.assertUsable(a, name, token);
         return this.mcp.callTool(token, name, lumaArgs);
       });
-    const shape = (a: LumaAccount, r: LumaCallResult) => ({ ...this.prov(a), ...(r.isError ? { isError: true } : {}), result: r.data });
+    const shape = (a: LumaAccount, r: LumaCallResult) => {
+      if (JSON.stringify(r.data ?? null).length > MAX_RESULT_CHARS) throw new PerchError('The Luma result is too large; narrow the request (limit, filters)', 'response_too_large');
+      return { ...this.prov(a), ...(r.isError ? { isError: true } : {}), result: r.data };
+    };
     if (accountId !== undefined) {
       if (typeof accountId !== 'string') throw new PerchError('accountId must be a string', 'bad_argument');
       assertLumaCapability(p, accountId, 'luma_read');
@@ -206,6 +227,7 @@ export class LumaService {
       return shape(a, await one(a));
     }
     if (!p.capabilities.has('luma_read')) throw new PerchError('Capability "luma_read" is not granted to this client', 'capability_denied');
+    if (lumaArgs.cursor !== undefined) throw new PerchError('A cursor belongs to one Luma account: pass accountId with it', 'bad_argument');
     const accounts = (await this.store.read()).luma.filter((a) => (p.lumaAccounts === 'all' || p.lumaAccounts.has(a.id)) && a.tools.some((t) => t.name === name));
     if (!accounts.length) throw new PerchError('No Luma account offers this tool (perch luma list)', 'unknown_account');
     if (accounts.length === 1) return shape(accounts[0]!, await one(accounts[0]!));
@@ -228,7 +250,9 @@ export class LumaService {
 
   /** Guests a blast with these recipient groups reaches (counted via list_guests, Spec §6 Gegenprobe). */
   private async countRecipients(a: LumaAccount, token: string, eventId: string, groups: unknown): Promise<number> {
-    const statuses = Array.isArray(groups) && groups.length ? (groups as Array<{ status?: unknown }>).map((g) => g.status) : ['approved'];
+    // The counting tool is pinned like any other (a renamed filter must not silently count everyone).
+    await this.assertUsable(a, 'list_guests', token, true);
+    const statuses = (groups as Array<{ status: string }>).map((g) => g.status);
     const seen = new Set<string>();
     let count = 0;
     for (const status of new Set(statuses)) {
@@ -250,7 +274,8 @@ export class LumaService {
           }
         }
         const next = typeof d.next_cursor === 'string' && d.next_cursor ? d.next_cursor : undefined;
-        if (!next || d.has_more === false) break;
+        if (d.has_more === false || (d.has_more === undefined && !next)) break;
+        if (!next) throw new PerchError('Could not count the guests (more pages, but no cursor)', 'luma_count_failed');
         cursor = next;
         if (page === MAX_COUNT_PAGES - 1) throw new PerchError('Too many guests to verify the recipient count', 'luma_count_failed');
       }
@@ -259,7 +284,7 @@ export class LumaService {
   }
 
   /** Writes: idempotent per requestId (src/messaging/send.ts), one attempt, outcome accepted/rejected/indeterminate. */
-  async write(p: Principal, name: string, raw: Record<string, unknown>): Promise<Omit<MessageSendView, 'providerMessageId'> & Partial<LumaProvenance> & { lumaTool: string; result?: unknown }> {
+  async write(p: Principal, name: string, raw: Record<string, unknown>): Promise<Omit<MessageSendView, 'providerMessageId'> & Partial<LumaProvenance> & { lumaTool: string; result?: unknown; lumaError?: string }> {
     const policy = LUMA_TOOLS[name];
     if (!policy || policy.group === 'read') throw new PerchError(`Unknown Luma write tool: ${name}`, 'bad_argument');
     const cap = GROUP_CAPABILITY[policy.group];
@@ -267,6 +292,7 @@ export class LumaService {
     let account: LumaAccount | undefined;
     let caps: string[] = [cap];
     let result: unknown;
+    let lumaError: string | undefined;
     const view = await sendMessageIdempotently({
       workflow: this.workflow,
       audit: this.audit,
@@ -291,25 +317,26 @@ export class LumaService {
       attempt: async (binding) => {
         const r = await this.attempt(p, name, raw, lumaArgs, caps, binding);
         result = r.result;
+        lumaError = r.lumaError;
         return r.outcome;
       },
     });
     const { providerMessageId: _unused, ...rest } = view;
-    return { ...(account ? this.prov(account) : {}), lumaTool: name, ...rest, ...(result !== undefined ? { result } : {}) };
+    return { ...(account ? this.prov(account) : {}), lumaTool: name, ...rest, ...(result !== undefined ? { result } : {}), ...(lumaError !== undefined ? { lumaError } : {}) };
   }
 
   private checkBlastInput(raw: Record<string, unknown>, lumaArgs: Record<string, unknown>): void {
     const n = raw.confirmRecipientCount;
     if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) throw new PerchError('confirmRecipientCount is required: the number of guests the blast should reach', 'bad_argument');
     const groups = lumaArgs.recipient_groups;
-    if (groups !== undefined) {
-      if (!Array.isArray(groups)) throw new PerchError('recipient_groups must be a list', 'bad_argument');
-      for (const g of groups as Array<Record<string, unknown>>) {
-        if (!g || typeof g !== 'object' || typeof g.status !== 'string' || !BLAST_STATUSES.has(g.status)) {
-          throw new PerchError('Perch can verify blasts to approved, pending_approval, waitlist or invited guests only', 'bad_argument');
-        }
-        if (g.ticket_type_id !== undefined && g.ticket_type_id !== null) throw new PerchError('Perch cannot verify blasts filtered by ticket type; send those in Luma itself', 'bad_argument');
+    // Explicit audience only: Luma's default audience is not something Perch can verify.
+    if (!Array.isArray(groups) || groups.length === 0) throw new PerchError('recipient_groups is required for blasts through Perch, e.g. [{"status": "approved"}]', 'bad_argument');
+    for (const g of groups as Array<Record<string, unknown>>) {
+      if (!g || typeof g !== 'object' || Object.keys(g).some((k) => k !== 'status' && k !== 'ticket_type_id')) throw new PerchError('Each recipient group may only name status (and no ticket filter)', 'bad_argument');
+      if (typeof g.status !== 'string' || !BLAST_STATUSES.has(g.status)) {
+        throw new PerchError('Perch can verify blasts to approved, pending_approval, waitlist or invited guests only', 'bad_argument');
       }
+      if (g.ticket_type_id !== undefined && g.ticket_type_id !== null) throw new PerchError('Perch cannot verify blasts filtered by ticket type; send those in Luma itself', 'bad_argument');
     }
     if (typeof lumaArgs.event_id !== 'string') throw new PerchError('event_id is required', 'bad_argument');
   }
@@ -321,7 +348,7 @@ export class LumaService {
     lumaArgs: Record<string, unknown>,
     caps: string[],
     binding: string,
-  ): Promise<{ outcome: MessageSendResult; result?: unknown }> {
+  ): Promise<{ outcome: MessageSendResult; result?: unknown; lumaError?: string }> {
     const notSent = (detail: string, reason: MessageSendResult['reason']) => ({ outcome: { status: 'rejected' as const, detail: `Not done: ${detail}`, reason } });
     const accountId = raw.accountId as string;
     try {
@@ -336,7 +363,7 @@ export class LumaService {
     let token: string;
     try {
       token = await this.tokens.getAccessToken(a.id);
-      await this.assertUsable(a, name, token);
+      await this.assertUsable(a, name, token, true);
       if (name === 'create_blast') {
         const actual = await this.countRecipients(a, token, lumaArgs.event_id as string, lumaArgs.recipient_groups);
         if (actual !== raw.confirmRecipientCount) {
@@ -344,18 +371,24 @@ export class LumaService {
         }
       }
     } catch (err) {
+      if (err instanceof PerchError && err.code === 'luma_unauthorized') this.tokens.invalidate(a.id);
       return notSent(err instanceof PerchError ? err.message : 'precheck failed', 'not_submitted_provider_precheck');
     }
     let r: LumaCallResult;
     try {
       r = await this.mcp.callTool(token, name, lumaArgs);
     } catch (err) {
-      if (err instanceof PerchError && err.code === 'luma_unauthorized') return notSent('Luma rejected the access token (nothing was processed); try again', 'provider_rejected');
+      if (err instanceof PerchError && err.code === 'luma_unauthorized') {
+        this.tokens.invalidate(a.id);
+        return notSent('Luma rejected the access token (nothing was processed); try again with a new requestId', 'provider_rejected');
+      }
+      if (err instanceof PerchError && err.code === 'luma_not_sent') return notSent('the Luma MCP server could not be reached; nothing was sent', 'not_submitted_provider_precheck');
       return { outcome: { status: 'indeterminate', detail: 'The request to Luma failed after it may have been processed; the outcome is unknown. Check in Luma.', reason: 'provider_unknown' } };
     }
     if (r.isError) {
+      // Luma's own error text (untrusted) goes back to the caller as a separate field, never into the ledger.
       const text = typeof r.data === 'string' ? r.data : JSON.stringify(r.data);
-      return { outcome: { status: 'rejected', detail: `Luma refused it: ${text.slice(0, 300)}`, reason: 'provider_rejected' } };
+      return { outcome: { status: 'rejected', detail: 'Luma refused it (see lumaError).', reason: 'provider_rejected' }, lumaError: text.slice(0, 300) };
     }
     return { outcome: { status: 'accepted', detail: 'Done in Luma.', reason: 'provider_accepted' }, result: r.data };
   }
@@ -420,5 +453,7 @@ export class LumaService {
     const a = await this.account(id);
     const r = await this.withToken(a, (t) => this.mcp.callTool(t, 'get_self', {}));
     if (r.isError) throw new PerchError('Luma answered get_self with an error', 'luma_failed');
+    const blocked = (await this.toolStates(id)).filter((t) => t.state === 'changed' || t.state === 'new_fields' || (t.state === 'missing' && a.tools.some((x) => x.name === t.name)));
+    if (blocked.length) throw new PerchError(`Luma changed ${blocked.length} approved tool(s) (${blocked.map((t) => t.name).join(', ')}); they are blocked: perch luma tools ${id}`, 'luma_tool_changed');
   }
 }

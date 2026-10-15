@@ -1,5 +1,5 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { PerchError } from '../errors.js';
 import { PERCH_VERSION } from '../version.js';
 import { LUMA_MCP_URL } from './oauth.js';
@@ -64,19 +64,25 @@ export interface LumaCallResult {
 export class LumaMcp {
   constructor(private readonly fetchImpl: FetchLike = guardedLumaFetch()) {}
 
+  /**
+   * Errors: `luma_unauthorized` (HTTP 401: nothing was processed), `luma_not_sent` (failed before the work
+   * request was sent, e.g. during initialize), `luma_failed` (failed after it may have been processed).
+   */
   private async session<T>(accessToken: string, fn: (c: Client) => Promise<T>): Promise<T> {
     const transport = new StreamableHTTPClientTransport(new URL(LUMA_MCP_URL), {
       fetch: this.fetchImpl,
       requestInit: { headers: { authorization: `Bearer ${accessToken}` } },
     });
     const client = new Client({ name: 'perch', version: PERCH_VERSION });
+    let connected = false;
     try {
       await client.connect(transport);
+      connected = true;
       return await fn(client);
     } catch (err) {
-      if (err instanceof PerchError) throw err;
-      const msg = err instanceof Error ? err.message : '';
-      if (/\b401\b|unauthori[sz]ed|invalid_token/i.test(msg)) throw new PerchError('Luma rejected the access token', 'luma_unauthorized');
+      if (err instanceof PerchError && err.code !== 'upstream_unreachable') throw err;
+      if (err instanceof StreamableHTTPError && err.code === 401) throw new PerchError('Luma rejected the access token', 'luma_unauthorized');
+      if (!connected) throw new PerchError('Could not reach the Luma MCP server; nothing was sent', 'luma_not_sent');
       throw new PerchError('The Luma MCP request failed', 'luma_failed');
     } finally {
       await client.close().catch(() => {});
