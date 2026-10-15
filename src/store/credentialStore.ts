@@ -145,6 +145,41 @@ const WhatsappAccountSchema = z.object({
   updatedAt: z.string(),
 });
 
+/** Approved Luma tool (trust on first use): its JSON input schema as Perch exposes it and a structural hash. */
+const LumaToolSnapshotSchema = z.object({
+  name: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
+  hash: z.string().regex(/^[a-f0-9]{64}$/),
+  schema: z.record(z.string(), z.unknown()),
+  /** Luma's description of the tool (documentation only, not part of the hash). */
+  description: z.string().max(4000).optional(),
+});
+
+/**
+ * Luma account connected to the official Luma MCP server (https://mcp.luma.com) with OAuth (docs/LUMA_SPEC.md).
+ * The authorization server endpoints come from Luma's metadata at onboarding (Luma hosts only). `tools` are the
+ * approved tool schemas; a changed schema is blocked until the operator accepts it (perch luma tools --accept).
+ */
+const LumaAccountSchema = z.object({
+  id: z.string().regex(/^luma-[a-f0-9]{8}$/),
+  label: z.string().min(1).max(100),
+  userId: z.string().max(200).optional(),
+  name: z.string().max(200).optional(),
+  email: z.string().max(254).optional(),
+  clientId: z.string().min(1).max(512),
+  registration: z.enum(['cimd', 'dcr']),
+  issuer: z.string().max(500),
+  tokenEndpoint: z.string().max(500),
+  revocationEndpoint: z.string().max(500).optional(),
+  /** RFC 8707 resource value announced by Luma's protected resource metadata. */
+  resource: z.string().max(200).optional(),
+  refreshToken: z.string().min(1),
+  scopes: z.array(z.string().max(200)).max(50),
+  tools: z.array(LumaToolSnapshotSchema).max(100),
+  toolsApprovedAt: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
 /** Mail capabilities (email milestone) apply to mail accounts only. */
 export const MAIL_CAPABILITIES = ['read', 'draft', 'send'] as const;
 /** Calendar/Contacts capabilities apply to Google productivity accounts (gprod-…) only. */
@@ -153,7 +188,9 @@ export const PRODUCTIVITY_CAPABILITIES = ['calendar_read', 'calendar_write', 'co
 export const SLACK_CAPABILITIES = ['slack_read', 'slack_send'] as const;
 /** WhatsApp capabilities apply to WhatsApp accounts (whatsapp-…) only. */
 export const WHATSAPP_CAPABILITIES = ['whatsapp_read', 'whatsapp_send'] as const;
-export const CAPABILITIES = [...MAIL_CAPABILITIES, ...PRODUCTIVITY_CAPABILITIES, ...SLACK_CAPABILITIES, ...WHATSAPP_CAPABILITIES] as const;
+/** Luma capabilities apply to Luma accounts (luma-…) only (docs/LUMA_SPEC.md §5). */
+export const LUMA_CAPABILITIES = ['luma_read', 'luma_events', 'luma_guests', 'luma_blast'] as const;
+export const CAPABILITIES = [...MAIL_CAPABILITIES, ...PRODUCTIVITY_CAPABILITIES, ...SLACK_CAPABILITIES, ...WHATSAPP_CAPABILITIES, ...LUMA_CAPABILITIES] as const;
 
 /** Local per-client grant. Only the SHA-256 of the (high-entropy) client token is stored. */
 const ClientGrantSchema = z.object({
@@ -209,6 +246,8 @@ const StoreDataSchema = z.object({
   slack: z.array(SlackWorkspaceSchema).default([]),
   whatsappInstance: WhatsappInstanceSchema.optional(),
   whatsapp: z.array(WhatsappAccountSchema).default([]),
+  // Added by the Luma milestone.
+  luma: z.array(LumaAccountSchema).default([]),
 });
 
 export type GoogleAccount = z.infer<typeof GoogleAccountSchema>;
@@ -223,6 +262,9 @@ export type WhatsappInstance = z.infer<typeof WhatsappInstanceSchema>;
 export type WhatsappAccount = z.infer<typeof WhatsappAccountSchema>;
 export type SlackCapability = (typeof SLACK_CAPABILITIES)[number];
 export type WhatsappCapability = (typeof WHATSAPP_CAPABILITIES)[number];
+export type LumaCapability = (typeof LUMA_CAPABILITIES)[number];
+export type LumaAccount = z.infer<typeof LumaAccountSchema>;
+export type LumaToolSnapshot = z.infer<typeof LumaToolSnapshotSchema>;
 export type UserRecord = z.infer<typeof UserSchema>;
 export type Capability = (typeof CAPABILITIES)[number];
 export type MailCapability = (typeof MAIL_CAPABILITIES)[number];
@@ -249,6 +291,7 @@ const emptyData = (): StoreData => ({
   users: [],
   slack: [],
   whatsapp: [],
+  luma: [],
   // initStore creates the ledger before the store, so a new store is born with it.
   mailWorkflowLedger: { createdAt: new Date().toISOString() },
 });

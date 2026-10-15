@@ -32,6 +32,8 @@ export interface PerchConfig {
   notifyTelegramFile?: string;
   /** Trust X-Forwarded-For from a loopback proxy for the shown IP and limits. */
   publicTrustForwarded: boolean;
+  /** Overrides Perch's built-in Client ID Metadata Document URL for Luma. */
+  lumaClientId?: string;
 }
 
 /**
@@ -86,6 +88,7 @@ export function resolveConfig(env: Record<string, string | undefined>): PerchCon
     oauthDcr: flag('PERCH_OAUTH_DCR', true),
     ...(env.PERCH_NOTIFY_TELEGRAM_FILE ? { notifyTelegramFile: path.resolve(env.PERCH_NOTIFY_TELEGRAM_FILE) } : {}),
     publicTrustForwarded: flag('PERCH_PUBLIC_TRUST_FORWARDED', false),
+    ...(env.PERCH_LUMA_CLIENT_ID ? { lumaClientId: env.PERCH_LUMA_CLIENT_ID.trim() } : {}),
   };
 }
 
