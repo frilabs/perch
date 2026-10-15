@@ -74,7 +74,7 @@ Usage:
   perch oauth totp setup | status | recovery-codes      the Perch code (TOTP) for every pairing
   perch oauth login-allow add|remove EMAIL | list       Google accounts that may sign in
   perch oauth devices | revoke ID | revoke --all        paired devices
-  perch oauth grant ID --allow CAPS --account ID ... | ungrant ID   write capabilities of a device (like perch client add)
+  perch oauth grant ID --allow CAPS --account ID ... | ungrant ID --read-all   write capabilities of a device (like perch client add)
   perch oauth client add --name N --redirect URI | add --cimd URL | list | remove ID   extra OAuth clients
   perch oauth local-page enable | disable       local pairing page /local/pair with its own password
   perch accounts                               list all connected accounts
@@ -844,6 +844,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         phone: { type: 'string' },
         'keep-device': { type: 'boolean' },
         'no-check': { type: 'boolean' },
+        'read-all': { type: 'boolean' },
         public: { type: 'boolean' },
         name: { type: 'string' },
         redirect: { type: 'string', multiple: true },

@@ -413,6 +413,18 @@ describe('revocation, kill switch and rights', () => {
     expect((await listAccounts(tokens.access_token!)).status).toBe(200); // a known device is not locked out
   });
 
+  it('17d: a token issued during the invalid-bearer block (refresh, before its first use) still passes', async () => {
+    const { tokens } = await pairAndExchange(h);
+    for (let i = 0; i < 20; i++) await listAccounts('B'.repeat(43));
+    expect((await listAccounts('D'.repeat(43))).status).toBe(401); // blocked
+    const refreshed = JSON.parse(
+      (await h.http('POST', '/oauth/token', { body: form({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token!, client_id: 'https://claude.ai/oauth/mcp-oauth-client-metadata' }) })).body,
+    );
+    expect(refreshed.access_token).toBeTruthy();
+    expect((await listAccounts(refreshed.access_token)).status).toBe(200); // never used before, but issued by Perch
+    expect((await listAccounts(tokens.access_token!)).status).toBe(401); // the replaced token stays invalid
+  });
+
   it('17b: every pairing step leaves a secret-free audit trail; notifications carry no links or secrets', async () => {
     const a = await pairAndExchange(h);
     const ledger = await h.context.audit.list({ limit: 100 });
