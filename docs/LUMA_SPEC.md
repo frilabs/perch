@@ -1,6 +1,6 @@
 # Briefing und Spezifikation (Entwurf): Luma über den offiziellen Luma-MCP
 
-Stand 2026-10-15. **Status: Entwurf, nicht freigegeben.** Grundlage: Fritz' Wunsch „Perch soll auch den Luma MCP connecten“ und der Designvorschlag vom 2026-10-15 (Lesen, Events anlegen/ändern, Gäste einladen/freigeben, Blasts senden; kein Luma Plus vorhanden). Laut `AGENTS.md` wird erst nach Fritz' Freigabe Code geschrieben.
+Stand 2026-10-15. **Status: Freigegeben** (Fritz am 2026-10-15: „perch repo, mit gegenprobe, ja, passt. Implementiere“). **Umgesetzt**, nur mit Mocks getestet; Abweichungen in §10. Grundlage: Fritz' Wunsch „Perch soll auch den Luma MCP connecten“ und der Designvorschlag vom 2026-10-15 (Lesen, Events anlegen/ändern, Gäste einladen/freigeben, Blasts senden; kein Luma Plus vorhanden). Laut `AGENTS.md` wird erst nach Fritz' Freigabe Code geschrieben.
 
 ## 1. Ziel
 
@@ -94,3 +94,13 @@ Die Einteilung wird nach §2 Punkt 3 gegen die echte Tool-Liste geprüft.
 2. **Blasts:** wie in §6 mit Bestätigung der Empfängerzahl (Empfehlung), oder vorerst gar nicht?
 3. **Gäste einladen:** Sollen Einladungen an Adressen gehen dürfen, die noch nie Gast in einem eigenen Event waren? Empfehlung: ja, aber höchstens *50* Adressen pro Aufruf.
 4. **Grenzfälle der Einteilung:** `add_host` und Coupons stehen in „gar nicht“. Passt das?
+
+## 10. Umsetzung und Abweichungen (2026-10-15)
+
+- **Entscheidungen §9:** Client-Dokument auf GitHub Pages des Perch-Repos (`pages/luma-client.json`, Workflow `.github/workflows/pages.yml`, veröffentlicht nur `pages/`); Blasts mit Gegenprobe; Einladungen höchstens 50 pro Aufruf; `add_host` und Coupons nie.
+- **Schema-Pin statt eigener zod-Schemas:** Statt die (sehr großen) Luma-Schemas abzuschreiben, merkt sich Perch beim `perch luma add` die Schemas der erlaubten Tools mit einem Strukturhash (Trust on first use; Beschreibungen zählen nicht). Abweichung oder Wegfall sperrt das Tool bis `perch luma tools <id> --accept`. Tools mit Perch unbekannten Feldern auf oberster Ebene werden nie freigegeben. Perch registriert seine MCP-Tools aus den gespeicherten Schemas (`z.fromJSONSchema`) und reicht nur bekannte Felder der obersten Ebene weiter; Verschachteltes prüft Luma.
+- **Zusätzliche Regeln:** `update_event` mit `email_guests: true` braucht zusätzlich `luma_guests`; `update_guest_status` mit `should_refund: true` lehnt Perch ab.
+- **Blast-Gegenprobe:** gezählt werden die Status `approved`, `pending_approval`, `waitlist`, `invited` über `list_guests` (seitenweise, doppelte Gäste einmal). Blasts mit Ticket-Filter oder an `checked_in` lehnt Perch ab, weil es sie nicht nachzählen kann. Ein unbekanntes Antwortformat von `list_guests` führt zur Ablehnung (fail closed).
+- **Zusätzliches Tool:** `luma_write_status` (Ausgang eines eigenen früheren Schreibaufrufs).
+- **Keine neuen Abhängigkeiten:** MCP-Client aus dem vorhandenen SDK; nur `https://mcp.luma.com/mcp` erreichbar, keine Redirects, kein SSE-Rückkanal (GET), Antworten höchstens 8 MiB, Timeout 30 s. OAuth-Endpunkte nur auf `luma.com`, `lu.ma` und deren Subdomains.
+- **Weiter live zu prüfen (§2):** Registrierungsart, Refresh-Verhalten, echte Tool-Liste und Antwortformat von `list_guests` und `get_self`.
