@@ -1,5 +1,15 @@
 # Handoff: Perch
 
+## Update 2026-10-15: Luma über den offiziellen Luma-MCP (Branch `claude/perch-oauth-internet-access-b0cg8c`, auf `main` nach PR #8)
+
+- **Freigabe:** Fritz: „perch repo, mit gegenprobe, ja, passt. Implementiere“ (`docs/LUMA_SPEC.md` §9).
+- **Umgesetzt** (Details: Spec §10; Einrichtung: `docs/SETUP.md` §4g): `src/luma/*` und `src/cli/luma.ts`. Perch ist MCP-Client von `https://mcp.luma.com` (OAuth mit PKCE und Resource Indicator; DCR, sonst Perchs Client-Dokument `pages/luma-client.json` über GitHub Pages). Feste Toolliste mit gepinnten Schemas (Trust on first use, `perch luma tools --accept`); lesen für das globale Token und `luma_read`, schreiben nur mit `luma_events` / `luma_guests` / `luma_blast`; Schreiben idempotent über den gemeinsamen Ledger; Blasts nur sofort, mit ausdrücklicher Zielgruppe und `confirmRecipientCount`, den Perch vor dem Senden nachzählt; keine Rückerstattungen, höchstens 50 Einladungen pro Aufruf; keine neuen Abhängigkeiten.
+- **Unabhängiger Review:** keine Blocker. Behoben mit Regressionstests: 401-Erkennung (ein toter Token blieb gecacht, Schreibaufrufe galten fälschlich als „unbekannt“), geplante Blasts (heute gezählt, später gesendet), Pin-Lücke bei Feldern namens `description`, verschachtelte Felder wurden ungeprüft weitergereicht, Blast-Zählung konnte bei Paginierung zu wenig zählen, gesperrte Tools in `perch status` unsichtbar, Schemas zwischen Konten geteilt, Mails an Dritte über `approve_calendar_events` ohne `luma_guests`. Bewusst offen: Spec §10 letzter Punkt.
+- **Getestet (nur Mocks):** `npm run check` als Nicht-Root grün: 689 Tests (53 Dateien), Smoke 11/11, Lizenzprüfung OK.
+- **Live verifiziert:** nichts.
+- **Nächste Schritte (Fritz):** GitHub Pages auf „GitHub Actions“ stellen (nur falls Luma kein DCR anbietet), `perch luma add --label …`, `perch luma tools <id>` prüfen, Grants anlegen. Dabei prüfen: Registrierungsart, Refresh-Verhalten, echte Toolliste, Antwortformate von `get_self` und `list_guests`.
+
+
 ## Update 2026-10-15: Zweiter Security-Review des öffentlichen Zugangs, Merge nach `main`
 
 - **Freigabe:** Fritz: „Merge auf main, wenn es passt“ (PR #8).

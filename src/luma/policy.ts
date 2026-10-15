@@ -105,12 +105,18 @@ export const perchToolName = (lumaName: string) => `luma_${lumaName}`;
 
 /**
  * Additional capability a concrete call needs, or a refusal (checked before any request to Luma):
- * - update_event with email_guests: true e-mails guests: it also needs luma_guests;
+ * - update_event with email_guests: true, approve_calendar_events and reject_calendar_events with a
+ *   notification e-mail third parties: they also need luma_guests;
+ * - create_blast only immediately (scheduled blasts would be counted now but sent later);
  * - update_guest_status never refunds payments through Perch;
  * - invite_guests at most MAX_INVITES_PER_CALL addresses per call.
  */
 export function callRules(name: string, args: Record<string, unknown>): { alsoNeeds?: LumaCapability; refuse?: string } {
   if (name === 'update_event' && args.email_guests === true) return { alsoNeeds: 'luma_guests' };
+  // Approving always notifies the submitter; rejecting does when asked to: e-mail to third parties.
+  if (name === 'approve_calendar_events') return { alsoNeeds: 'luma_guests' };
+  if (name === 'reject_calendar_events' && (args.notify_submitter === true || args.message !== undefined)) return { alsoNeeds: 'luma_guests' };
+  if (name === 'create_blast' && args.scheduled_for !== undefined) return { refuse: 'Perch sends blasts only immediately (the recipient count is checked now); schedule blasts in Luma itself' };
   if (name === 'update_guest_status' && args.should_refund === true) return { refuse: 'Perch never refunds payments; do that in Luma itself (should_refund must be false or omitted)' };
   if (name === 'invite_guests' && Array.isArray(args.guests) && args.guests.length > MAX_INVITES_PER_CALL) {
     return { refuse: `At most ${MAX_INVITES_PER_CALL} guests per invite_guests call` };
@@ -121,12 +127,19 @@ export function callRules(name: string, args: Record<string, unknown>): { alsoNe
 /** Keys that never change what a call does (documentation only): ignored by the structural hash. */
 const DOC_KEYS = new Set(['description', 'title', '$schema', 'examples', '$comment']);
 
-/** Canonical JSON of a schema without documentation keys, keys sorted (structural pin). */
-export function canonicalSchema(v: unknown): unknown {
-  if (Array.isArray(v)) return v.map(canonicalSchema);
+/** Schema keywords whose values are maps of NAME -> schema (names are data, never documentation keys). */
+const MAP_KEYWORDS = new Set(['properties', 'patternProperties', 'definitions', '$defs', 'dependentSchemas']);
+
+/** Canonical JSON of a schema without documentation keywords, keys sorted (structural pin). */
+export function canonicalSchema(v: unknown, isMap = false): unknown {
+  if (Array.isArray(v)) return v.map((x) => canonicalSchema(x));
   if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
     const out: Record<string, unknown> = {};
-    for (const k of Object.keys(v as Record<string, unknown>).sort()) if (!DOC_KEYS.has(k)) out[k] = canonicalSchema((v as Record<string, unknown>)[k]);
+    for (const k of Object.keys(o).sort()) {
+      if (isMap) out[k] = canonicalSchema(o[k]); // a property named "description" is a field, not documentation
+      else if (!DOC_KEYS.has(k)) out[k] = canonicalSchema(o[k], MAP_KEYWORDS.has(k));
+    }
     return out;
   }
   return v;

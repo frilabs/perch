@@ -204,8 +204,10 @@ export const AUTH_ORIGIN = 'https://auth.luma.com';
 export interface MockLumaAuth {
   transport: UpstreamTransport;
   calls: string[];
-  /** CIMD supported (otherwise only DCR). */
+  /** CIMD supported. */
   cimd: boolean;
+  /** Dynamic Client Registration offered (Perch prefers it, Spec §3). */
+  dcr: boolean;
   registered: string[];
   /** Refresh tokens currently valid (rotated on use). */
   refreshTokens: Set<string>;
@@ -220,6 +222,7 @@ export function mockLumaAuth(mcp: MockLuma): MockLumaAuth {
   const a: MockLumaAuth = {
     calls: [],
     cimd: true,
+    dcr: true,
     registered: [],
     refreshTokens: new Set(),
     failRefresh: false,
@@ -235,7 +238,7 @@ export function mockLumaAuth(mcp: MockLuma): MockLumaAuth {
           issuer: AUTH_ORIGIN,
           authorization_endpoint: `${AUTH_ORIGIN}/oauth/authorize`,
           token_endpoint: `${AUTH_ORIGIN}/oauth/token`,
-          registration_endpoint: `${AUTH_ORIGIN}/oauth/register`,
+          ...(a.dcr ? { registration_endpoint: `${AUTH_ORIGIN}/oauth/register` } : {}),
           revocation_endpoint: `${AUTH_ORIGIN}/oauth/revoke`,
           code_challenge_methods_supported: ['S256'],
           token_endpoint_auth_methods_supported: ['none'],

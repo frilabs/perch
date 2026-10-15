@@ -938,6 +938,16 @@ const LUMA_WRITE_NOTE =
   '(luma_write_status). The same requestId with identical arguments is never executed twice; with different arguments it fails. ' +
   '"accepted" = done in Luma, "rejected" = not done, "indeterminate" = unknown (Perch never retries; check in Luma).';
 
+/** Copy of a JSON schema where every object schema without additionalProperties gets additionalProperties: false. */
+function strictObjects(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(strictObjects);
+  if (!v || typeof v !== 'object') return v;
+  const o: Record<string, unknown> = {};
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) o[k] = strictObjects(x);
+  if (o.properties !== undefined && typeof o.properties === 'object' && o.additionalProperties === undefined) o.additionalProperties = false;
+  return o;
+}
+
 /**
  * Luma tools (docs/LUMA_SPEC.md): the approved schemas of the official Luma MCP server, converted to zod,
  * plus Perch's own fields. Reads for luma_read (and the read-only operator), writes only for the matching
@@ -952,14 +962,15 @@ function registerLumaTools(
 ): void {
   const lumaAccountId = z.string().max(64).describe('Luma account id from perch_list_accounts, e.g. luma-1a2b3c4d');
   let writes = false;
-  for (const t of ctx.luma.exposed()) {
+  for (const t of ctx.luma.exposed(principal)) {
     const policy = LUMA_TOOLS[t.name]!;
     const cap = GROUP_CAPABILITY[policy.group];
     const read = policy.group === 'read';
     if (!(read ? operator || principal.capabilities.has(cap) : principal.capabilities.has(cap))) continue;
     let base: z.ZodObject;
     try {
-      const schema = { ...t.schema };
+      // Nested objects become strict: a field Luma's approved schema does not name is refused, never passed on.
+      const schema = strictObjects(t.schema) as Record<string, unknown>;
       delete schema.$schema;
       const converted = z.fromJSONSchema(schema as Parameters<typeof z.fromJSONSchema>[0]);
       if (!(converted instanceof z.ZodObject)) continue;

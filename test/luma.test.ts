@@ -94,7 +94,8 @@ async function grant(caps: string[], accounts: string[]) {
 }
 
 describe('onboarding', () => {
-  it('connects via CIMD, pins the allowlisted tool schemas and never offers delete/host tools', async () => {
+  it('connects via CIMD (no DCR offered), pins the allowlisted tool schemas and never offers delete/host tools', async () => {
+    auth.dcr = false;
     const { out, id } = await addAccount();
     expect(out).toContain('via cimd');
     expect(out).toMatch(/Not offered by Luma: .*list_calendars/);
@@ -106,8 +107,7 @@ describe('onboarding', () => {
     expect(acc.tools.find((t) => t.name === 'get_event')!.hash).toBe(schemaHash(luma.tools.find((t) => t.name === 'get_event')!.inputSchema));
   });
 
-  it('falls back to Dynamic Client Registration for exactly the loopback redirect', async () => {
-    auth.cimd = false;
+  it('prefers Dynamic Client Registration when offered, for exactly the loopback redirect', async () => {
     const { out } = await addAccount();
     expect(out).toContain('via dcr');
     expect(auth.registered[0]).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/callback$/);
@@ -235,7 +235,7 @@ describe('tools and rights', () => {
       { api_id: 'gst-4', email: 'd@example.test', approval_status: 'waitlist' },
     ]);
     const blast = await grant(['luma_blast'], [id]);
-    const wrong = await ctx.luma.write(blast, 'create_blast', { accountId: id, requestId: 'req-blast-001', event_id: 'evt-1', content_md: 'Hi', confirmRecipientCount: 4 });
+    const wrong = await ctx.luma.write(blast, 'create_blast', { accountId: id, requestId: 'req-blast-001', event_id: 'evt-1', content_md: 'Hi', recipient_groups: [{ status: 'approved' }], confirmRecipientCount: 4 });
     expect(wrong).toMatchObject({ status: 'rejected' });
     expect(wrong.detail).toMatch(/would reach 3 guest/);
     expect(luma.calls.some(([n]) => n === 'create_blast')).toBe(false);
@@ -249,7 +249,11 @@ describe('tools and rights', () => {
     });
     expect(both).toMatchObject({ status: 'accepted' });
     expect(luma.calls.filter(([n]) => n === 'create_blast')).toHaveLength(1);
-    expect((await rejection(ctx.luma.write(blast, 'create_blast', { accountId: id, requestId: 'req-blast-003', event_id: 'evt-1', content_md: 'Hi' }))).message).toMatch(/confirmRecipientCount/);
+    expect((await rejection(ctx.luma.write(blast, 'create_blast', { accountId: id, requestId: 'req-blast-003', event_id: 'evt-1', content_md: 'Hi', recipient_groups: [{ status: 'approved' }] }))).message).toMatch(/confirmRecipientCount/);
+    // Explicit audience only, no extra keys, never scheduled.
+    expect((await rejection(ctx.luma.write(blast, 'create_blast', { accountId: id, requestId: 'req-blast-005', event_id: 'evt-1', content_md: 'Hi', confirmRecipientCount: 3 }))).message).toMatch(/recipient_groups is required/);
+    expect((await rejection(ctx.luma.write(blast, 'create_blast', { accountId: id, requestId: 'req-blast-006', event_id: 'evt-1', content_md: 'Hi', recipient_groups: [{ status: 'approved', segment: 'all' }], confirmRecipientCount: 3 }))).message).toMatch(/only name status/);
+    expect((await rejection(ctx.luma.write(blast, 'create_blast', { accountId: id, requestId: 'req-blast-007', event_id: 'evt-1', content_md: 'Hi', recipient_groups: [{ status: 'approved' }], scheduled_for: '2026-12-01T10:00:00Z', confirmRecipientCount: 3 }))).message).toMatch(/only immediately/);
     expect(
       (await rejection(ctx.luma.write(blast, 'create_blast', { accountId: id, requestId: 'req-blast-004', event_id: 'evt-1', content_md: 'Hi', recipient_groups: [{ status: 'approved', ticket_type_id: 'tt-1' }], confirmRecipientCount: 1 }))).message,
     ).toMatch(/ticket type/);
@@ -289,5 +293,88 @@ describe('origin guards', () => {
     expect((await f('https://mcp.luma.com/mcp', { method: 'GET' })).status).toBe(405);
     expect(seen).toEqual([]);
     expect(AUTH_ORIGIN).toBe('https://auth.luma.com');
+  });
+});
+
+describe('regressions from the independent review', () => {
+  let id: string;
+  beforeEach(async () => {
+    id = (await addAccount()).id;
+  });
+
+  it('a 401 from Luma drops the cached token and retries once (read)', async () => {
+    const ctx = context();
+    await ctx.luma.read(READONLY_PRINCIPAL, 'get_event', { event_id: 'evt-1', accountId: id });
+    luma.validTokens.clear(); // Luma no longer accepts the cached access token
+    const r = await ctx.luma.read(READONLY_PRINCIPAL, 'get_event', { event_id: 'evt-2', accountId: id });
+    expect(r).toMatchObject({ result: { event: { api_id: 'evt-2' } } });
+  });
+
+  it('a write that fails with 401 before the tool call is "rejected", never indeterminate', async () => {
+    const ctx = context();
+    const events = await grant(['luma_events'], [id]);
+    await ctx.luma.read(READONLY_PRINCIPAL, 'list_events', { accountId: id }); // warm token and tool cache
+    luma.validTokens.clear();
+    auth.failRefresh = true;
+    const r = await ctx.luma.write(events, 'create_event', { accountId: id, requestId: 'req-401-00001', name: 'X', start_at: '2026-11-01T18:00:00Z', timezone: 'Europe/Vienna' });
+    expect(r.status).toBe('rejected');
+    expect(luma.calls.some(([n]) => n === 'create_event')).toBe(false);
+  });
+
+  it('nested fields outside the approved schema are refused at the MCP layer', async () => {
+    const ctx = context();
+    const guests = await grant(['luma_guests'], [id]);
+    const c = await mcpClient(ctx, guests);
+    const r = await call(c, 'luma_invite_guests', { accountId: id, requestId: 'req-nest-0001', event_id: 'evt-1', guests: [{ email: 'a@example.test', role: 'host' }] }).catch((e: Error) => ({ isError: true, json: { error: e.message } }));
+    expect(r.isError).toBe(true);
+    expect(luma.calls.some(([n]) => n === 'invite_guests')).toBe(false);
+  });
+
+  it('the blast count fails closed on more pages without a cursor', async () => {
+    const ctx = context();
+    luma.guests.set('evt-9', [{ api_id: 'g1', email: 'a@x.test', approval_status: 'approved' }]);
+    const blast = await grant(['luma_blast'], [id]);
+    // list_guests claims more pages but gives no cursor.
+    const mcp = (ctx.luma as unknown as { mcp: { callTool: (...a: unknown[]) => Promise<unknown> } }).mcp;
+    const real = mcp.callTool.bind(mcp);
+    mcp.callTool = async (token: unknown, name: unknown, args: unknown) => (name === 'list_guests' ? { isError: false, data: { entries: [{ api_id: 'g1' }], has_more: true } } : real(token, name, args));
+    const r = await ctx.luma.write(blast, 'create_blast', { accountId: id, requestId: 'req-page-0001', event_id: 'evt-9', content_md: 'Hi', recipient_groups: [{ status: 'approved' }], confirmRecipientCount: 1 });
+    expect(r.status).toBe('rejected');
+    expect(r.detail).toMatch(/no cursor/);
+    expect(luma.calls.some(([n]) => n === 'create_blast')).toBe(false);
+  });
+
+  it('a schema change of a property NAMED description changes the pin', () => {
+    const a = { type: 'object', properties: { description: { type: 'string' } } };
+    const b = { type: 'object', properties: { description: { type: 'object', properties: { secret: { type: 'string' } } } } };
+    expect(schemaHash(a)).not.toBe(schemaHash(b));
+    expect(schemaHash({ ...a, description: 'doc' })).toBe(schemaHash(a));
+  });
+
+  it('approving calendar submissions e-mails third parties and needs luma_guests', async () => {
+    const ctx = context();
+    const events = await grant(['luma_events'], [id]);
+    expect((await rejection(ctx.luma.write(events, 'approve_calendar_events', { accountId: id, requestId: 'req-appr-0001', calendar_id: 'cal-1', calendar_event_ids: ['evt-1'] }))).message).toMatch(/luma_guests/);
+  });
+
+  it('a fan-out read refuses a cursor without accountId', async () => {
+    const ctx = context();
+    expect((await rejection(ctx.luma.read(READONLY_PRINCIPAL, 'list_events', { cursor: 'abc' }))).message).toMatch(/cursor belongs to one/);
+  });
+
+  it('perch status reports changed tools as an error', async () => {
+    luma.tools = luma.tools.map((t) => (t.name === 'get_event' ? { ...t, inputSchema: { ...t.inputSchema, required: [] } } : t));
+    const x = io();
+    await runCli(['status'], x);
+    expect(x.out()).toMatch(/Luma changed 1 approved tool\(s\) \(get_event\)/);
+  });
+
+  it('a principal only sees tools approved for its own accounts', async () => {
+    const ctx = context();
+    await ctx.luma.refresh();
+    const none = await grant(['luma_read'], [id]);
+    expect(ctx.luma.exposed(none).length).toBeGreaterThan(0);
+    const other = { ...none, lumaAccounts: new Set(['luma-ffffffff']) } as Principal;
+    expect(ctx.luma.exposed(other)).toEqual([]);
   });
 });

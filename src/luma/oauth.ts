@@ -70,7 +70,7 @@ export async function discoverLumaAuth(upstream: Upstream): Promise<LumaAuthServ
     }
   }
   if (!meta) throw bad('no authorization server metadata');
-  if (typeof meta.issuer === 'string' && meta.issuer.replace(/\/$/, '') !== issuer.replace(/\/$/, '')) throw bad('issuer mismatch');
+  if (typeof meta.issuer !== 'string' || meta.issuer.replace(/\/$/, '') !== issuer.replace(/\/$/, '')) throw bad('issuer missing or mismatched');
   if (!strings(meta.code_challenge_methods_supported).includes('S256')) throw bad('PKCE S256 not announced');
   const authz = endpoint(meta.authorization_endpoint, 'authorization_endpoint');
   const token = endpoint(meta.token_endpoint, 'token_endpoint');
@@ -138,7 +138,8 @@ export async function runLumaAuthorization(opts: {
 }): Promise<LumaGrant> {
   const as = await discoverLumaAuth(opts.upstream);
   let clientId = '';
-  const registration: 'cimd' | 'dcr' = as.cimd ? 'cimd' : 'dcr';
+  // Spec §3: Dynamic Client Registration when offered (no dependency on a hosted document), else CIMD.
+  const registration: 'cimd' | 'dcr' = as.registrationEndpoint ? 'dcr' : 'cimd';
   return runPkceLoopback({
     provider: 'Luma',
     authEndpoint: as.authorizationEndpoint,
@@ -149,7 +150,7 @@ export async function runLumaAuthorization(opts: {
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     onAuthUrl: opts.onAuthUrl,
     prepare: async (redirectUri) => {
-      clientId = as.cimd ? (opts.clientIdUrl ?? DEFAULT_LUMA_CLIENT_ID) : await registerClient(opts.upstream, as, redirectUri);
+      clientId = registration === 'cimd' ? (opts.clientIdUrl ?? DEFAULT_LUMA_CLIENT_ID) : await registerClient(opts.upstream, as, redirectUri);
       return { client_id: clientId };
     },
     exchange: async (code, verifier, redirectUri) => {
