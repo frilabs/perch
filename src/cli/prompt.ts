@@ -41,3 +41,33 @@ export function readSecretFromTty(prompt: string): Promise<string> {
     stdin.on('data', onData);
   });
 }
+
+/** Reads one visible line from the controlling terminal (confirmations, one-time codes). TTY only. */
+export function readLineFromTty(prompt: string): Promise<string> {
+  const stdin = process.stdin;
+  if (!stdin.isTTY) return Promise.reject(new PerchError('This prompt needs an interactive TTY; run this command in a terminal', 'no_tty'));
+  return new Promise((resolve, reject) => {
+    let value = '';
+    process.stderr.write(prompt);
+    stdin.resume();
+    stdin.setEncoding('utf8');
+    const onData = (chunk: string) => {
+      const i = chunk.search(/[\r\n]/);
+      if (i < 0) {
+        value += chunk;
+        return;
+      }
+      value += chunk.slice(0, i);
+      stdin.off('data', onData);
+      stdin.off('end', onEnd);
+      stdin.pause();
+      resolve(value.trim());
+    };
+    const onEnd = () => {
+      stdin.off('data', onData);
+      reject(new PerchError('Aborted', 'aborted'));
+    };
+    stdin.on('data', onData);
+    stdin.once('end', onEnd);
+  });
+}

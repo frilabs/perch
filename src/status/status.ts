@@ -8,6 +8,7 @@ import { MAX_SEND_RECORDS, MailWorkflowLedger } from '../mail/workflowLedger.js'
 import { fetchMicrosoftIdentity } from '../microsoft/accounts.js';
 import { NOTION_VERSION } from '../notion/notion.js';
 import { ROOT_NAMESPACE, type ImapAccount, type StoreData } from '../store/credentialStore.js';
+import { expireDevices, isPublicLocked, OAuthStore } from '../access/state.js';
 import { PERCH_VERSION } from '../version.js';
 
 /**
@@ -59,8 +60,10 @@ export interface StatusReport {
   clients: Array<{ id: string; label: string; capabilities: string[]; accountIds: string[]; createdAt: string }>;
   whatsappBridge?: { origin: string; configuredAt: string };
   ledger: { sends: number; maxSends: number; pending: number; auditEvents: number; auditDropped: number; lastActivityAt?: string } | { error: string };
-  /** Root namespace only: provisioned users (membership, never tokens). */
-  users?: Array<{ id: string; label: string; status: string; createdAt: string }>;
+  /** Public access (OAuth): never tokens or codes. */
+  publicAccess:
+    | { state: 'not_set_up' | 'on' | 'off'; totp: boolean; allowedAccounts: number; activeDevices: number; lastPairedAt?: string; pairingOpen?: boolean }
+    | { error: string };
 }
 
 export const CHECK_TIMEOUT_MS = 20_000;
@@ -107,6 +110,27 @@ export interface StatusOptions {
   /** Tests inject a MOCK IMAP/SMTP login check; production logs in to the real servers over TLS. */
   imapVerify?: (account: ImapAccount) => Promise<void>;
   timeoutMs?: number;
+  /** Set by a server running the public access: whether a pairing window is open right now. */
+  pairingOpen?: () => boolean;
+}
+
+async function publicAccessStatus(ctx: PerchContext, opts: StatusOptions): Promise<StatusReport['publicAccess']> {
+  try {
+    const s = await new OAuthStore(ctx.store).read();
+    expireDevices(s);
+    const active = s.devices.filter((d) => d.status === 'active');
+    const last = s.devices.map((d) => d.pairedAt).sort().pop();
+    return {
+      state: isPublicLocked(s) ? 'off' : s.totp || s.loginAllow.length || s.devices.length ? 'on' : 'not_set_up',
+      totp: s.totp !== undefined,
+      allowedAccounts: s.loginAllow.length,
+      activeDevices: active.length,
+      ...(last ? { lastPairedAt: last } : {}),
+      ...(opts.pairingOpen ? { pairingOpen: opts.pairingOpen() } : {}),
+    };
+  } catch (err) {
+    return { error: safeMessage(err) };
+  }
 }
 
 async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -215,7 +239,7 @@ export async function collectStatus(ctx: PerchContext, opts: StatusOptions = {})
     clients: d.clients.map((c) => ({ id: c.id, label: c.label, capabilities: [...c.capabilities], accountIds: [...c.accountIds], createdAt: c.createdAt })),
     ...(d.whatsappInstance ? { whatsappBridge: { origin: d.whatsappInstance.origin, configuredAt: d.whatsappInstance.createdAt } } : {}),
     ledger: await ledgerStatus(ctx),
-    ...(ctx.store.namespace === ROOT_NAMESPACE ? { users: d.users.map((u) => ({ id: u.id, label: u.label, status: u.status, createdAt: u.createdAt })) } : {}),
+    publicAccess: await publicAccessStatus(ctx, opts),
   };
 }
 
@@ -246,9 +270,14 @@ export function formatStatusText(r: StatusReport): string {
       `Audit: ${r.ledger.auditEvents} events${r.ledger.auditDropped ? ` (+${r.ledger.auditDropped} rotated out)` : ''}${r.ledger.lastActivityAt ? `, last activity ${r.ledger.lastActivityAt.replace('T', ' ').slice(0, 16)} UTC` : ''}`,
     );
   }
-  if (r.users) {
-    lines.push('', `Users${r.users.length ? '' : ': none'}`);
-    for (const u of r.users) lines.push(`  ${u.id}  "${u.label}"  ${u.status}  since ${day(u.createdAt)}`);
+  const p = r.publicAccess;
+  if ('error' in p) lines.push(`Public access: ERROR ${p.error}`);
+  else {
+    lines.push(
+      `Public access: ${p.state === 'off' ? 'OFF (kill switch)' : p.state === 'on' ? 'set up' : 'not set up'} · Perch code ${p.totp ? 'set up' : 'missing'} · ` +
+        `${p.allowedAccounts} allowed Google account(s) · ${p.activeDevices} active device(s)${p.lastPairedAt ? `, last pairing ${p.lastPairedAt.replace('T', ' ').slice(0, 16)} UTC` : ''}` +
+        `${p.pairingOpen ? ' · a pairing window is OPEN' : ''}`,
+    );
   }
   const failed = failedChecks(r);
   if (r.checked) lines.push('', failed ? `${failed} check(s) failed.` : 'All checks passed.');

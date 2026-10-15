@@ -1,6 +1,6 @@
 // MCP layer of the mail workflow and the shared audit runner, through the real MCP SDK client.
-// Part 1 uses MOCK mail providers in one namespace; part 2 uses the colliding-id MOCK worlds of the
-// user-isolation fixtures (root, user A, user B). Nothing reaches a real provider; secrets are dummies.
+// Part 1 uses MOCK mail providers; part 2 uses a MOCK world (Calendar). Nothing reaches a real provider;
+// secrets are dummies.
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -16,10 +16,8 @@ import { generateHttpToken, startHttpServer, type RunningHttpServer } from '../s
 import { createMcpServer, WRITE_TOOL_NAMES } from '../src/mcp/server.js';
 import { CredentialStore, initStore, type Capability } from '../src/store/credentialStore.js';
 import type { UpstreamTransport } from '../src/upstream.js';
-import { NamespaceRouter } from '../src/users/namespaces.js';
-import { addUser, openUserStore } from '../src/users/registry.js';
 import { dummySecret, makeTempDirs, type TempDirs } from './support/fixtures.js';
-import { createWorld, IDS, seedWorld, worldContextFactory, type IoLog, type World } from './support/namespaceFixtures.js';
+import { createWorld, IDS, seedWorld, worldContext } from './support/worldFixtures.js';
 
 let dirs: TempDirs;
 let store: CredentialStore;
@@ -262,87 +260,34 @@ describe('mail workflow and audit over MCP [MOCK providers]', () => {
   });
 });
 
-describe('cross-user mail workflow and audit [MOCK worlds, colliding ids]', () => {
-  let rootStore: CredentialStore;
-  let router: NamespaceRouter;
-  let io: IoLog;
-  let worlds: Map<string, World>;
-  let server: RunningHttpServer;
-  let globalToken: string;
-
-  async function provision(label: string, tag: string) {
-    const file = path.join(dirs.root, 'config', 'users', `${tag}.token`);
-    const { user } = await addUser(rootStore, { label, tokenFile: file });
-    const s = await openUserStore(rootStore, user.id);
-    const world = createWorld(tag, io);
-    worlds.set(user.id, world);
-    await seedWorld(s, world);
-    return { id: user.id, store: s, world };
-  }
+describe('calendar audit [MOCK world]', () => {
+  let world: ReturnType<typeof createWorld>;
+  let ctx: PerchContext;
 
   async function persistent(token: string) {
-    const s = (await router.resolveToken(token))!;
-    const mcp = createMcpServer(s.context, s.principal, s.session);
+    const principal = (await principalForClientToken(store, token))!;
+    const mcp = createMcpServer(ctx, principal);
     const [x, y] = InMemoryTransport.createLinkedPair();
     await mcp.connect(y);
-    const c = new Client({ name: 'xuser', version: '0' });
+    const c = new Client({ name: 'cal', version: '0' });
     await c.connect(x);
     return c;
   }
 
   beforeEach(async () => {
     dirs = await makeTempDirs();
-    io = [];
-    worlds = new Map();
     await initStore({ dataDir: dirs.dataDir, keyFile: dirs.keyFile });
-    rootStore = await CredentialStore.open({ dataDir: dirs.dataDir, keyFile: dirs.keyFile });
-    const root = createWorld('ROOT', io);
-    worlds.set('root', root);
-    await seedWorld(rootStore, root);
-    const factory = worldContextFactory(worlds, io);
-    router = new NamespaceRouter(factory(rootStore), factory);
-    globalToken = generateHttpToken();
-    server = await startHttpServer({ host: '127.0.0.1', port: 0, token: globalToken, context: router.root, namespaces: router, log: () => {} });
+    store = await CredentialStore.open({ dataDir: dirs.dataDir, keyFile: dirs.keyFile });
+    world = createWorld('A', []);
+    await seedWorld(store, world);
+    ctx = worldContext(store, world, []);
   });
   afterEach(async () => {
-    await server?.close();
     await dirs.cleanup();
   });
 
-  it('colliding accounts, grant ids and request ids: each user sends once through its own provider; status and audit stay per namespace', async () => {
-    const A = await provision('Alice', 'A');
-    const B = await provision('Bob', 'B');
-    const ga = await grant(A.store, ['send'], [IDS.imap]);
-    const gb = await grant(B.store, ['send'], [IDS.imap]);
-    await B.store.update((d) => void (d.clients[0]!.id = ga.client.id)); // same grant id in both namespaces
-    const ca = await persistent(ga.token);
-    const cb = await persistent(gb.token);
-    const args = { accountId: IDS.imap, requestId: 'shared-request-01', to: ['x@example.test'], subject: 'S', text: 'T' };
-    expect((await call(cb, 'mail_send_status', { accountId: IDS.imap, requestId: 'shared-request-01' })).isError).toBe(true);
-    expect((await call(ca, 'mail_send', args)).json).toMatchObject({ status: 'accepted', replayed: false });
-    expect((await call(cb, 'mail_send_status', { accountId: IDS.imap, requestId: 'shared-request-01' })).text).toMatch(/No send with this requestId/);
-    expect((await call(cb, 'mail_send', args)).json).toMatchObject({ status: 'accepted', replayed: false });
-    expect((await call(ca, 'mail_send', args)).json).toMatchObject({ replayed: true });
-    expect((await call(cb, 'mail_send', args)).json).toMatchObject({ replayed: true });
-    expect(A.world.smtpSent).toHaveLength(1);
-    expect(B.world.smtpSent).toHaveLength(1);
-    expect(worlds.get('root')!.smtpSent).toHaveLength(0);
-    expect(io.filter((l) => l.endsWith('smtp'))).toEqual(['A smtp', 'B smtp']);
-    const auditA = await audit(A.store);
-    const auditB = await audit(B.store);
-    expect(auditA.every((e) => e.ns === A.id)).toBe(true);
-    expect(auditB.every((e) => e.ns === B.id)).toBe(true);
-    expect(auditA.filter((e) => e.type === 'mail_send').map((e) => e.outcome)).toEqual(['pending', 'accepted', 'replayed']);
-    expect((await audit(rootStore)).filter((e) => e.type.startsWith('mail_send'))).toEqual([]);
-    // The global operator token cannot see any status tool or user record.
-    const g = new Client({ name: 'g', version: '0' });
-    await g.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: { authorization: `Bearer ${globalToken}` } } }));
-    expect((await g.listTools()).tools.map((t) => t.name)).not.toContain('mail_send_status');
-  });
-
-  it('audits calendar writes (attempt + outcome) and provider reads with safe fields in the owner namespace only', async () => {
-    const A = await provision('Alice', 'A');
-    const cal = await grant(A.store, ['calendar_read', 'calendar_write'], [IDS.gprod]);
+  it('audits calendar writes (attempt + outcome) and provider reads with safe fields only', async () => {
+    const cal = await grant(store, ['calendar_read', 'calendar_write'], [IDS.gprod]);
     const c = await persistent(cal.token);
     const created = await call(c, 'calendar_create_event', {
       accountId: IDS.gprod,
@@ -353,14 +298,13 @@ describe('cross-user mail workflow and audit [MOCK worlds, colliding ids]', () =
     });
     expect(created.isError, created.text).toBe(false);
     expect((await call(c, 'calendar_list_events', { accountId: IDS.gprod, timeMin: '2026-10-01T00:00:00Z' })).isError).toBe(false);
-    const events = await audit(A.store);
+    const events = await audit(store);
     expect(events.map((e) => [e.type, e.outcome, e.provider])).toEqual([
       ['calendar_create_event', 'attempt', 'google_productivity'],
       ['calendar_create_event', 'ok', 'google_productivity'],
       ['calendar_list_events', 'ok', 'google_productivity'],
     ]);
-    const json = JSON.stringify(await new MailWorkflowLedger(A.store).read());
+    const json = JSON.stringify(await new MailWorkflowLedger(store).read());
     expect(json).not.toMatch(/SUMMARY-MARKER|cal-request-0001|event \d of A|prod\.A@example/);
-    expect(await audit(rootStore)).toEqual([]);
   });
 });

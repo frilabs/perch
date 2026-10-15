@@ -47,8 +47,6 @@ export function createPerchContext(
   store: CredentialStore,
   transport: UpstreamTransport = createFetchTransport(),
   mailProviders?: MailProviders,
-  /** Namespace guard of a user namespace (NamespaceRouter); MailService runs it on every call. */
-  guard?: () => Promise<void>,
 ): PerchContext {
   const upstream = new Upstream(transport);
   const tokens = new GoogleTokenProvider(store, upstream);
@@ -66,11 +64,11 @@ export function createPerchContext(
     upstream,
     drive: new DriveService(store, upstream, tokens),
     notion: new NotionService(store, upstream),
-    mail: new MailService(store, mailProviders ?? createMailProviders(store, upstream, { gmail: gmailTokens, microsoft: microsoftTokens }), ledger, guard ? { guard } : {}),
+    mail: new MailService(store, mailProviders ?? createMailProviders(store, upstream, { gmail: gmailTokens, microsoft: microsoftTokens }), ledger),
     calendar: new CalendarService(store, upstream, productivityTokens),
     contacts: new ContactsService(store, upstream, productivityTokens),
-    slack: new SlackService(store, upstream, workflow, audit, guard ? { guard } : {}),
-    whatsapp: new WhatsappService(store, upstream, workflow, audit, guard ? { guard } : {}),
+    slack: new SlackService(store, upstream, workflow, audit),
+    whatsapp: new WhatsappService(store, upstream, workflow, audit),
     tokens: { drive: tokens, gmail: gmailTokens, microsoft: microsoftTokens, productivity: productivityTokens },
     audit,
   };

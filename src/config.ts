@@ -2,7 +2,6 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { PerchError } from './errors.js';
 import { readPrivateFile } from './secureFs.js';
-import { USER_ID_PATTERN } from './store/credentialStore.js';
 
 export interface PerchConfig {
   dataDir: string;
@@ -21,21 +20,28 @@ export interface PerchConfig {
   microsoftTenant: string;
   /** stdio only: client token file selecting a client grant (default stdio is read-only). */
   clientTokenFile?: string;
-  /**
-   * PERCH_USER: trusted local selector of a provisioned user namespace for onboarding, accounts, client
-   * grants and stdio. Absent = root operator namespace. Set but malformed (including empty) is an error,
-   * never a fallback to root.
-   */
-  user?: string;
+  /** Public access (docs/PUBLIC_ACCESS_SPEC.md §2): base URL of the public listener, e.g. https://host.tailnet.ts.net */
+  publicBaseUrl?: string;
+  /** Loopback port of the public listener. */
+  publicPort: number;
+  /** Google OAuth client of type "Web application" for the operator's sign-in. */
+  googleLoginClientFile?: string;
+  /** Dynamic Client Registration (only while a pairing window is open). */
+  oauthDcr: boolean;
+  /** Optional Telegram notification file (bot token + chat id, 0600). */
+  notifyTelegramFile?: string;
+  /** Trust X-Forwarded-For from a loopback proxy for the shown IP and limits. */
+  publicTrustForwarded: boolean;
 }
 
-function parseUserSelector(env: Record<string, string | undefined>): string | undefined {
-  if (!Object.prototype.hasOwnProperty.call(env, 'PERCH_USER') || env.PERCH_USER === undefined) return undefined;
-  const v = env.PERCH_USER;
-  if (!USER_ID_PATTERN.test(v)) {
-    throw new PerchError('PERCH_USER must be a provisioned user id (user-<16 hex>, see perch user list); unset it for the root namespace', 'bad_config');
+/**
+ * PERCH_USER selected a provisioned user namespace until user isolation was removed (one operator per
+ * installation). A leftover setting is an error, never silently the operator's own store.
+ */
+function rejectUserSelector(env: Record<string, string | undefined>): void {
+  if (Object.prototype.hasOwnProperty.call(env, 'PERCH_USER') && env.PERCH_USER !== undefined) {
+    throw new PerchError('PERCH_USER is no longer supported: Perch serves exactly one operator per installation. Unset it.', 'bad_config');
   }
-  return v;
 }
 
 const list = (v: string | undefined) =>
@@ -51,7 +57,16 @@ export function resolveConfig(env: Record<string, string | undefined>): PerchCon
   const configHome = env.XDG_CONFIG_HOME || path.join(home, '.config');
   const port = Number(env.PERCH_HTTP_PORT || '8765');
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new PerchError('PERCH_HTTP_PORT must be a valid port', 'bad_config');
-  const user = parseUserSelector(env);
+  rejectUserSelector(env);
+  const publicPort = Number(env.PERCH_PUBLIC_PORT || '8767');
+  if (!Number.isInteger(publicPort) || publicPort < 0 || publicPort > 65535) throw new PerchError('PERCH_PUBLIC_PORT must be a valid port', 'bad_config');
+  const flag = (name: string, dflt: boolean) => {
+    const v = env[name]?.trim().toLowerCase();
+    if (v === undefined || v === '') return dflt;
+    if (['1', 'on', 'true', 'yes'].includes(v)) return true;
+    if (['0', 'off', 'false', 'no'].includes(v)) return false;
+    throw new PerchError(`${name} must be on or off`, 'bad_config');
+  };
   return {
     dataDir: path.resolve(env.PERCH_DATA_DIR || path.join(dataHome, 'perch')),
     keyFile: path.resolve(env.PERCH_KEY_FILE || path.join(configHome, 'perch', 'store.key')),
@@ -65,7 +80,12 @@ export function resolveConfig(env: Record<string, string | undefined>): PerchCon
     ...(env.PERCH_MICROSOFT_CLIENT_ID ? { microsoftClientId: env.PERCH_MICROSOFT_CLIENT_ID.trim() } : {}),
     microsoftTenant: env.PERCH_MICROSOFT_TENANT?.trim() || 'common',
     ...(env.PERCH_CLIENT_TOKEN_FILE ? { clientTokenFile: path.resolve(env.PERCH_CLIENT_TOKEN_FILE) } : {}),
-    ...(user !== undefined ? { user } : {}),
+    ...(env.PERCH_PUBLIC_BASE_URL ? { publicBaseUrl: env.PERCH_PUBLIC_BASE_URL.trim() } : {}),
+    publicPort,
+    ...(env.PERCH_GOOGLE_LOGIN_CLIENT_FILE ? { googleLoginClientFile: path.resolve(env.PERCH_GOOGLE_LOGIN_CLIENT_FILE) } : {}),
+    oauthDcr: flag('PERCH_OAUTH_DCR', true),
+    ...(env.PERCH_NOTIFY_TELEGRAM_FILE ? { notifyTelegramFile: path.resolve(env.PERCH_NOTIFY_TELEGRAM_FILE) } : {}),
+    publicTrustForwarded: flag('PERCH_PUBLIC_TRUST_FORWARDED', false),
   };
 }
 

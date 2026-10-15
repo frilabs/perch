@@ -33,7 +33,7 @@ Der Befehl legt vier Dinge an, aber nur, was noch fehlt. Rechte: Verzeichnisse `
 | Mail-Workflow-/Audit-Ledger (verschlüsselt, nur mit einer **neuen** DB) | `~/.local/share/perch/mail-workflow.enc` | `PERCH_DATA_DIR` |
 | HTTP-Bearer-Token | `~/.config/perch/http-token` | `PERCH_HTTP_TOKEN_FILE` |
 
-- **Upgrade von einer älteren Version:** Eine bestehende DB bekommt den Ledger **nicht** automatisch. Bis er existiert, scheitern alle MCP-Tool-Aufrufe und Sends dieses Namespace geschlossen (`ledger_missing`). Einmalig ausführen, für den Root-Namespace `perch mail-workflow init` und für jeden Nutzer `PERCH_USER=<id> perch mail-workflow init`. Ist ein Ledger verloren gegangen, hilft nur ein Backup: `init` lehnt für Namespaces ab, die schon einen Ledger hatten. Details in Abschnitt 4d.
+- **Upgrade von einer älteren Version:** Eine bestehende DB bekommt den Ledger **nicht** automatisch. Bis er existiert, scheitern alle MCP-Tool-Aufrufe und Sends dieses Namespace geschlossen (`ledger_missing`). Einmalig `perch mail-workflow init` ausführen. Ist ein Ledger verloren gegangen, hilft nur ein Backup: `init` lehnt für Namespaces ab, die schon einen Ledger hatten. Details in Abschnitt 4d.
 
 - **Schlüssel separat sichern.** Ohne ihn lässt sich die DB nicht mehr entschlüsseln.
 - Fehlt der Schlüssel, die DB existiert aber, bricht `perch init` ab. Perch erzeugt dann bewusst keinen neuen Schlüssel. Den alten aus dem Backup zurückspielen.
@@ -255,77 +255,19 @@ perch client add --label "Kontakte" --allow contacts_read --account gprod-1a2b3c
 - **Wiederholen:** `calendar_create_event` braucht eine stabile `requestId`. Bei `indeterminate` (Ausgang unbekannt) dieselbe `requestId` und dieselbe `calendarId` erneut senden: Der Termin entsteht dann höchstens einmal, sonst kommt `conflict`. Perch wiederholt nie selbst.
 - **Widerruf:** <https://myaccount.google.com/permissions> oder `remove --revoke`.
 
-## 4c. Nutzer anlegen und trennen (Nutzer-Isolations-Meilenstein)
+## 4c. Nutzer-Isolation (entfernt)
 
-Spezifikation und Testnachweise: `docs/USER_ISOLATION_MILESTONE.md`. **Nur mit Mocks getestet, nicht live verifiziert.** Das ist **keine** gehärtete Mandantenfähigkeit für einen öffentlichen Dienst (Grenzen: Meilenstein-Doku §8).
+Perch bedient genau **einen Betreiber pro Installation**. Die frühere Nutzer-Isolation (`perch user add|list|remove`, `PERCH_USER`) wurde am 2026-10-14 auf Fritz' Entscheidung entfernt (`docs/PUBLIC_ACCESS_SPEC.md` §11a).
 
-### 4c.1 Modell
-
-- **Root-Namespace:** der bisherige Store (`PERCH_DATA_DIR/store.enc`, `PERCH_KEY_FILE`).
-  - Er gehört dem lokalen Betreiber. Bestehende Konten bleiben dort; Perch verschiebt nichts und migriert nichts automatisch.
-  - Das globale HTTP-Token und `perch serve --stdio` ohne `PERCH_USER` sehen nur diesen Namespace.
-- **Nutzer:** Nur der lokale Admin legt Nutzer per CLI an. Es gibt keine Registrierung.
-  - Jeder Nutzer bekommt einen **eigenen** verschlüsselten Store unter `$PERCH_DATA_DIR/users/<id>/` und einen **eigenen** Schlüssel unter `<Verzeichnis von PERCH_KEY_FILE>/user-keys/<id>.key`, also außerhalb des Datenverzeichnisses.
-  - Dazu kommen eigene Token-Caches im Server.
-  - Die ID (`user-` plus 16 Hex-Zeichen) erzeugt Perch selbst. Sie wird nie wiederverwendet.
-- **Zugangsdaten eines Nutzers:**
-  - ein Read-only-Token: alle Lese-Tools, aber nur für die eigenen Konten;
-  - optional Client-Grants im eigenen Namespace (Mail-Grants nur Mail, `gprod`-Grants nur Calendar/Contacts, wie bisher).
-  - Jedes Token gehört zu genau einem Namespace. Passt ein Token-Hash mehrfach, lehnt Perch ab und wählt nie selbst aus.
-- **Höchstens 100 Registry-Einträge.** Entfernte Nutzer zählen mit.
-- **Macht des Admins:** Wer auf dem Host den Root-Schlüssel und `user-keys/` lesen kann, kann alle Namespaces lesen. Das ist die bewusste privilegierte Grenze. Perch schützt Nutzer **nicht** vor dem Host-Admin.
-
-### 4c.2 Nutzer anlegen, auflisten, entfernen
+- `PERCH_USER` ist kein gültiger Schalter mehr: Ist er gesetzt, bricht jeder Befehl ab. Er fällt nie still auf den eigenen Store zurück.
+- **Bestehende Installationen mit angelegten Nutzern:** Der Store öffnet unverändert. `perch serve` warnt beim Start, dass noch Nutzer eingetragen sind. Deren Read-only-Tokens und Client-Grants werden abgelehnt (`401`).
+- Perch öffnet, verschiebt und löscht die alten Nutzer-Dateien nicht. Wer sie nicht mehr braucht, löscht sie von Hand (vorher sichern):
 
 ```bash
-perch user add --label "Alice"           # Token -> ~/.config/perch/users/<id>.token (0600), wird nie angezeigt
-perch user add --label "Bob" --token-file ~/.config/perch/users/bob.token
-perch user list
-perch user remove user-0123456789abcdef  # sperrt die Mitgliedschaft; Store und Schlüssel bleiben liegen
+rm -r "$PERCH_DATA_DIR/users"                  # Stores der früheren Nutzer
+rm -r "$(dirname "$PERCH_KEY_FILE")/user-keys" # deren Schlüssel
+rm -r ~/.config/perch/users                    # deren Token-Dateien
 ```
-
-- Das Token entsteht genau einmal in einer **neuen** `0600`-Datei. Eine vorhandene Datei wird nie überschrieben. In der Registry steht nur der SHA-256-Hash. Das Token sicher an den Nutzer übergeben.
-- `remove` wirkt sofort:
-  - Über HTTP liefern Read-only-Token und Client-Grants dieses Nutzers beim nächsten Request `401`.
-  - Eine laufende stdio-Session scheitert beim nächsten Tool-Aufruf, bevor ein Provider kontaktiert wird.
-  - Store und Schlüssel löscht Perch nicht. Archivieren oder löschen ist Sache des Admins.
-  - Es gibt weder eine Reaktivierung noch eine Token-Rotation: Bei Bedarf einen neuen Nutzer anlegen und neu einrichten.
-
-### 4c.3 Konten und Client-Grants eines Nutzers einrichten (lokal, Admin)
-
-`PERCH_USER=<id>` wählt den Namespace für Konten-, Client- und stdio-Befehle. Die Onboarding-Schritte aus den Abschnitten 3, 4, 4a und 4b gelten unverändert. Das Konto landet nur im Store dieses Nutzers.
-
-```bash
-export PERCH_USER=user-0123456789abcdef
-perch google add --label "Alice Drive" --port 8766
-perch imap add --label "Alice GMX" --email alice@gmx.at --allow-send
-perch google-productivity add --label "Alice Kalender" --services calendar --allow-calendar-write
-perch accounts                                 # nur Alices Konten
-perch client add --label "Alice Laptop" --allow read,send --account imap-1a2b3c4d
-perch serve --stdio                            # Alices Read-only-Session
-unset PERCH_USER                               # zurück zum Root-Namespace
-```
-
-- Ein leerer, falsch geformter, unbekannter oder entfernter `PERCH_USER` bricht ab. Es gibt **keinen** Rückfall auf den Root-Namespace.
-- Mit `PERCH_USER` sind gesperrt: `perch init`, `perch token`, `perch user …` (keine verschachtelte Nutzerverwaltung) und `perch serve --http`.
-- `PERCH_CLIENT_TOKEN_FILE` muss zu einem Grant **des gewählten Namespace** gehören, sonst startet stdio nicht.
-- Konto-IDs gelten nur im eigenen Namespace. Dieselbe ID kann in zwei Namespaces verschiedene Konten bezeichnen. Ein Grant kann nur Konten des eigenen Namespace nennen.
-
-### 4c.4 HTTP für mehrere Nutzer
-
-`perch serve --http` (ohne `PERCH_USER`) bedient alle Nutzer. Welcher Namespace gilt, entscheidet allein das Bearer-Token. Es gibt keinen Header, Query-Parameter oder Pfad dafür.
-
-```bash
-# Laptop von Alice: ihr Read-only-Token oder ihr Client-Token statt des globalen Tokens
-TOKEN="$(ssh homeserver 'cat ~/.config/perch/users/user-0123456789abcdef.token')"
-claude mcp add --transport http perch https://homeserver.tailnet-name.ts.net/mcp --header "Authorization: Bearer ${TOKEN}"
-```
-
-- Host-, Origin- und Bearer-Prüfung, Loopback-Default und die Bind-Regeln gelten unverändert.
-- Mitgliedschaft und Grants prüft Perch bei **jedem** Request und vor **jedem** Tool-Aufruf neu.
-- Cursor (`nextCursor`) sind an Namespace, Abfrage und Konto gebunden. Fremde oder veränderte Cursor scheitern mit `bad_cursor`, bevor ein Provider kontaktiert wird. Cursor aus früheren Versionen gelten nicht mehr: die Abfrage neu beginnen.
-- **Beschädigter Namespace:** Fehlt der Store oder Schlüssel eines **aktiven** Nutzers oder ist er beschädigt, antwortet der Server auf **alle** Bearer-Tokens mit `503` (fail closed), **auch auf das globale Token**: Perch kann sonst nicht beweisen, dass das globale Token keinem Client-Grant dieses Nutzers gleicht. Laufende Sitzungen dieses Nutzers (auch stdio) scheitern beim nächsten Tool-Aufruf. Perch legt nichts neu an. Abhilfe: Dateien aus dem Backup zurückspielen oder `perch user remove <id>`. Lokales Root-stdio ohne `PERCH_USER` **und ohne `PERCH_CLIENT_TOKEN_FILE`** bleibt nutzbar. Root-stdio mit Client-Token prüft die Namespace-Eindeutigkeit beim Start und sperrt bei einem beschädigten aktiven Nutzer-Namespace ebenfalls.
-- **Fehlgeschlagenes `perch user add`:** Bricht der Befehl ab, können eine Token-Datei und `users/<id>/` bzw. `user-keys/<id>.key` ohne Registry-Eintrag liegen bleiben. Sie sind nie nutzbar; Dateien ohne passenden Eintrag in `perch user list` löschen.
 
 ## 4d. Idempotenter Versand und Audit (Mail-Workflow-Meilenstein)
 
@@ -349,7 +291,6 @@ Spezifikation, Speichervertrag und Testnachweise: `docs/MAIL_WORKFLOW_MILESTONE.
 perch audit list [--limit 50] [--client client-1a2b3c4d] [--account imap-1a2b3c4d]
 perch mail-workflow list [--state pending]
 perch mail-workflow resolve op-0123456789abcdef01234567 --outcome sent     # oder not-sent, nach Prüfung des Gesendet-Ordners
-PERCH_USER=user-0123456789abcdef perch audit list                          # Namespace eines Nutzers
 ```
 
 - **Audit:**
@@ -533,11 +474,10 @@ perch status --json       # maschinenlesbar
 
 - Pro Konto prüft Perch **nur lesend**, ob der Zugang noch funktioniert: Drive `about`, Gmail-Profil, Graph `/me`, Google `userinfo`, Notion `users/me`, Slack `auth.test`, IMAP-/SMTP-Login, GOWA-Gerätestatus.
 - Der Exit-Code ist 1, sobald ein Check fehlschlägt. Damit eignet sich der Befehl auch für Monitoring, z. B. per Cron.
-- Mit `PERCH_USER=<id>` zeigt er den Namespace eines Nutzers.
 
 **Im Browser:** Läuft `perch serve --http`, zeigt `GET /status` dieselbe Übersicht als nur lesende Seite, z. B. `https://homeserver.tailnet-xyz.ts.net/status` (Tailscale Serve) oder `http://127.0.0.1:8765/status` (SSH-Tunnel).
 
-- **Anmeldung:** Der Browser fragt nach Benutzername und Passwort. Benutzername egal, Passwort = das **globale Token** (`~/.config/perch/http-token`) oder das **Read-only-Token eines Nutzers**. Dieser sieht nur seinen eigenen Namespace.
+- **Anmeldung:** Der Browser fragt nach Benutzername und Passwort. Benutzername egal, Passwort = das **globale Token** (`~/.config/perch/http-token`).
 - **Client-Grants** werden abgelehnt (403), weil sie nur einen Teil des Namespace sehen dürfen.
 - **Absicherung:** Die Seite enthält keine Secrets, kein JavaScript, keine Formulare und lädt nichts von außen. Es gelten strikte Content-Security-Policy, `no-store`, `frame-ancestors 'none'` und dieselbe Host-Prüfung wie bei MCP. Anfragen von fremden Seiten (`Sec-Fetch-Site: cross-site`) werden abgewiesen.
 - **Cache:** Die Live-Checks werden 60 s wiederverwendet. Neuladen fragt die Anbieter also höchstens einmal pro Minute ab.
@@ -575,7 +515,7 @@ perch serve --stdio
 perch serve --http
 ```
 
-- Der Server bedient den Root-Namespace (globales Token, Root-Client-Grants) und alle aktiven Nutzer (deren Tokens), siehe Abschnitt 4c.4.
+- Der Server akzeptiert das globale Token (read-only) und die Tokens der Client-Grants.
 
 - Ohne gültiges Token (≥ 43 Zeichen) startet der Server nicht.
 - Erlaubte Bind-Adressen: Loopback oder eine **explizite Tailscale-IP**, z. B. `--host 100.x.y.z`. `0.0.0.0` und `::` werden abgelehnt.
@@ -656,6 +596,99 @@ bearer_token_env_var = "PERCH_TOKEN"
 ```
 
 `PERCH_TOKEN` in der Shell setzen, aus der Codex startet. Für Codex am besten ein **eigener Client-Grant** (`perch client add --label Codex …`): Dann lassen sich Claude Code und Codex getrennt freigeben und widerrufen, und das Audit-Log unterscheidet sie. Ein Client-Grant sieht allerdings weder Drive noch Notion; dafür bleibt das globale Read-only-Token.
+
+## 6a. Öffentlicher Zugang über OAuth (claude.ai, Uni-Laptop)
+
+Spezifikation: `docs/PUBLIC_ACCESS_SPEC.md`. **Nur mit Mocks getestet, nicht live verifiziert.** Perch ändert weder Tailscale noch einen Proxy; die Befehle unten führt der Betreiber selbst aus.
+
+### 6a.1 Modell in Kürze
+
+- `perch serve --http --public` startet zusätzlich einen **öffentlichen Listener** auf `127.0.0.1:8767` (`PERCH_PUBLIC_PORT`). Er kennt nur `/mcp`, `/.well-known/oauth-*` und `/oauth/*`; die Statusseite, `/local/pair` und alles andere gibt es dort nicht (`404`).
+- Am öffentlichen `/mcp` gelten **nur OAuth-Tokens**. Das globale Token und Client-Grant-Tokens werden dort abgelehnt; am lokalen Listener (`8765`) gilt alles wie bisher.
+- Neue Geräte entstehen **nur in einem Kopplungsfenster**, das der Betreiber auf dem Server öffnet (`perch oauth pair`, 10 Minuten, genau ein Gerät). Im Browser gibt man den Kopplungscode aus dem Terminal ein, meldet sich mit Google an (nur Konten aus der Allowlist), gibt den Perch-Code (TOTP) ein und bestätigt danach **im Terminal** mit `y`. Erst dann gibt es Tokens.
+- Ein gekoppeltes Gerät liest alles, was das globale Token liest. Schreiben nur über `perch oauth grant` (wie `perch client add`; das Gerät sieht dann nur, was der Grant abdeckt).
+- Access-Token 1 Stunde, Refresh-Token rotiert bei jeder Nutzung; nach 14 Tagen ohne Nutzung oder spätestens nach 90 Tagen ist eine neue Kopplung nötig. Ein wiederverwendetes altes Refresh-Token sperrt das Gerät sofort.
+- **Perch fordert nie per Nachricht zur Anmeldung auf.** Jede Kopplung beginnt mit `perch oauth pair` auf dem eigenen Server.
+
+### 6a.2 Einmalig einrichten (Nutzeraufgaben)
+
+1. **Öffentliche Adresse:** Tailscale Funnel aktivieren (Node-Attribut `funnel` in der Tailnet-Policy, MagicDNS und HTTPS-Zertifikate; laut Tailscale-Doku, nicht live getestet). Funnel gilt pro Port und kennt nur 443, 8443 und 10000. In `.env`:
+   ```bash
+   PERCH_PUBLIC_BASE_URL=https://homeserver.tailnet-xyz.ts.net
+   ```
+2. **Google-Client für die Anmeldung:** In der Google Cloud Console einen OAuth-Client vom Typ **„Web application“** anlegen (getrennt vom Desktop-Client für Konten), Redirect-URI `https://homeserver.tailnet-xyz.ts.net/oauth/google/callback`, Scopes nur `openid` und `email`. JSON herunterladen, `chmod 600`, in `.env`:
+   ```bash
+   PERCH_GOOGLE_LOGIN_CLIENT_FILE=/home/USER/.config/perch/google-web-client.json
+   ```
+   Den zweiten Faktor für dieses Google-Konto in Google selbst einschalten; Perch kann ihn nicht prüfen, verlangt aber zusätzlich den Perch-Code.
+3. **Geführte Einrichtung** auf dem Server (fragt die erlaubte Google-Adresse ab und richtet den Perch-Code per QR-Code im Terminal ein; dazu 10 Notfall-Codes, einmal angezeigt, offline aufbewahren):
+   ```bash
+   perch public setup
+   ```
+4. **Optional, Telegram-Hinweise:** Bot über @BotFather anlegen, eigene Chat-ID ermitteln, Datei `0600` anlegen und in `.env` eintragen:
+   ```json
+   {"botToken": "123456789:AA…", "chatId": 123456789}
+   ```
+   ```bash
+   PERCH_NOTIFY_TELEGRAM_FILE=/home/USER/.config/perch/telegram.json
+   ```
+   Die Nachrichten sind nur Hinweise (Fenster geöffnet, Gerät gekoppelt, Alarme). Sie enthalten keine Links, keine Codes und keine Tokens, und man kann darüber nichts freigeben.
+5. **Proxy und Server starten:**
+   ```bash
+   sudo tailscale funnel --bg --https=443 http://127.0.0.1:8767     # öffentlich: NUR der öffentliche Listener
+   sudo tailscale serve --bg --https=8443 http://127.0.0.1:8765     # optional, privat: der lokale Listener
+   perch serve --http --public
+   ```
+   Ohne Tailscale geht jeder TLS-Reverse-Proxy mit eigener Domain (z. B. Caddy, Cloudflare Tunnel), der **nur** auf `127.0.0.1:8767` weiterleitet (dokumentiert, nicht getestet). Der lokale Listener bleibt dann per SSH-Tunnel erreichbar. In der systemd-Unit `serve --http --public` eintragen.
+
+### 6a.3 Ein Gerät koppeln
+
+1. Auf dem Server (z. B. per SSH, auch vom Handy aus):
+   ```bash
+   perch oauth pair
+   ```
+   Der Befehl zeigt den Kopplungscode und wartet.
+2. Auf dem Gerät die Verbindung starten, z. B. in claude.ai unter **Customize → Connectors → Add custom connector** die Adresse `https://homeserver.tailnet-xyz.ts.net/mcp` eintragen. Claude Code: `claude mcp add --transport http perch https://homeserver.tailnet-xyz.ts.net/mcp`, dann `/mcp` zum Anmelden.
+3. Im Browser: Kopplungscode, Google-Anmeldung, Perch-Code.
+4. Im Terminal erscheinen Client, Rücksprungadresse, Google-Konto, Browser und (falls verfügbar) IP. Nur mit `y` bestätigen, wenn das genau das Gerät ist, das gerade gekoppelt wird. Danach meldet das Terminal den ersten Zugriff des neuen Geräts.
+
+Alternativ zeigt `http://127.0.0.1:8765/local/pair` (nur am lokalen Listener) dieselbe Kopplung als Seite mit Knöpfen, etwa vom Handy über das Tailnet oder einen SSH-Tunnel. Die Seite ist standardmäßig aus und hat ein **eigenes Passwort** (nicht das globale Token, das MCP-Clients kennen): `perch oauth local-page enable` zeigt es einmal an, `disable` schaltet die Seite wieder ab.
+
+Ein claude.ai-Connector gilt für das ganze claude.ai-Konto (Web, Desktop, Handy) und muss also nur einmal gekoppelt werden.
+
+### 6a.4 Verwalten
+
+```bash
+perch oauth devices                                   # Geräteliste (Status, gekoppelt, zuletzt gesehen, läuft ab)
+perch oauth revoke oc-0123456789abcdef                # ein Gerät abmelden (wirkt beim nächsten Request)
+perch oauth revoke --all
+perch oauth grant oc-0123456789abcdef --allow read,send --account imap-1a2b3c4d   # Schreibrechte (wie perch client add)
+perch oauth ungrant oc-0123456789abcdef --read-all   # Achtung: ohne Grant liest das Gerät ALLE Konten; zum Wegnehmen: revoke
+perch oauth login-allow add|remove EMAIL | list
+perch oauth totp setup | status | recovery-codes      # setup erneut = neuer Code, alle Geräte werden abgemeldet
+perch oauth client add --name Codex --redirect http://127.0.0.1/callback   # Client ohne Metadaten-Dokument, fest registriert
+perch oauth client add --cimd https://example.com/oauth/client.json         # zusätzliches Metadaten-Dokument
+perch public status
+perch audit list                                      # alle Kopplungsschritte, ohne Geheimnisse
+```
+
+- **Clients ohne Metadaten-Dokument** (z. B. Codex) können sich per Dynamic Client Registration selbst eintragen, aber nur während eines offenen Kopplungsfensters (höchstens 3 pro Fenster). `PERCH_OAUTH_DCR=off` schaltet das ab.
+- **Sperren:** 3 falsche Kopplungscodes schließen das Fenster; ein Neustart der Anmeldung nach bestandenem Kopplungscode ebenfalls; 5 falsche Perch-Codes in 15 Minuten sperren das Koppeln für 15 Minuten (bei Wiederholung länger). Ein zweiter Anmeldeversuch im selben Fenster schließt es sofort für beide (Alarm).
+
+### 6a.5 Notschalter
+
+```bash
+perch public off     # öffentlicher Listener antwortet 503 (auch nach Neustart), offenes Fenster zu, alle Geräte abgemeldet
+sudo tailscale funnel --https=443 off
+perch public on      # wieder an; Geräte müssen neu gekoppelt werden
+```
+
+### 6a.6 Grenzen
+
+- Der Perch-Code (TOTP) ist nicht phishing-resistent. Ein Angreifer, der den Betreiber genau im eigenen Kopplungsfenster auf eine gefälschte Seite lockt und dort Kopplungscode, Google-Login und Perch-Code abfischt, wird nur an den Details im Terminal erkannt. Er bekäme genau ein Gerät mit Leserechten, das in `perch oauth devices` steht und sofort widerrufbar ist (Spec §0a).
+- Ob Funnel die Client-IP weitergibt, ist nicht geprüft. Erst wenn das live bestätigt ist, `PERCH_PUBLIC_TRUST_FORWARDED=on` setzen; sonst zeigt das Terminal „IP unknown“, und die Rate-Limits gelten global.
+- Die CIMD-Adresse der gehosteten Claude-Apps ist nicht dokumentiert. Perch erlaubt deshalb Metadaten-Dokumente unter `https://claude.ai/oauth/…` und `https://claude.com/oauth/…` und holt nur von diesen beiden Hosts.
+- Den Perch-Code richtet man nur per CLI ein; eine Seite `/local/totp` gibt es nicht.
 
 ## 7. Tools und Grenzen
 

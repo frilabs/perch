@@ -6,7 +6,7 @@ import { FAMILY_TITLES, failedChecks, type AccountFamily, type AccountStatus, ty
  * value is HTML-escaped; the single <style> block is allowed by its hash in the CSP (statusPageHeaders).
  */
 
-const esc = (v: unknown) =>
+export const esc = (v: unknown) =>
   String(v ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -68,7 +68,7 @@ export function statusPageHeaders(): Record<string, string> {
 }
 
 /** Perch symbol (brand/logo/perch-symbol-black.svg), colored by the text color. */
-const SYMBOL =
+export const SYMBOL =
   '<svg viewBox="0 0 100 100" aria-hidden="true"><path d="M 2 81.23 C 33.23 62.72 64.46 37.28 98 9.52 C 66.77 39.59 36.7 69.66 7.78 90.48 Z M 27.45 67.35 C 25.13 54.63 27.45 40.75 32.07 28.02 C 33.23 40.75 35.54 52.31 36.7 62.72 Z M 57.52 43.06 C 70.24 39.59 84.12 41.9 96.84 48.84 C 84.12 47.69 71.4 46.53 62.14 45.37 Z"/></svg>';
 
 function checkCell(a: AccountStatus): string {
@@ -123,15 +123,13 @@ export function renderStatusPage(r: StatusReport, opts: { cachedSeconds?: number
   const bridge = r.whatsappBridge
     ? `<div class="fact"><span class="muted">WhatsApp bridge</span><b class="mono">${esc(r.whatsappBridge.origin)}</b></div>`
     : '';
-  const users = r.users
-    ? `<h2>Users</h2>${
-        r.users.length
-          ? `<div class="box"><table><thead><tr><th>User</th><th>Status</th><th>Since</th></tr></thead><tbody>${r.users
-              .map((u) => `<tr><td><b>${esc(u.label)}</b><br><span class="mono">${esc(u.id)}</span></td><td>${esc(u.status)}</td><td>${esc(u.createdAt.slice(0, 10))}</td></tr>`)
-              .join('')}</tbody></table></div>`
-          : '<div class="box"><div class="empty">No provisioned users.</div></div>'
-      }`
-    : '';
+  const p = r.publicAccess;
+  const publicAccess =
+    'error' in p
+      ? `<div class="fact"><span class="muted">Public access</span><span class="pill bad">Error</span><span class="err">${esc(p.error)}</span></div>`
+      : `<div class="fact"><span class="muted">Public access</span><b>${p.state === 'off' ? 'Off (kill switch)' : p.state === 'on' ? 'Set up' : 'Not set up'}</b>` +
+        `<span class="muted">Perch code ${p.totp ? 'set up' : 'missing'} · ${esc(p.activeDevices)} active device(s)${p.lastPairedAt ? ` · last pairing ${esc(when(p.lastPairedAt))}` : ''}</span>` +
+        `${p.pairingOpen ? ' <span class="pill warn">pairing window open</span>' : ''}</div>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -149,8 +147,7 @@ export function renderStatusPage(r: StatusReport, opts: { cachedSeconds?: number
   }</p>
 ${sections}
 <h2>Client grants</h2>${clients}
-<h2>Operations</h2><div class="facts">${ledger}${bridge}</div>
-${users}
+<h2>Operations</h2><div class="facts">${ledger}${bridge}${publicAccess}</div>
 <footer>Read-only overview. Connect, change or remove accounts and grants with the perch CLI on the server.</footer>
 </main>
 </body>

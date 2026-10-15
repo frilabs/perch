@@ -7,7 +7,7 @@ import { NotionService } from '../src/notion/notion.js';
 import { CredentialStore, initStore } from '../src/store/credentialStore.js';
 import { Upstream } from '../src/upstream.js';
 import { makeTempDirs, rejection, type TempDirs } from './support/fixtures.js';
-import { createWorld, IDS, seedWorld, worldTransport, type IoLog, type World } from './support/namespaceFixtures.js';
+import { createWorld, IDS, seedWorld, worldTransport, type IoLog, type World } from './support/worldFixtures.js';
 
 let dirsA: TempDirs;
 let dirsB: TempDirs;
