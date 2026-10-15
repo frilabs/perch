@@ -172,9 +172,9 @@ export const USER_ID_PATTERN = /^user-[a-f0-9]{16}$/;
 export const ROOT_NAMESPACE = 'root';
 
 /**
- * Admin-provisioned user (root store only). The user's credentials live in a physically separate store
- * and key (see src/users/registry.ts); the registry holds membership and the SHA-256 of the user's
- * read-only token, never the token.
+ * Admin-provisioned user, written by the removed user-isolation milestone. Still parsed so existing stores
+ * open unchanged (schema v1), but ignored: Perch serves one operator per installation, and these users'
+ * tokens are rejected. Their separate stores and keys are never opened or deleted.
  */
 const UserSchema = z.object({
   id: z.string().regex(USER_ID_PATTERN),
@@ -196,7 +196,7 @@ const StoreDataSchema = z.object({
   clients: z.array(ClientGrantSchema).default([]),
   // Added by the Google productivity milestone.
   googleProductivity: z.array(GoogleProductivityAccountSchema).default([]),
-  // Added by the user-isolation milestone (root store only; must stay empty in user stores).
+  // Added by the removed user-isolation milestone; parsed for compatibility, otherwise ignored.
   users: z
     .array(UserSchema)
     .max(MAX_USERS)

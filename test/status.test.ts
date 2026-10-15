@@ -1,5 +1,5 @@
 // `perch status` and the read-only /status page against MOCK upstream worlds (Drive, Notion, Gmail, Graph,
-// Calendar/Contacts per namespace, plus MOCK Slack and GOWA). IMAP/SMTP logins are MOCK checks. Nothing
+// Calendar/Contacts, plus MOCK Slack and GOWA). IMAP/SMTP logins are MOCK checks. Nothing
 // reaches a real provider; every secret is generated dummy data.
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -12,13 +12,11 @@ import { renderStatusPage, STATUS_STYLE_HASH } from '../src/status/page.js';
 import { collectStatus, formatStatusText } from '../src/status/status.js';
 import { CredentialStore, initStore, type ImapAccount } from '../src/store/credentialStore.js';
 import { Upstream, type UpstreamTransport } from '../src/upstream.js';
-import { NamespaceRouter } from '../src/users/namespaces.js';
-import { addUser, openUserStore } from '../src/users/registry.js';
 import { pairWhatsappAccount, setWhatsappInstance } from '../src/whatsapp/whatsapp.js';
 import { makeTempDirs, type TempDirs } from './support/fixtures.js';
 import { MockGowa } from './support/mockGowa.js';
 import { MockSlack } from './support/mockSlack.js';
-import { createWorld, IDS, seedWorld, worldContextFactory, worldTransport, type IoLog, type World } from './support/namespaceFixtures.js';
+import { createWorld, IDS, seedWorld, worldContext, worldTransport, type IoLog, type World } from './support/worldFixtures.js';
 
 let dirs: TempDirs;
 let rootStore: CredentialStore;
@@ -86,7 +84,7 @@ afterEach(async () => {
 
 const store = () => rootStore;
 /** Root context whose identity calls also reach MOCK Slack and GOWA (token refresh stays on the world fakes). */
-const rootContext = () => ({ ...worldContextFactory(worlds, io)(rootStore), upstream: new Upstream(transportFor(ROOT)) });
+const rootContext = () => ({ ...worldContext(rootStore, ROOT, io), upstream: new Upstream(transportFor(ROOT)) });
 
 describe('collectStatus [MOCK upstreams]', () => {
   it('lists every account family with identities, permissions and a live check per account', async () => {
@@ -101,7 +99,6 @@ describe('collectStatus [MOCK upstreams]', () => {
     expect(r.accounts.find((a) => a.family === 'whatsapp')).toMatchObject({ identity: '+4366012345678', check: { state: 'ok' } });
     expect(r.whatsappBridge?.origin).toBe(gowa.origin);
     expect(r.ledger).toMatchObject({ sends: 0, maxSends: 1000, pending: 0 });
-    expect(r.users).toEqual([]);
     expect(imapChecks).toEqual([IDS.imap]);
   });
 
@@ -179,25 +176,10 @@ describe('perch status (CLI) [MOCK upstreams]', () => {
 
 describe('GET /status [MOCK upstreams]', () => {
   let globalToken: string;
-  let userToken: string;
-  let router: NamespaceRouter;
 
   beforeEach(async () => {
-    const file = path.join(dirs.root, 'config', 'users', 'alice.token');
-    const { user } = await addUser(rootStore, { label: 'Alice', tokenFile: file });
-    const aliceWorld = createWorld('ALICE', io);
-    worlds.set(user.id, aliceWorld);
-    await seedWorld(await openUserStore(rootStore, user.id), aliceWorld);
-    userToken = (await readFile(file, 'utf8')).trim();
-    const factory = worldContextFactory(worlds, io);
-    // The root context also needs MOCK Slack and GOWA; user worlds only have the base fakes.
-    const withExtras: typeof factory = (s, guard) => {
-      const ctx = factory(s, guard);
-      return s.namespace === 'root' ? { ...ctx, upstream: new Upstream(transportFor(ROOT)) } : ctx;
-    };
-    router = new NamespaceRouter(withExtras(rootStore), withExtras);
     globalToken = generateHttpToken();
-    server = await startHttpServer({ host: '127.0.0.1', port: 0, token: globalToken, context: router.root, namespaces: router, log: () => {}, statusOptions: { imapVerify } });
+    server = await startHttpServer({ host: '127.0.0.1', port: 0, token: globalToken, context: rootContext(), log: () => {}, statusOptions: { imapVerify } });
   });
 
   const statusUrl = () => server!.url.replace(/\/mcp$/, '/status');
@@ -209,29 +191,18 @@ describe('GET /status [MOCK upstreams]', () => {
     expect(res.headers.get('www-authenticate')).toMatch(/^Basic realm="Perch status"/);
   });
 
-  it('shows the root namespace to the global token (Basic or Bearer), with strict headers', async () => {
+  it('shows the overview to the global token (Basic or Bearer), with strict headers', async () => {
     for (const authorization of [basic(globalToken), `Bearer ${globalToken}`]) {
       const res = await fetch(statusUrl(), { headers: { authorization } });
       expect(res.status).toBe(200);
       const html = await res.text();
       expect(html).toContain('Perch status');
       expect(html).toContain('Old workspace');
-      expect(html).toContain('Alice'); // root sees the provisioned users
       expect(res.headers.get('content-security-policy')).toBe(`default-src 'none'; style-src '${STATUS_STYLE_HASH}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
       expect(res.headers.get('cache-control')).toBe('no-store');
       expect(html).not.toMatch(/<script|<form|<iframe|https?:\/\/(?!127\.0\.0\.1)/);
       for (const secret of await secretsOf(rootStore)) expect(html).not.toContain(secret);
     }
-  });
-
-  it('shows a user only their own namespace', async () => {
-    const res = await fetch(statusUrl(), { headers: { authorization: basic(userToken) } });
-    expect(res.status).toBe(200);
-    const html = await res.text();
-    expect(html).toContain('Notion of ALICE');
-    expect(html).not.toContain('of ROOT');
-    expect(html).not.toContain('Old workspace');
-    expect(html).not.toMatch(/<h2>Users<\/h2>/);
   });
 
   it('refuses client grants, other methods and cross-site requests before any check', async () => {

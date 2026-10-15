@@ -205,15 +205,4 @@ describe('perch audit / perch mail-workflow (local admin, per namespace)', () =>
     expect((await cli(['mail-workflow', 'init'])).code).toBe(1);
   });
 
-  it('is scoped to the PERCH_USER namespace', async () => {
-    await seedSends();
-    const add = await cli(['user', 'add', '--label', 'Alice']);
-    const id = /Created user (user-[a-f0-9]{16})/.exec(add.out)![1]!;
-    const user = await cli(['audit', 'list'], { PERCH_USER: id });
-    expect(user.code, user.err).toBe(0);
-    expect(user.out).toMatch(new RegExp(`namespace ${id}`));
-    expect(user.out).toMatch(/\(none\)/);
-    expect((await cli(['mail-workflow', 'list'], { PERCH_USER: id })).out).toMatch(/\(none\)/);
-    expect((await cli(['mail-workflow', 'init'], { PERCH_USER: id })).err).toMatch(/already exists/);
-  });
 });

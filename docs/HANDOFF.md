@@ -1,5 +1,51 @@
 # Handoff: Perch
 
+## Update 2026-10-15: Zweiter Security-Review des öffentlichen Zugangs, Merge nach `main`
+
+- **Freigabe:** Fritz: „Merge auf main, wenn es passt“ (PR #8).
+- **Zweiter unabhängiger Review:** kein Weg zu Tokens oder `/mcp` ohne Kopplungscode, erlaubtes Google-Konto, Perch-Code und lokale Bestätigung. Behoben (mit Regressionstests):
+  - Die Sperre nach 20 ungültigen Bearer-Tokens blockierte auch frisch ausgestellte Tokens (Refresh, neue Kopplung, nach Neustart): ein Angreifer hätte mit 20 Müll-Requests alle 5 Minuten jedes Gerät aussperren können. Jetzt werden ausgestellte Tokens sofort und beim Start bekannte Tokens vorab als gültig vermerkt (Spec §15.9 hält).
+  - `perch oauth ungrant` machte ein Gerät mit engem Grant still zum Leser aller Konten. Jetzt nur mit ausdrücklichem `--read-all`; zum Wegnehmen `perch oauth revoke`.
+  - Test-Aufräumen wiederholt bei `ENOTEMPTY` (vorher sporadischer Fehler durch einen Audit-Schreibvorgang nach Testende).
+- **Bekannt und offen (vor dem echten Einschalten von Funnel abwägen):**
+  - Jeder im Internet kann offene Kopplungsfenster erkennen und schließen (falsche Codes, zweite Sitzung) und so Kopplungen verhindern und Fehlalarme auslösen. Nichts leakt. Abhilfe-Ideen: Antworten ohne Fenster ununterscheidbar machen, Sitzung erst nach Kopplungscode zählen, Per-IP-Limits hinter Funnel als Standard.
+  - `/mcp`-Aufrufe öffentlicher Geräte stehen im Audit als `operator_readonly` bzw. `client-…`, nicht mit Geräte-ID.
+  - `/oauth/token` mit wohlgeformtem Refresh-Token schreibt `oauth.enc` auch ohne Änderung (≤ 30/min); `readBody` liest nach dem Limit weiter (bis Timeout).
+  - Refresh-Rotation ohne Gnadenfrist (Spec §15.10).
+
+
+## Update 2026-10-14: Öffentlicher Zugang über OAuth umgesetzt (Branch `claude/perch-oauth-internet-access-b0cg8c`)
+
+- **Freigabe:** Fritz im Chat: „Passt alles, implementiere“ (Spec `docs/PUBLIC_ACCESS_SPEC.md`, alle Entscheidungen inklusive Limits; `perch user add` entfernen).
+- **Umgesetzt** (Details und Abweichungen: Spec §15; Einrichtung: `docs/SETUP.md` §6a):
+  - Commit 1: Rückbau der Nutzer-Isolation (`perch user`, `PERCH_USER`, Namespace-Router). Ein gesetztes `PERCH_USER` bricht ab; alte Stores öffnen weiter, `serve` warnt, alte Nutzer-Tokens bekommen `401`, alte Nutzer-Dateien bleiben unangetastet.
+  - Commit 2: `src/access/*` und `src/cli/oauth.ts`: öffentlicher Listener mit fester Routing-Tabelle, Perch als Authorization Server, Google-Login (ID-Token aus der direkten Token-Antwort, Claims streng geprüft), Perch-Code (TOTP) mit Notfall-Codes, Kopplungsfenster über einen 0600-Unix-Socket (`perch oauth pair`) oder `/local/pair`, ein Gerät pro Fenster, Code erst nach lokaler Bestätigung, rotierende Refresh-Tokens mit Wiederverwendungs-Erkennung, Notschalter, Rate-Limits, optionale Telegram-Hinweise. Base32, TOTP und QR-Encoder selbst gebaut; keine neuen Abhängigkeiten.
+  - Unabhängiger Review: kein Weg zu Tokens ohne bestätigte Kopplung gefunden. Ein hoher Befund (Neustart der Anmeldung umging „ein Gerät pro Fenster“, und die Bestätigung galt nicht fest der angezeigten Sitzung), zwei mittlere (globales Token konnte die lokale Seite steuern; Rate-Limits als DoS-Hebel) und mehrere kleine sind behoben, jeweils mit Regressionstest. Bewusst offen: Spec §15 Punkt 10.
+- **Getestet (nur Mocks):** `npm run check` als Nicht-Root-Nutzer grün: 663 Tests (52 Dateien), Smoke 11/11 (inklusive `serve --http --public` gegen die gebaute CLI), Lizenzprüfung OK, `npm audit --omit=dev` 0 Befunde. Als root schlagen zwei bestehende Ledger-Tests fehl (chmod-basierte Schreibfehler greifen für root nicht), das war schon vor diesem Branch so.
+- **Live verifiziert:** nichts.
+- **Nächste Schritte (Fritz):** Funnel einrichten, Google-Web-Client anlegen, `perch public setup`, `perch serve --http --public`, `perch oauth pair`, claude.ai-Connector und Claude Code koppeln. Dabei prüfen: ob claude.ai die bis zu 10 Minuten lange Kopplung offenhält, welche CIMD-URL die gehosteten Claude-Apps senden, ob Funnel die Client-IP weitergibt, wie sich Codex anmeldet. Kein Merge ohne Fritz' OK.
+
+
+## Update 2026-10-14: Öffentlicher Zugang über OAuth, nur Entwurf (Branch `claude/perch-oauth-internet-access-b0cg8c`)
+
+- **Auftrag:** Fritz' Plan „Perch aus dem Internet erreichbar, mindestens so sicher wie im Tailnet“ als Grundlage für Briefing und Spec, ausdrücklich **noch keine Umsetzung**.
+- **Ergebnis:** `docs/PUBLIC_ACCESS_BRIEFING.md` und `docs/PUBLIC_ACCESS_SPEC.md`, beide **Entwurf, nicht freigegeben**. Kein Code geändert.
+- **Wichtigste Befunde:** Tailscale Funnel gilt pro Port, nicht pro Pfad, daher braucht es einen eigenen öffentlichen Listener. Google lässt Perch den zweiten Faktor nicht prüfen, daher ein eigener zweiter Faktor in Perch. claude.ai kommt mit CIMD aus; DCR nur für andere Clients.
+- **Entscheidungen (Fritz, 2026-10-14), eingearbeitet:**
+  - Zweiter Faktor Pflicht, als eigener Perch-Code (TOTP) statt Passkey.
+  - Geräte werden lokal freigegeben, Telegram nur als Hinweis; friagent ist keine Abhängigkeit.
+  - OAuth-Clients lesen standardmäßig alles.
+  - Tailnet ist nicht Pflicht: Funnel auf 443 als Standard, beliebiger TLS-Proxy möglich.
+  - Nur Root, als Grundsatz (Produkt zum Selbsthosten, eine Person pro Installation).
+  - Clients ohne Metadaten-Dokument werden über DCR unterstützt, die ohne lokale Freigabe wirkungslos bleibt.
+  - Keine neuen Abhängigkeiten; das Google-ID-Token wird nach OIDC Core §3.1.3.7 ohne Signaturprüfung geprüft.
+- **Nachtrag (Fritz, 2026-10-14):** Die Phishing-Schwäche von TOTP „so sicher wie möglich“ beheben; Lebensdauern und Limits bestätigt; `perch user add` entfernen.
+  - Eingearbeitet als Kopplungsfenster (Spec §0a, §6): Anmeldung nur in einem lokal per `perch oauth pair` geöffneten Fenster mit Kopplungscode, ein Gerät pro Fenster (zweiter Versuch: Alarm, beide verworfen), Code erst nach lokaler Bestätigung mit Details, jede neue Anmeldung ist eine neue Kopplung, DCR nur im Fenster.
+  - Restrisiko dokumentiert: Echtzeit-Phishing genau im eigenen Fenster, inklusive Kopplungscode.
+  - Rückbau der Nutzer-Isolation als eigener erster Schritt mit eigenem PR (Spec §11a).
+- **Nächster Schritt:** Fritz gibt die Spec frei. Vor der Umsetzung werden die Punkte aus Spec §13 geprüft.
+
+
 ## Update 2026-10-14: `perch status` und Statusseite (Branch `feat/perch-status`)
 
 - **Freigabe:** Fritz im Chat: „Baue perch status und eine nur anzeigende Website“ (Konzept: nur lesend, keine Secrets, gleiche Absicherung wie MCP, pro Nutzer).

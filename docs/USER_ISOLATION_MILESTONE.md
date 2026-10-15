@@ -1,5 +1,7 @@
 # User ownership and isolation milestone (admin-provisioned users)
 
+> **Entfernt am 2026-10-14.** Auf Fritz' Entscheidung bedient Perch genau einen Betreiber pro Installation; die hier beschriebene Nutzer-Isolation wurde ausgebaut (`docs/PUBLIC_ACCESS_SPEC.md` §11a, `docs/SETUP.md` §4c). Dieses Dokument ist nur noch historisch.
+
 As of 2026-10-05. Delivery branch `feat/perch-user-isolation`, based on the verified Calendar/Contacts commit `acc3eeb` (PR4). Independently tested and review-approved; published as PR #5 (commit `560c6ae`, CI green, verified 468 tests + 9 smoke), not merged. GitHub is the authority for publication/merge state. The follow-up audit/idempotent-send increment is documented in `MAIL_WORKFLOW_MILESTONE.md`. Fritz authorised this expanded phase-1 increment on 2026-10-05 via the orchestrator.
 
 **Status:** implemented and locally tested against **MOCK** upstreams only. **Not live-verified.** This is **not** hosted multi-tenant hardening and **not** phase-1 completion (see §8).

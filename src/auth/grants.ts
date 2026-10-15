@@ -225,6 +225,42 @@ export async function createClientGrant(
 }
 
 /**
+ * Client grant for an OAuth device of the public access (perch oauth grant). It has no bearer token of its
+ * own: its token hash is the SHA-256 of 32 random bytes that are discarded at once, so no presented token
+ * can ever match it on the local listener. The device record points at the grant id; principalFromGrant and
+ * currentPrincipal (re-resolution before every tool call, revocation) then work exactly as for perch client add.
+ */
+export async function createDeviceGrant(
+  store: CredentialStore,
+  input: { label: string; capabilities: Capability[]; accountIds: string[] },
+): Promise<ClientGrant> {
+  const label = validateLabel(input.label);
+  const capabilities = parseCapabilities(input.capabilities);
+  if (!capabilities.length) throw new PerchError(`A grant needs at least one capability (${CAPABILITIES.join(', ')})`, 'bad_argument');
+  const accountIds = [...new Set(input.accountIds)];
+  if (!accountIds.length) throw new PerchError('A grant needs at least one account id', 'bad_argument');
+  return store.update((data) => {
+    validateGrantShape(data, capabilities, accountIds);
+    const grant: ClientGrant = {
+      id: newAccountId('client', data.clients.map((c) => c.id)),
+      label,
+      tokenSha256: tokenSha256(randomBytes(32).toString('base64url')),
+      capabilities,
+      accountIds,
+      createdAt: new Date().toISOString(),
+    };
+    data.clients.push(grant);
+    return grant;
+  });
+}
+
+/** Principal of an existing grant id (OAuth device grants); null if the grant is gone. */
+export async function principalForGrantId(store: CredentialStore, id: string): Promise<Principal | null> {
+  const grant = (await store.read()).clients.find((c) => c.id === id);
+  return grant ? principalFromGrant(grant) : null;
+}
+
+/**
  * Every account must exist and be of a kind some granted capability applies to, and every capability
  * family needs at least one matching account. A calendar grant therefore never carries mail access
  * by accident, and a mail grant never Calendar/Contacts access.
