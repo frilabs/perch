@@ -33,6 +33,7 @@ export async function makeTempDirs(): Promise<TempDirs> {
     dataDir: path.join(root, 'data'),
     keyFile: path.join(root, 'config', 'store.key'),
     tokenFile: path.join(root, 'config', 'http-token'),
-    cleanup: () => rm(root, { recursive: true, force: true }),
+    // Retries: a background audit write of a just-closed server can still be creating files.
+    cleanup: () => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }),
   };
 }

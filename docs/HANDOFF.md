@@ -1,5 +1,19 @@
 # Handoff: Perch
 
+## Update 2026-10-15: Zweiter Security-Review des öffentlichen Zugangs, Merge nach `main`
+
+- **Freigabe:** Fritz: „Merge auf main, wenn es passt“ (PR #8).
+- **Zweiter unabhängiger Review:** kein Weg zu Tokens oder `/mcp` ohne Kopplungscode, erlaubtes Google-Konto, Perch-Code und lokale Bestätigung. Behoben (mit Regressionstests):
+  - Die Sperre nach 20 ungültigen Bearer-Tokens blockierte auch frisch ausgestellte Tokens (Refresh, neue Kopplung, nach Neustart): ein Angreifer hätte mit 20 Müll-Requests alle 5 Minuten jedes Gerät aussperren können. Jetzt werden ausgestellte Tokens sofort und beim Start bekannte Tokens vorab als gültig vermerkt (Spec §15.9 hält).
+  - `perch oauth ungrant` machte ein Gerät mit engem Grant still zum Leser aller Konten. Jetzt nur mit ausdrücklichem `--read-all`; zum Wegnehmen `perch oauth revoke`.
+  - Test-Aufräumen wiederholt bei `ENOTEMPTY` (vorher sporadischer Fehler durch einen Audit-Schreibvorgang nach Testende).
+- **Bekannt und offen (vor dem echten Einschalten von Funnel abwägen):**
+  - Jeder im Internet kann offene Kopplungsfenster erkennen und schließen (falsche Codes, zweite Sitzung) und so Kopplungen verhindern und Fehlalarme auslösen. Nichts leakt. Abhilfe-Ideen: Antworten ohne Fenster ununterscheidbar machen, Sitzung erst nach Kopplungscode zählen, Per-IP-Limits hinter Funnel als Standard.
+  - `/mcp`-Aufrufe öffentlicher Geräte stehen im Audit als `operator_readonly` bzw. `client-…`, nicht mit Geräte-ID.
+  - `/oauth/token` mit wohlgeformtem Refresh-Token schreibt `oauth.enc` auch ohne Änderung (≤ 30/min); `readBody` liest nach dem Limit weiter (bis Timeout).
+  - Refresh-Rotation ohne Gnadenfrist (Spec §15.10).
+
+
 ## Update 2026-10-14: Öffentlicher Zugang über OAuth umgesetzt (Branch `claude/perch-oauth-internet-access-b0cg8c`)
 
 - **Freigabe:** Fritz im Chat: „Passt alles, implementiere“ (Spec `docs/PUBLIC_ACCESS_SPEC.md`, alle Entscheidungen inklusive Limits; `perch user add` entfernen).

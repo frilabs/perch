@@ -663,7 +663,7 @@ perch oauth devices                                   # Geräteliste (Status, ge
 perch oauth revoke oc-0123456789abcdef                # ein Gerät abmelden (wirkt beim nächsten Request)
 perch oauth revoke --all
 perch oauth grant oc-0123456789abcdef --allow read,send --account imap-1a2b3c4d   # Schreibrechte (wie perch client add)
-perch oauth ungrant oc-0123456789abcdef
+perch oauth ungrant oc-0123456789abcdef --read-all   # Achtung: ohne Grant liest das Gerät ALLE Konten; zum Wegnehmen: revoke
 perch oauth login-allow add|remove EMAIL | list
 perch oauth totp setup | status | recovery-codes      # setup erneut = neuer Code, alle Geräte werden abgemeldet
 perch oauth client add --name Codex --redirect http://127.0.0.1/callback   # Client ohne Metadaten-Dokument, fest registriert

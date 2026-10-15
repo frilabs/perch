@@ -164,6 +164,21 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
   };
   /** Access-token hashes seen valid recently: known devices pass the invalid-bearer block. */
   const knownAccess = new Map<string, number>();
+  const rememberAccess = (hash: string, until: number) => {
+    if (knownAccess.size > 500) knownAccess.clear();
+    knownAccess.set(hash, until);
+  };
+  // After a restart, tokens issued earlier are known again before the listener accepts anything. An
+  // unreadable state is not an error here: every request then fails closed through readState.
+  try {
+    const t = now();
+    for (const d of (await oauth.read()).devices) {
+      const until = Date.parse(d.family.accessExpiresAt ?? '');
+      if (d.status === 'active' && d.family.accessHash && until > t) rememberAccess(d.family.accessHash, until);
+    }
+  } catch {
+    // fail closed later
+  }
   const deviceBuckets = new Map<string, Bucket>();
   let invalidBearer: number[] = [];
   let bearerBlockedUntil = 0;
@@ -609,6 +624,8 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
     if (d.family.refreshHash) d.family.previousRefresh = [...d.family.previousRefresh, d.family.refreshHash].slice(-100);
     d.family.accessHash = sha256Hex(access);
     d.family.accessExpiresAt = new Date(t + ACCESS_TOKEN_TTL_MS).toISOString();
+    // A freshly issued token must pass a running invalid-bearer block (spec §15.9: valid tokens are exempt).
+    rememberAccess(d.family.accessHash, t + ACCESS_TOKEN_TTL_MS);
     d.family.refreshHash = sha256Hex(refresh);
     d.family.refreshedAt = new Date(t).toISOString();
     d.lastSeenAt = new Date(t).toISOString();
@@ -765,8 +782,7 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
       countInvalid();
       return unauthorized(res, true);
     }
-    if (knownAccess.size > 500) knownAccess.clear();
-    knownAccess.set(h, Date.parse(device.family.accessExpiresAt!));
+    rememberAccess(h, Date.parse(device.family.accessExpiresAt!));
     let bucket = deviceBuckets.get(device.id);
     if (!bucket) deviceBuckets.set(device.id, (bucket = new Bucket(120, now)));
     if (!bucket.take()) return tooMany(res);

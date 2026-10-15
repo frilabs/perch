@@ -307,12 +307,23 @@ async function grant(config: PerchConfig, io: CliIo, id: string | undefined, val
   io.stdout(
     `Device ${id} now acts as client grant ${g.id} (${g.capabilities.join(',')}) for ${g.accountIds.join(', ')}.\n` +
       'Like perch client add, it then sees only what this grant covers; include read capabilities if it should keep reading.\n' +
-      `Undo: perch oauth ungrant ${id}\n`,
+      `Undo: perch oauth ungrant ${id} --read-all (then it reads every account), or perch oauth revoke ${id}\n`,
   );
 }
 
-async function ungrant(config: PerchConfig, io: CliIo, id: string | undefined): Promise<void> {
-  if (!id || !DEVICE_ID_PATTERN.test(id)) throw usage('Usage: perch oauth ungrant <oc-…>');
+/**
+ * Removing a device's grant makes it read-only over EVERY account again, which can be more than the grant
+ * allowed (a grant names its accounts). That widening needs the explicit --read-all; to take access away,
+ * use perch oauth revoke or a narrower perch oauth grant.
+ */
+async function ungrant(config: PerchConfig, io: CliIo, id: string | undefined, readAll: boolean): Promise<void> {
+  if (!id || !DEVICE_ID_PATTERN.test(id)) throw usage('Usage: perch oauth ungrant <oc-…> --read-all');
+  if (!readAll) {
+    throw usage(
+      `Without its grant, device ${id} could READ EVERY connected account, which may be more than its grant allows. ` +
+        `To take access away use perch oauth revoke ${id} (or a narrower perch oauth grant); to really allow reading everything, repeat with --read-all.`,
+    );
+  }
   const { store, oauth, audit } = await open(config);
   let old: string | undefined;
   await oauth.transact((d) => {
@@ -323,7 +334,7 @@ async function ungrant(config: PerchConfig, io: CliIo, id: string | undefined): 
   });
   if (old) await removeClientGrant(store, old).catch(() => {});
   await recordAudit(audit, 'oauth_device_grant', id, 'removed');
-  io.stdout(`Device ${id} is read-only again.\n`);
+  io.stdout(`Device ${id} has no grant any more: it can read every connected account and write nothing.\n`);
 }
 
 async function loginAllow(config: PerchConfig, io: CliIo, sub: string | undefined, arg: string | undefined): Promise<void> {
@@ -430,7 +441,7 @@ export async function cmdOauth(config: PerchConfig, io: CliIo, sub: string | und
       await grant(config, io, rest[0], values);
       return 0;
     case 'ungrant':
-      await ungrant(config, io, rest[0]);
+      await ungrant(config, io, rest[0], values['read-all'] === true);
       return 0;
     default:
       throw usage('Usage: perch oauth pair | totp … | login-allow … | client … | devices | revoke … | grant … | ungrant …');

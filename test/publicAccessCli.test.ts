@@ -181,6 +181,13 @@ describe('perch oauth pair (end to end over the control socket)', () => {
     const list = cliIo(() => '');
     await runCli(['oauth', 'devices'], list);
     const id = /(oc-[a-f0-9]{16}) {2}active/.exec(list.out())![1]!;
+    // Removing a grant would widen a device to reading every account: only with an explicit --read-all.
+    const narrow = cliIo(() => '');
+    expect(await runCli(['oauth', 'ungrant', id], narrow)).toBe(1);
+    expect(narrow.err()).toMatch(/READ EVERY connected account[\s\S]*perch oauth revoke/);
+    const wide = cliIo(() => '');
+    expect(await runCli(['oauth', 'ungrant', id, '--read-all'], wide)).toBe(0);
+    expect(wide.out()).toMatch(/can read every connected account and write nothing/);
     expect(await runCli(['oauth', 'revoke', id], cliIo(() => ''))).toBe(0);
     const after = await http(port, 'POST', '/mcp', { body: '{}', headers: { 'content-type': 'application/json', authorization: `Bearer ${tok.access_token}` } });
     expect(after.status).toBe(401);
