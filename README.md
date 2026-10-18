@@ -89,7 +89,7 @@ Perch re-checks the grant before every tool call, so `perch client remove ID` ta
 ## Quick start
 
 ```bash
-git clone https://github.com/FritzKuermayr/perch.git perch && cd perch
+git clone https://github.com/frilabs/perch.git perch && cd perch
 npm ci && npm run build
 node dist/cli.js init
 node dist/cli.js notion add --label "Personal"         # enter the PAT at the masked prompt
