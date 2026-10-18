@@ -9,7 +9,7 @@ Stand 2026-10-05. Alle Befehle laufen auf dem Heimserver, sofern nicht „Laptop
 - Node.js ≥ 22.12 und npm
 
 ```bash
-git clone https://github.com/FritzKuermayr/perch.git perch && cd perch
+git clone https://github.com/frilabs/perch.git perch && cd perch
 npm ci
 npm run build
 npm test                  # Unit- und Integrationstests (Mocks)
