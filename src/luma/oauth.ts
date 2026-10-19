@@ -13,8 +13,8 @@ import { UpstreamError, validateLumaOrigin, type Upstream } from '../upstream.js
  */
 export const LUMA_MCP_ORIGIN = 'https://mcp.luma.com';
 export const LUMA_MCP_URL = `${LUMA_MCP_ORIGIN}/mcp`;
-/** Perch's Client ID Metadata Document (GitHub Pages of the Perch repo, pages/luma-client.json). */
-export const DEFAULT_LUMA_CLIENT_ID = 'https://fritzkuermayr.github.io/perch/luma-client.json';
+/** Perch's Client ID Metadata Document, served as a static file by frilabs.dev (source: pages/luma-client.json, copy in frilabs-home public/perch/). */
+export const DEFAULT_LUMA_CLIENT_ID = 'https://frilabs.dev/perch/luma-client.json';
 export const LUMA_CALLBACK_PATH = '/callback';
 
 export interface LumaAuthServer {

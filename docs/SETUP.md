@@ -466,13 +466,11 @@ perch whatsapp remove ID --keep-device   # nur lokal entfernen
 
 Spezifikation: `docs/LUMA_SPEC.md`. **Nur mit Mocks getestet, nicht live verifiziert.** Perch verbindet sich als MCP-Client mit `https://mcp.luma.com` und meldet sich per OAuth mit dem Luma-Konto an. Es braucht kein Luma Plus und keinen API-Schlüssel.
 
-### 4g.1 Einmalig: Client-Dokument veröffentlichen (Repo-Owner)
+### 4g.1 Client-Dokument (einmalig, schon erledigt)
 
-Luma erkennt Perch an seinem Client ID Metadata Document `https://fritzkuermayr.github.io/perch/luma-client.json` (Datei `pages/luma-client.json`). GitHub Pages veröffentlicht nur den Ordner `pages/`:
+Luma vergibt keine Client-IDs. Perch weist sich mit seinem Client ID Metadata Document aus: `https://frilabs.dev/perch/luma-client.json` (Quelle `pages/luma-client.json`, ausgeliefert als statische Datei von frilabs.dev, Repo `frilabs-home`, Datei `public/perch/luma-client.json`). Beide Dateien müssen gleich bleiben.
 
-1. GitHub → Repo `perch` → **Settings → Pages → Build and deployment → Source: GitHub Actions**.
-2. Den Workflow **Pages** einmal laufen lassen (läuft automatisch bei Änderungen an `pages/` auf `main`).
-3. Prüfen: `curl -s https://fritzkuermayr.github.io/perch/luma-client.json`.
+Prüfen: `curl -s https://frilabs.dev/perch/luma-client.json` muss genau den Inhalt von `pages/luma-client.json` zeigen.
 
 Bietet Luma Dynamic Client Registration an, registriert sich Perch dort selbst (bevorzugt, Spec §3); dann wird das Dokument nicht gebraucht. Andere Betreiber können mit `PERCH_LUMA_CLIENT_ID` ein eigenes Dokument angeben.
 
