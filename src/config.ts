@@ -2,6 +2,14 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { PerchError } from './errors.js';
 import { readPrivateFile } from './secureFs.js';
+import { validateCimdOrigin } from './upstream.js';
+
+function validateCimdUrl(raw: string): string {
+  validateCimdOrigin(raw);
+  const u = new URL(raw);
+  if (u.search || u.hash || u.pathname === '/') throw new PerchError('PERCH_LUMA_CLIENT_ID must be an https URL with a path, without query or fragment', 'bad_config');
+  return raw;
+}
 
 export interface PerchConfig {
   dataDir: string;
@@ -32,6 +40,8 @@ export interface PerchConfig {
   notifyTelegramFile?: string;
   /** Trust X-Forwarded-For from a loopback proxy for the shown IP and limits. */
   publicTrustForwarded: boolean;
+  /** Overrides Perch's built-in Client ID Metadata Document URL for Luma. */
+  lumaClientId?: string;
 }
 
 /**
@@ -86,6 +96,7 @@ export function resolveConfig(env: Record<string, string | undefined>): PerchCon
     oauthDcr: flag('PERCH_OAUTH_DCR', true),
     ...(env.PERCH_NOTIFY_TELEGRAM_FILE ? { notifyTelegramFile: path.resolve(env.PERCH_NOTIFY_TELEGRAM_FILE) } : {}),
     publicTrustForwarded: flag('PERCH_PUBLIC_TRUST_FORWARDED', false),
+    ...(env.PERCH_LUMA_CLIENT_ID ? { lumaClientId: validateCimdUrl(env.PERCH_LUMA_CLIENT_ID.trim()) } : {}),
   };
 }
 

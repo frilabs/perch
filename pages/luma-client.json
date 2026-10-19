@@ -1,0 +1,9 @@
+{
+  "client_id": "https://fritzkuermayr.github.io/perch/luma-client.json",
+  "client_name": "Perch",
+  "client_uri": "https://github.com/FritzKuermayr/perch",
+  "redirect_uris": ["http://127.0.0.1/callback", "http://localhost/callback"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none"
+}

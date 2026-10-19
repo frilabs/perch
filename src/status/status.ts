@@ -20,7 +20,7 @@ import { PERCH_VERSION } from '../version.js';
  * token providers, so refresh-token rotation never races with the running server.
  */
 
-export type AccountFamily = 'drive' | 'notion' | 'mail' | 'calendar' | 'slack' | 'whatsapp';
+export type AccountFamily = 'drive' | 'notion' | 'mail' | 'calendar' | 'slack' | 'whatsapp' | 'luma';
 
 export const FAMILY_TITLES: Record<AccountFamily, string> = {
   drive: 'Google Drive',
@@ -29,6 +29,7 @@ export const FAMILY_TITLES: Record<AccountFamily, string> = {
   calendar: 'Google Calendar/Contacts',
   slack: 'Slack',
   whatsapp: 'WhatsApp',
+  luma: 'Luma',
 };
 
 export interface CheckResult {
@@ -100,6 +101,10 @@ function accountsOf(d: StoreData): AccountStatus[] {
   for (const a of d.whatsapp) {
     const number = a.jid?.split('@')[0]?.split(':')[0];
     rows.push({ family: 'whatsapp', id: a.id, label: a.label, provider: 'gowa', ...(number ? { identity: `+${number}` } : {}), permissions: 'read, send', connectedAt: a.createdAt });
+  }
+  for (const a of d.luma) {
+    const ident = a.email ?? a.name;
+    rows.push({ family: 'luma', id: a.id, label: a.label, provider: 'luma-mcp', ...(ident ? { identity: ident } : {}), permissions: `${a.tools.length} tools approved`, connectedAt: a.createdAt });
   }
   return rows;
 }
@@ -192,6 +197,9 @@ async function checkAccount(ctx: PerchContext, d: StoreData, a: AccountStatus, o
       if (r.results?.is_connected !== true) throw new PerchError('Logged in, but the bridge is not connected to WhatsApp right now', 'not_connected');
       return;
     }
+    case 'luma':
+      await ctx.luma.check(a.id);
+      return;
   }
 }
 

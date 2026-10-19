@@ -1,6 +1,6 @@
 # Briefing und Spezifikation (Entwurf): Luma über den offiziellen Luma-MCP
 
-Stand 2026-10-15. **Status: Entwurf, nicht freigegeben.** Grundlage: Fritz' Wunsch „Perch soll auch den Luma MCP connecten“ und der Designvorschlag vom 2026-10-15 (Lesen, Events anlegen/ändern, Gäste einladen/freigeben, Blasts senden; kein Luma Plus vorhanden). Laut `AGENTS.md` wird erst nach Fritz' Freigabe Code geschrieben.
+Stand 2026-10-15. **Status: Freigegeben** (Fritz am 2026-10-15: „perch repo, mit gegenprobe, ja, passt. Implementiere“). **Umgesetzt**, nur mit Mocks getestet; Abweichungen in §10. Grundlage: Fritz' Wunsch „Perch soll auch den Luma MCP connecten“ und der Designvorschlag vom 2026-10-15 (Lesen, Events anlegen/ändern, Gäste einladen/freigeben, Blasts senden; kein Luma Plus vorhanden). Laut `AGENTS.md` wird erst nach Fritz' Freigabe Code geschrieben.
 
 ## 1. Ziel
 
@@ -94,3 +94,15 @@ Die Einteilung wird nach §2 Punkt 3 gegen die echte Tool-Liste geprüft.
 2. **Blasts:** wie in §6 mit Bestätigung der Empfängerzahl (Empfehlung), oder vorerst gar nicht?
 3. **Gäste einladen:** Sollen Einladungen an Adressen gehen dürfen, die noch nie Gast in einem eigenen Event waren? Empfehlung: ja, aber höchstens *50* Adressen pro Aufruf.
 4. **Grenzfälle der Einteilung:** `add_host` und Coupons stehen in „gar nicht“. Passt das?
+
+## 10. Umsetzung und Abweichungen (2026-10-15)
+
+- **Entscheidungen §9:** Client-Dokument auf GitHub Pages des Perch-Repos (`pages/luma-client.json`, Workflow `.github/workflows/pages.yml`, veröffentlicht nur `pages/`); Blasts mit Gegenprobe; Einladungen höchstens 50 pro Aufruf; `add_host` und Coupons nie.
+- **Schema-Pin statt eigener zod-Schemas:** Statt die (sehr großen) Luma-Schemas abzuschreiben, merkt sich Perch beim `perch luma add` die Schemas der erlaubten Tools mit einem Strukturhash (Trust on first use; Beschreibungs-Schlüsselwörter zählen nicht, gleichnamige Felder schon). Abweichung oder Wegfall sperrt das Tool bis `perch luma tools <id> --accept`; `perch status` meldet gesperrte Tools als Fehler. Tools mit Perch unbekannten Feldern auf oberster Ebene werden nie freigegeben. Perch registriert seine MCP-Tools aus den gespeicherten Schemas (`z.fromJSONSchema`, alle Objekte strikt), pro Client nur aus den Konten, die er nutzen darf; weichen deren Schemas voneinander ab, wird das Tool nicht angeboten. Schreibaufrufe prüfen das Schema unmittelbar vor dem Aufruf frisch.
+- **Zusätzliche Regeln:** E-Mails an Dritte brauchen zusätzlich `luma_guests` (`update_event` mit `email_guests: true`, `approve_calendar_events`, `reject_calendar_events` mit Benachrichtigung); `update_guest_status` mit `should_refund: true` lehnt Perch ab.
+- **Blast-Gegenprobe:** nur sofortige Blasts (kein `scheduled_for`) mit ausdrücklichem `recipient_groups` (nur `status`). Gezählt werden die Status `approved`, `pending_approval`, `waitlist`, `invited` über das gepinnte `list_guests` (seitenweise, doppelte Gäste einmal). Blasts mit Ticket-Filter oder an `checked_in` lehnt Perch ab, weil es sie nicht nachzählen kann. Ein unbekanntes Antwortformat oder weitere Seiten ohne Cursor führen zur Ablehnung (fail closed). Zwischen Zählen und Senden bleibt ein kurzes Zeitfenster.
+- **Zusätzliches Tool:** `luma_write_status` (Ausgang eines eigenen früheren Schreibaufrufs).
+- **Keine neuen Abhängigkeiten:** MCP-Client aus dem vorhandenen SDK; nur `https://mcp.luma.com/mcp` erreichbar, keine Redirects, kein SSE-Rückkanal (GET), Antworten höchstens 8 MiB, Timeout 30 s. OAuth-Endpunkte nur auf `luma.com`, `lu.ma` und deren Subdomains.
+- **Weiter live zu prüfen (§2):** Registrierungsart, Refresh-Verhalten, echte Tool-Liste und Antwortformat von `list_guests` und `get_self`.
+- **Nach dem unabhängigen Review (2026-10-15) behoben:** 401 von Luma wird am HTTP-Status erkannt (Token verworfen, ein neuer Versuch); ein Schreibaufruf, der vor dem eigentlichen Tool-Aufruf scheitert (401, Verbindungsaufbau), gilt als `rejected`, nicht als `indeterminate`; DCR wird bevorzugt (wie §3); Aussteller-Prüfung verlangt `issuer`; Lumas Fehlertext geht als eigenes Feld `lumaError` an den Client, nie in den Ledger; Ergebnisse pro Konto höchstens ~1 MB; ein Cursor nur zusammen mit `accountId`; `perch luma remove` nennt entfernte Client-Grants; `PERCH_LUMA_CLIENT_ID` wird geprüft.
+- **Bewusst offen:** Refresh-Rotation zwischen CLI und Server ohne gemeinsames Lock (gleichzeitige Refreshes können ein `invalid_grant` auslösen); Luma-Toolbeschreibungen (bis 1500 Zeichen) stehen in Perchs Toolbeschreibungen und sind nicht vertrauenswürdig; ob Lumas Server die Redirect-URIs ohne Port im Client-Dokument akzeptiert, ist live zu prüfen.
