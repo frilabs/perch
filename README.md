@@ -101,6 +101,84 @@ node dist/cli.js serve --http                          # 127.0.0.1:8765, bearer 
 
 The full guide is [`docs/SETUP.md`](docs/SETUP.md) (German): Google Cloud setup, Slack and GOWA, Tailscale or SSH, Claude Code and Codex configuration, revocation and limits.
 
+## Live test, step by step
+
+Perch has only been tested against mocks. This is the first live run on the home server. Work top to bottom; after every connector run `perch status`, and note anything that fails (it ends up in `docs/PHASE1_REMAINING.md` §1). Details for every step: [`docs/SETUP.md`](docs/SETUP.md).
+
+**You need:** a Linux server with Node.js ≥ 22.12 and Git, Tailscale on server and laptop, SSH from the laptop to the server (below called `homeserver`), Claude Code on the laptop.
+
+### 1. Install on the server
+
+```bash
+gh auth login                                   # or a read-only deploy key: the repository is private
+git clone https://github.com/frilabs/perch.git ~/perch && cd ~/perch
+npm ci && npm run build && npm run check        # must be green before you connect real accounts
+cp .env.example .env && chmod 600 .env          # replace USER with your user name
+echo "alias perch='node --env-file=$HOME/perch/.env $HOME/perch/dist/cli.js'" >> ~/.bashrc && source ~/.bashrc
+perch init
+perch status --no-check                         # empty overview, no errors
+```
+
+Back up `~/.config/perch/store.key` **now**, separately from the data directory. Without it nothing can be decrypted.
+
+### 2. Connect accounts (one at a time)
+
+Browser logins redirect to `127.0.0.1` on the server. If the browser runs on the laptop, open a tunnel first and keep it open during the login: `ssh -N -L 8766:127.0.0.1:8766 homeserver` (Luma: port 8768).
+
+| # | Connector | Prepare | Command on the server |
+| --- | --- | --- | --- |
+| a | Notion | create a personal access token per workspace and share the pages with it | `perch notion add --label "Personal"` |
+| b | Google Drive | Google Cloud project: enable Drive, Gmail, Calendar and People APIs; consent screen "Testing" with yourself as test user and the scopes from SETUP §3–4b; OAuth client **Desktop app** → `~/.config/perch/google-client.json` (`chmod 600`) | `perch google add --label "Private" --port 8766` |
+| c | Gmail | same Google client | `perch gmail add --label "Gmail" --port 8766` (later `--allow-send` for the send test) |
+| d | Calendar/Contacts | same Google client | `perch google-productivity add --label "Private" --services calendar,contacts --port 8766` |
+| e | Outlook | Entra app registration, public client, redirect `http://localhost`, `User.Read` + `Mail.Read`; set `PERCH_MICROSOFT_CLIENT_ID` in `.env` | `perch microsoft add --label "Outlook" --port 8766` |
+| f | GMX | GMX webmail: allow IMAP; app password if 2FA is on | `perch imap add --label "GMX" --email you@gmx.at` |
+| g | Slack | `perch slack manifest`, create the app per workspace at api.slack.com/apps, install, copy the **User OAuth Token** | `perch slack add --label "Workspace"` |
+| h | WhatsApp | install GOWA as in SETUP §4f (localhost only, basic auth) | `perch whatsapp instance set --url http://127.0.0.1:3000`, then `perch whatsapp add --label "Private" --phone +43…` and enter the pairing code on the phone |
+| i | Luma | check `curl -s https://frilabs.dev/perch/luma-client.json` returns the document | `perch luma add --label "Luma" --port 8768`, then `perch luma tools <id>` |
+
+Google refresh tokens expire after 7 days while the consent screen is in "Testing"; reconnect then.
+
+### 3. Run the server
+
+```bash
+loginctl enable-linger "$USER"                  # keep user services running after logout
+# ~/.config/systemd/user/perch.service as in SETUP §6, ExecStart: node --env-file=%h/perch/.env %h/perch/dist/cli.js serve --http
+systemctl --user daemon-reload && systemctl --user enable --now perch
+sudo tailscale serve --bg http://127.0.0.1:8765
+# add the MagicDNS name to .env: PERCH_ALLOWED_HOSTS=homeserver.<tailnet>.ts.net, then restart the service
+perch status                                    # every account "ok"
+```
+
+Open `https://homeserver.<tailnet>.ts.net/status` in the browser (password: the content of `~/.config/perch/http-token`).
+
+### 4. Connect Claude Code on the laptop (read-only)
+
+```bash
+TOKEN="$(ssh homeserver 'cat ~/.config/perch/http-token')"
+claude mcp add --scope user --transport http perch https://homeserver.<tailnet>.ts.net/mcp --header "Authorization: Bearer ${TOKEN}"
+unset TOKEN; chmod 600 ~/.claude.json
+```
+
+Try in Claude Code: "list my Perch accounts", "search Drive for X", "latest mails about Y", "what was said about Z in Slack and WhatsApp", "my events next week", "my Luma events".
+
+### 5. Test writing (only to yourself)
+
+```bash
+perch client add --label "Claude Code write test" --allow read,send,slack_read,slack_send --account <gmail-…> --account <slack-…> \
+  --token-file ~/.config/perch/clients/write-test.token
+```
+
+Register that token as a second MCP server on the laptop (`perch-write`). Then: send one mail to yourself, post one Slack message in a private test channel, and repeat the same request with the same `requestId`: it must answer `replayed: true` and send nothing. Check `perch audit list`. Remove the grant afterwards: `perch client remove <client-…>`.
+
+### 6. Optional: public access (claude.ai on web and phone)
+
+Only after steps 1–5 work, and read the known gaps in `docs/PHASE1_REMAINING.md` §3 first. Steps: SETUP §6a.2 (Funnel, Google **Web application** client, `perch public setup`), restart with `serve --http --public`, then `perch oauth pair` and add `https://homeserver.<tailnet>.ts.net/mcp` as a custom connector in claude.ai. Kill switch: `perch public off`.
+
+### 7. Report back
+
+For each connector: works / fails with the message from `perch status`. Plus the live questions in `docs/PHASE1_REMAINING.md` §1 (Luma registration type, WhatsApp stability, claude.ai pairing, Funnel client IP).
+
 ## Development
 
 ```bash
@@ -142,6 +220,7 @@ The detailed documents are in German.
 - [`docs/SLACK_WHATSAPP_MILESTONE.md`](docs/SLACK_WHATSAPP_MILESTONE.md): Slack/WhatsApp milestone (decisions, allowlist, limits)
 - [`docs/PROJECT_SCOPE.md`](docs/PROJECT_SCOPE.md): broader project direction
 - [`docs/HANDOFF.md`](docs/HANDOFF.md): current state
+- [`docs/PHASE1_REMAINING.md`](docs/PHASE1_REMAINING.md): done vs. open (live validation, operations, known gaps)
 - [`AGENTS.md`](AGENTS.md): working rules
 - `brand/logo/`: Perch logo (a branch with two twigs, frilabs standard: black/white, symbol, favicon, app icon)
 
