@@ -100,7 +100,7 @@ describe('onboarding', () => {
     expect(out).toContain('via cimd');
     expect(out).toMatch(/Not offered by Luma: .*list_calendars/);
     const acc = (await store.read()).luma[0]!;
-    expect(acc).toMatchObject({ id, email: 'operator@example.test', userId: 'usr-mock0001', clientId: 'https://fritzkuermayr.github.io/perch/luma-client.json', registration: 'cimd' });
+    expect(acc).toMatchObject({ id, email: 'operator@example.test', userId: 'usr-mock0001', clientId: 'https://frilabs.dev/perch/luma-client.json', registration: 'cimd' });
     const names = acc.tools.map((t) => t.name).sort();
     expect(names).toEqual(['create_blast', 'create_event', 'get_event', 'get_self', 'invite_guests', 'list_events', 'list_guests', 'update_event', 'update_guest_status']);
     expect(JSON.stringify(await store.read())).not.toContain('delete_event');
