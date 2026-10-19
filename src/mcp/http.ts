@@ -220,6 +220,7 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
         return sendJson(res, 400, rpcError(-32700, 'Parse error'));
       }
 
+      await opts.context.luma.refresh(); // approved Luma tool schemas (perch luma add / tools --accept)
       const mcp = createMcpServer(opts.context, principal);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,

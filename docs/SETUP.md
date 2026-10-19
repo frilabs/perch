@@ -462,6 +462,64 @@ perch whatsapp remove ID --keep-device   # nur lokal entfernen
 
   Ergebnis `accepted` (von GOWA an WhatsApp übergeben), `rejected` (GOWA hat abgelehnt, nicht gesendet) oder `indeterminate` (Antwort verloren; nie automatisch wiederholt).
 
+## 4g. Luma über den offiziellen Luma-MCP (Luma-Meilenstein)
+
+Spezifikation: `docs/LUMA_SPEC.md`. **Nur mit Mocks getestet, nicht live verifiziert.** Perch verbindet sich als MCP-Client mit `https://mcp.luma.com` und meldet sich per OAuth mit dem Luma-Konto an. Es braucht kein Luma Plus und keinen API-Schlüssel.
+
+### 4g.1 Einmalig: Client-Dokument veröffentlichen (Repo-Owner)
+
+Luma erkennt Perch an seinem Client ID Metadata Document `https://fritzkuermayr.github.io/perch/luma-client.json` (Datei `pages/luma-client.json`). GitHub Pages veröffentlicht nur den Ordner `pages/`:
+
+1. GitHub → Repo `perch` → **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+2. Den Workflow **Pages** einmal laufen lassen (läuft automatisch bei Änderungen an `pages/` auf `main`).
+3. Prüfen: `curl -s https://fritzkuermayr.github.io/perch/luma-client.json`.
+
+Bietet Luma Dynamic Client Registration an, registriert sich Perch dort selbst (bevorzugt, Spec §3); dann wird das Dokument nicht gebraucht. Andere Betreiber können mit `PERCH_LUMA_CLIENT_ID` ein eigenes Dokument angeben.
+
+### 4g.2 Konto verbinden
+
+```bash
+perch luma add --label "frilabs" [--port 8768]
+```
+
+- Der Befehl zeigt eine Login-URL. Läuft der Browser nicht auf dem Server, vorher den Port weiterleiten (`ssh -L 8768:127.0.0.1:8768 homeserver`, dann `--port 8768`).
+- Nach dem Login merkt sich Perch die **Schemas der erlaubten Luma-Tools** (Trust on first use). Die Ausgabe nennt, wie viele Tools freigegeben sind, welche Luma nicht anbietet und welche wegen unbekannter Felder gesperrt bleiben.
+- Mehrere Luma-Konten sind möglich; jedes Ergebnis trägt `accountId` und `accountLabel`.
+
+```bash
+perch luma list
+perch luma tools luma-1a2b3c4d             # freigegebene vs. aktuelle Tool-Schemas
+perch luma tools luma-1a2b3c4d --accept    # Änderungen von Luma nach Prüfung übernehmen
+perch luma remove luma-1a2b3c4d [--revoke]
+```
+
+### 4g.3 Rechte
+
+| Gruppe | Tools (MCP-Name `luma_<tool>`) | Wer |
+| --- | --- | --- |
+| Lesen | Kalender, Events, Gäste, Blasts ansehen, Event-Suche, Coupons, Mitgliedschaftsstufen, Kontakte, Tags, Organisationen, `lookup_entity`, `get_self` | globales Token, gekoppelte Geräte, Grant `luma_read` |
+| Events | `create_event`, `update_event`, Tickettypen, Anmeldefragen, Kalender-Einreichungen, Event-Tags | Grant `luma_events` |
+| Gäste | `invite_guests` (höchstens 50 pro Aufruf), `update_guest_status` (nie mit Rückerstattung), `update_guest_tickets` | Grant `luma_guests` |
+| Blasts | `create_blast` mit Pflichtfeld `confirmRecipientCount` | Grant `luma_blast` |
+| Nie | Löschen/Entfernen, Admins, Co-Hosts, Mitgliedschaften, Kontakt-Import, Kalender anlegen/ändern, Coupons ändern, Personensuche, Profil, Feedback | niemand |
+
+```bash
+perch client add --label "Claude Events" --allow luma_read,luma_events --account luma-1a2b3c4d
+perch client add --label "Claude Gäste" --allow luma_read,luma_guests,luma_blast --account luma-1a2b3c4d
+perch oauth grant oc-0123456789abcdef --allow luma_read,luma_events --account luma-1a2b3c4d   # öffentliches Gerät
+```
+
+- E-Mails an Dritte brauchen zusätzlich `luma_guests`: `update_event` mit `email_guests: true`, `approve_calendar_events` (benachrichtigt immer die Einreichenden) und `reject_calendar_events` mit Benachrichtigung.
+- **Blasts:** nur sofort (kein `scheduled_for`) und nur mit ausdrücklichem `recipient_groups`, z. B. `[{"status": "approved"}]`. Der Client nennt in `confirmRecipientCount`, wie viele Gäste die Rundmail erreichen soll. Perch zählt die Gäste dieser Status unmittelbar vor dem Senden über `list_guests` und sendet nur bei Übereinstimmung. Ticket-Filter und `checked_in` kann Perch nicht nachzählen; solche Blasts gehen nur in Luma selbst.
+- **Schreiben ist idempotent** pro `requestId` (wie Mail, Slack, WhatsApp). Ergebnis `accepted`, `rejected` oder `indeterminate`; Perch wiederholt nie selbst. `luma_write_status` zeigt den Ausgang.
+
+### 4g.4 Grenzen
+
+- Perch hängt an Lumas Toolnamen und Schemas. Ändert Luma ein erlaubtes Tool, sperrt Perch es, bis `perch luma tools <id> --accept` die neue Fassung übernimmt. Tools mit neuen, Perch unbekannten Feldern bleiben gesperrt, bis Perch aktualisiert ist. Die Prüfung erkennt Änderungen an der Struktur, nicht an Beschreibungen.
+- Felder, die das freigegebene Schema nicht nennt, lehnt Perch ab, auch verschachtelt.
+- Luma-Tools haben keine eigene Idempotenz. Bricht ein Aufruf mittendrin ab, ist der Ausgang unklar; dann in Luma nachsehen.
+- Zwischen Zählen und Senden eines Blasts können sich Gäste an- oder abmelden.
+
 ## 5a. Status: `perch status` und die Statusseite
 
 **Auf dem Server:**

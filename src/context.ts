@@ -13,9 +13,11 @@ import { SendWorkflow } from './mail/workflow.js';
 import { MailWorkflowLedger } from './mail/workflowLedger.js';
 import { NotionService } from './notion/notion.js';
 import { SlackService } from './slack/slack.js';
-import type { CredentialStore, GmailAccount, GoogleProductivityAccount, MicrosoftAccount } from './store/credentialStore.js';
+import type { CredentialStore, GmailAccount, GoogleProductivityAccount, LumaAccount, MicrosoftAccount } from './store/credentialStore.js';
 import { createFetchTransport, Upstream, type UpstreamTransport } from './upstream.js';
 import { WhatsappService } from './whatsapp/whatsapp.js';
+import { LumaMcp } from './luma/client.js';
+import { createLumaTokenProvider, LumaService } from './luma/service.js';
 
 /** Long-lived services shared by all MCP requests (keeps the access-token caches warm). */
 export interface PerchContext {
@@ -28,12 +30,14 @@ export interface PerchContext {
   contacts: ContactsService;
   slack: SlackService;
   whatsapp: WhatsappService;
+  luma: LumaService;
   /** The namespace's OAuth access-token providers (shared by services and status checks). */
   tokens: {
     drive: GoogleTokenProvider;
     gmail: RefreshingTokenProvider<GmailAccount>;
     microsoft: RefreshingTokenProvider<MicrosoftAccount>;
     productivity: RefreshingTokenProvider<GoogleProductivityAccount>;
+    luma: RefreshingTokenProvider<LumaAccount>;
   };
   /** Body-free audit trail of this namespace (in its mail workflow ledger), written by the MCP tool runner. */
   audit: AuditLog;
@@ -47,6 +51,8 @@ export function createPerchContext(
   store: CredentialStore,
   transport: UpstreamTransport = createFetchTransport(),
   mailProviders?: MailProviders,
+  /** Tests only: MOCK Luma MCP client. */
+  lumaMcp?: LumaMcp,
 ): PerchContext {
   const upstream = new Upstream(transport);
   const tokens = new GoogleTokenProvider(store, upstream);
@@ -59,6 +65,7 @@ export function createPerchContext(
   const audit = new AuditLog(ledger);
   // Slack and WhatsApp sends use the same idempotent workflow (and send-record ledger) as mail.
   const workflow = new SendWorkflow(ledger);
+  const lumaTokens = createLumaTokenProvider(store, upstream);
   return {
     store,
     upstream,
@@ -69,7 +76,8 @@ export function createPerchContext(
     contacts: new ContactsService(store, upstream, productivityTokens),
     slack: new SlackService(store, upstream, workflow, audit),
     whatsapp: new WhatsappService(store, upstream, workflow, audit),
-    tokens: { drive: tokens, gmail: gmailTokens, microsoft: microsoftTokens, productivity: productivityTokens },
+    luma: new LumaService(store, workflow, audit, lumaTokens, lumaMcp ?? new LumaMcp()),
+    tokens: { drive: tokens, gmail: gmailTokens, microsoft: microsoftTokens, productivity: productivityTokens, luma: lumaTokens },
     audit,
   };
 }

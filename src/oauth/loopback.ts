@@ -21,6 +21,11 @@ export interface PkceLoopbackOptions<T> {
   port?: number;
   timeoutMs?: number;
   onAuthUrl: (url: string) => void;
+  /**
+   * Runs once the callback port is known, before the authorization URL is built; its parameters are added
+   * (e.g. a client id registered for exactly this redirect URI).
+   */
+  prepare?: (redirectUri: string) => Promise<Record<string, string>>;
   /** Exchanges the code (with the PKCE verifier) at the fixed token endpoint. */
   exchange: (code: string, verifier: string, redirectUri: string) => Promise<T>;
 }
@@ -49,6 +54,7 @@ export async function runPkceLoopback<T>(opts: PkceLoopbackOptions<T>): Promise<
 
   let settle!: { resolve: (code: string) => void; reject: (e: Error) => void };
   const codePromise = new Promise<string>((resolve, reject) => (settle = { resolve, reject }));
+  codePromise.catch(() => {}); // a timeout during prepare() must not become an unhandled rejection
   let done = false;
 
   const server = createServer((req, res) => {
@@ -87,8 +93,10 @@ export async function runPkceLoopback<T>(opts: PkceLoopbackOptions<T>): Promise<
 
   try {
     const auth = new URL(opts.authEndpoint);
+    const extra = opts.prepare ? await opts.prepare(redirectUri) : {};
     auth.search = new URLSearchParams({
       ...opts.authParams,
+      ...extra,
       redirect_uri: redirectUri,
       response_type: 'code',
       state,

@@ -22,7 +22,9 @@ export type Service =
   | 'slack'
   | 'gowa'
   | 'cimd'
-  | 'telegram';
+  | 'telegram'
+  | 'luma'
+  | 'lumaauth';
 /**
  * `admin` routes (GOWA device pairing/removal) are only ever passed by the local CLI, never by an MCP tool.
  */
@@ -54,10 +56,14 @@ export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
   cimd: 'https://claude.ai',
   /** Optional operator notifications of the public access (Telegram Bot API). */
   telegram: 'https://api.telegram.org',
+  /** Official Luma MCP server (docs/LUMA_SPEC.md): OAuth discovery only; MCP traffic uses src/luma/client.ts. */
+  luma: 'https://mcp.luma.com',
+  /** Luma's OAuth authorization server, taken from Luma's metadata; must pass validateLumaOrigin. Placeholder. */
+  lumaauth: 'https://mcp.luma.com',
 });
 
 /** Services whose origin is configured per namespace instead of fixed (see validateGowaOrigin). */
-const DYNAMIC_ORIGIN: ReadonlySet<Service> = new Set(['gowa', 'cimd']);
+const DYNAMIC_ORIGIN: ReadonlySet<Service> = new Set(['gowa', 'cimd', 'lumaauth']);
 
 const SERVICE_NAMES: Record<Service, string> = {
   drive: 'Google Drive API',
@@ -73,6 +79,8 @@ const SERVICE_NAMES: Record<Service, string> = {
   gowa: 'WhatsApp bridge (GOWA)',
   cimd: 'OAuth client metadata document',
   telegram: 'Telegram Bot API',
+  luma: 'Luma MCP server',
+  lumaauth: 'Luma authorization server',
 };
 
 const NOTION_ID = '[0-9a-fA-F-]{32,36}';
@@ -185,7 +193,28 @@ const ROUTES: Record<Service, Route[]> = {
   ],
   cimd: [['GET', /^\/(?!.*\.\.)[A-Za-z0-9._~\/-]{1,256}$/]],
   telegram: [['POST', /^\/bot[0-9]{5,15}:[A-Za-z0-9_-]{30,64}\/sendMessage$/, 'notify']],
+  luma: [['GET', /^\/\.well-known\/oauth-protected-resource(?:\/mcp)?$/]],
+  lumaauth: [
+    ['GET', /^\/\.well-known\/(?:oauth-authorization-server|openid-configuration)(?:\/[A-Za-z0-9._~-]{1,100})?$/],
+    // token, registration and revocation endpoints as announced in Luma's metadata (Luma hosts only)
+    ['POST', /^\/(?!.*\.\.)[A-Za-z0-9._~\/-]{1,200}$/],
+  ],
 };
+
+/** Hosts Perch accepts for Luma's authorization server (from metadata): luma.com, lu.ma and their subdomains. */
+export function validateLumaOrigin(raw: string): string {
+  const bad = () => new PerchError('Luma announced an authorization server outside luma.com / lu.ma; refusing', 'luma_metadata_invalid');
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw bad();
+  }
+  if (url.protocol !== 'https:' || url.port || url.username || url.password) throw bad();
+  const h = url.hostname.toLowerCase();
+  if (!(h === 'luma.com' || h.endsWith('.luma.com') || h === 'lu.ma' || h.endsWith('.lu.ma'))) throw bad();
+  return url.origin;
+}
 
 /**
  * Origin of an allowlisted client_id URL (public access, CIMD): https on the default port, a DNS host name
@@ -391,7 +420,7 @@ export class Upstream {
     let origin = ORIGINS[service];
     if (DYNAMIC_ORIGIN.has(service)) {
       if (!opts.origin) throw new PerchError(`Blocked ${SERVICE_NAMES[service]} call without a configured origin`, 'route_not_allowed');
-      origin = service === 'cimd' ? validateCimdOrigin(opts.origin) : validateGowaOrigin(opts.origin);
+      origin = service === 'cimd' ? validateCimdOrigin(opts.origin) : service === 'lumaauth' ? validateLumaOrigin(opts.origin) : validateGowaOrigin(opts.origin);
     } else if (opts.origin !== undefined) {
       throw new PerchError(`Blocked ${SERVICE_NAMES[service]} call to a non-fixed origin`, 'route_not_allowed');
     }

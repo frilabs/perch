@@ -815,6 +815,7 @@ export async function startPublicServer(opts: PublicServerOptions): Promise<Runn
       const s = await oauth.read();
       if (isPublicLocked(s) || !deviceForAccess(s, h, now())) throw new PerchError('This device was signed out or its token expired; no request was made', 'grant_revoked');
     };
+    await context.luma.refresh();
     const server = createMcpServer(context, principal, { guard });
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
