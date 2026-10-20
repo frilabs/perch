@@ -122,7 +122,21 @@ perch notion add --label "Privat-Notion"
 
 Perch prüft das Token mit `GET /v1/users/me` und speichert den gemeldeten Token-Eigentümer als Information. Das Label vergibt der Nutzer. Perch kann nicht verifizieren, welcher Workspace dahintersteht.
 
-Obwohl das PAT laut Notion auch schreiben könnte, ruft Perch nur Lese-Endpunkte auf (Allowlist).
+Lesen dürfen das globale Token (nur lesend) und Client-Grants mit `notion_read`, diese nur in ihren Workspaces.
+
+### 4.1 Schreiben (Notion)
+
+Schreiben geht nur über einen Client-Grant mit `notion_write` für den Workspace, nie über das globale Token:
+
+```bash
+perch client add --label "Codex Notion" --allow notion_read,notion_write --account notion-1a2b3c4d
+```
+
+- Tools: `notion_create_page` (unter einer Seite oder als Zeile einer Data Source), `notion_update_page`, `notion_append_blocks`, `notion_update_block`, `notion_trash_page`/`notion_restore_page`, `notion_trash_block`, `notion_add_comment`; lesend dazu `notion_list_comments`.
+- Löschen heißt nur **Papierkorb** (`in_trash`, in Notion wiederherstellbar). Endgültiges Löschen und Änderungen am Datenbank-Schema sind nicht in der Allowlist.
+- Anlegen, Blöcke anhängen und Kommentieren brauchen eine `requestId` (wie beim Senden, Abschnitt 4d): dieselbe ID schreibt nie doppelt, kein automatischer Neuversuch.
+- Grenzen pro Aufruf: höchstens 100 Blöcke (verschachtelte mitgezählt), 512 KiB JSON, 2000 Zeichen pro Rich-Text-Element.
+- **Im Token freischalten (Nutzeraufgabe):** In den Einstellungen des Tokens bzw. der Integration die Fähigkeiten **„Update content“**, **„Insert content“** und für Kommentare **„Read comments“** und **„Insert comments“** aktivieren und die Seiten mit dem Token teilen. Perch kann das vorab nicht prüfen; fehlt eine Fähigkeit, meldet Notion `restricted_resource` und Perch zeigt einen Hinweis darauf.
 
 ## 4a. Mail-Konten verbinden (E-Mail-Meilenstein)
 

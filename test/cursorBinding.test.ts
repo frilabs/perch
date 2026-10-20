@@ -1,6 +1,7 @@
 // Cursors are bound to the store (namespace) that issued them: two stores with the SAME account ids must not
 // accept each other's cursors, and a tampered cursor is rejected before any provider I/O. MOCK upstreams only.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { READONLY_PRINCIPAL } from '../src/auth/grants.js';
 import { GoogleTokenProvider } from '../src/google/accounts.js';
 import { DriveService } from '../src/google/drive.js';
 import { NotionService } from '../src/notion/notion.js';
@@ -64,20 +65,20 @@ describe('fan-out cursors [MOCK Drive]', () => {
 describe('Notion block and query cursors [MOCK Notion]', () => {
   it('are bound to store, workspace and parent block', async () => {
     const pageA = a.world.notionPageId;
-    const r1 = await a.notion.getBlockChildren(IDS.notion, pageA, { pageSize: 1 });
+    const r1 = await a.notion.getBlockChildren(READONLY_PRINCIPAL, IDS.notion, pageA, { pageSize: 1 });
     expect(r1.nextCursor).toBeTruthy();
-    const r2 = await a.notion.getBlockChildren(IDS.notion, pageA, { pageSize: 1, cursor: r1.nextCursor! });
+    const r2 = await a.notion.getBlockChildren(READONLY_PRINCIPAL, IDS.notion, pageA, { pageSize: 1, cursor: r1.nextCursor! });
     expect(r2.blocks[0]!.id).not.toBe(r1.blocks[0]!.id);
     // Another namespace (same workspace id), another parent, or a raw upstream cursor: rejected before I/O.
-    await noIo(b.notion.getBlockChildren(IDS.notion, pageA, { pageSize: 1, cursor: r1.nextCursor! }));
-    await noIo(b.notion.getBlockChildren(IDS.notion, b.world.notionPageId, { pageSize: 1, cursor: r1.nextCursor! }));
-    await noIo(a.notion.getBlockChildren(IDS.notion, r1.blocks[0]!.id, { pageSize: 1, cursor: r1.nextCursor! }));
-    await noIo(a.notion.getBlockChildren(IDS.notion, pageA, { pageSize: 1, cursor: 'cursor-1' }));
+    await noIo(b.notion.getBlockChildren(READONLY_PRINCIPAL, IDS.notion, pageA, { pageSize: 1, cursor: r1.nextCursor! }));
+    await noIo(b.notion.getBlockChildren(READONLY_PRINCIPAL, IDS.notion, b.world.notionPageId, { pageSize: 1, cursor: r1.nextCursor! }));
+    await noIo(a.notion.getBlockChildren(READONLY_PRINCIPAL, IDS.notion, r1.blocks[0]!.id, { pageSize: 1, cursor: r1.nextCursor! }));
+    await noIo(a.notion.getBlockChildren(READONLY_PRINCIPAL, IDS.notion, pageA, { pageSize: 1, cursor: 'cursor-1' }));
     // getPageContent continues with the same sealed children cursor.
-    const c1 = await a.notion.getPageContent(IDS.notion, pageA, { pageSize: 1 });
-    const c2 = await a.notion.getPageContent(IDS.notion, pageA, { pageSize: 1, cursor: c1.nextCursor! });
+    const c1 = await a.notion.getPageContent(READONLY_PRINCIPAL, IDS.notion, pageA, { pageSize: 1 });
+    const c2 = await a.notion.getPageContent(READONLY_PRINCIPAL, IDS.notion, pageA, { pageSize: 1, cursor: c1.nextCursor! });
     expect(c2.blocks[0]!.id).toBe(r2.blocks[0]!.id);
-    await noIo(b.notion.getPageContent(IDS.notion, pageA, { pageSize: 1, cursor: c1.nextCursor! }));
-    await noIo(a.notion.queryDataSource(IDS.notion, '0000dead000000000000000000000000', { cursor: c1.nextCursor! }));
+    await noIo(b.notion.getPageContent(READONLY_PRINCIPAL, IDS.notion, pageA, { pageSize: 1, cursor: c1.nextCursor! }));
+    await noIo(a.notion.queryDataSource(READONLY_PRINCIPAL, IDS.notion, '0000dead000000000000000000000000', { cursor: c1.nextCursor! }));
   });
 });

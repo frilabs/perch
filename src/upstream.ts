@@ -137,6 +137,14 @@ const ROUTES: Record<Service, Route[]> = {
     ['GET', new RegExp(`^/v1/databases/${NOTION_ID}$`)],
     ['GET', new RegExp(`^/v1/data_sources/${NOTION_ID}$`)],
     ['POST', new RegExp(`^/v1/data_sources/${NOTION_ID}/query$`)],
+    ['GET', /^\/v1\/comments$/],
+    // Writes (client grants with notion_write only). Trash is PATCH in_trash; DELETE /v1/blocks/{id} and
+    // database/data source schema changes are deliberately never allowlisted.
+    ['POST', /^\/v1\/pages$/, 'notion_write'],
+    ['PATCH', new RegExp(`^/v1/pages/${NOTION_ID}$`), 'notion_write'],
+    ['PATCH', new RegExp(`^/v1/blocks/${NOTION_ID}/children$`), 'notion_write'],
+    ['PATCH', new RegExp(`^/v1/blocks/${NOTION_ID}$`), 'notion_write'],
+    ['POST', /^\/v1\/comments$/, 'notion_write'],
   ],
   gmail: [
     ['GET', /^\/gmail\/v1\/users\/me\/profile$/],
