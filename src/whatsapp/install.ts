@@ -46,6 +46,9 @@ const MARKER = '.perch-gowa.json';
 const BINARY = 'whatsapp';
 const ENV = '.env';
 const SAFE_DIR = /^\/[A-Za-z0-9._/-]+$/;
+const LOG_FILTER = 'app_basic_auth';
+/** First systemd release that knows LogFilterPatterns=. */
+export const MIN_SYSTEMD_LOG_FILTER = 253;
 
 export function gowaWarning(dir: string, port: number): string {
   return (
@@ -96,7 +99,7 @@ export interface InstallOptions {
 }
 
 export interface InstallResult {
-  status: 'installed' | 'already_installed';
+  status: 'installed' | 'already_installed' | 'unit_updated';
   origin: string;
   dir: string;
 }
@@ -133,7 +136,7 @@ export function envFileContent(port: number, password: string): string {
   ].join('\n');
 }
 
-export function unitFileContent(dir: string, home: string): string {
+function unitLines(dir: string, home: string, logFilter: boolean): string {
   const d = dir === path.join(home, 'gowa') ? '%h/gowa' : dir;
   return [
     '[Unit]',
@@ -144,6 +147,7 @@ export function unitFileContent(dir: string, home: string): string {
     `ExecStart=${d}/${BINARY} rest`,
     'Restart=on-failure',
     'UMask=0077',
+    ...(logFilter ? ['# GOWA logs its configuration incl. the basic-auth password at startup; keep that line out of the journal (systemd >= 253)', `LogFilterPatterns=~${LOG_FILTER}`] : []),
     '',
     '[Install]',
     'WantedBy=default.target',
@@ -151,7 +155,23 @@ export function unitFileContent(dir: string, home: string): string {
   ].join('\n');
 }
 
-function parseEnv(text: string): { port: number; username: string; password: string } | undefined {
+/** The systemd user unit this Perch writes. */
+export function unitFileContent(dir: string, home: string): string {
+  return unitLines(dir, home, true);
+}
+
+/** Units written by earlier Perch versions (exact content): replaced by `install` and `rotate-password`. */
+export function legacyUnitFileContents(dir: string, home: string): string[] {
+  return [unitLines(dir, home, false)];
+}
+
+interface GowaEnv {
+  port: number;
+  username: string;
+  password: string;
+}
+
+function parseEnv(text: string): GowaEnv | undefined {
   const get = (k: string) => {
     const m = new RegExp(`^${k}=(.*)$`, 'm').exec(text);
     return m ? m[1]!.trim() : undefined;
@@ -300,18 +320,104 @@ async function confirm(deps: InstallDeps, opts: InstallOptions, dir: string, por
   if (!isYes(answer)) throw fail('Aborted. Nothing was installed.', 'aborted');
 }
 
-/** Stores the bridge unless Perch already uses a different one (then only reports). */
+/**
+ * Stores the bridge unless Perch already uses a different one (then only reports). Retries until the same
+ * deadline as the health check: right after a (re)start GOWA can answer one probe and fail the next.
+ */
 async function storeInstance(deps: InstallDeps, origin: string, username: string, password: string): Promise<boolean> {
-  const configured = await deps.configuredOrigin();
-  if (configured && configured !== origin) {
-    deps.out(`Note: Perch already uses the bridge ${configured}; it was left unchanged. To switch: perch whatsapp instance set --url ${origin}\n`);
-    return false;
+  const deadline = deps.now() + deps.healthTimeoutMs;
+  for (;;) {
+    try {
+      const configured = await deps.configuredOrigin();
+      if (configured && configured !== origin) {
+        deps.out(`Note: Perch already uses the bridge ${configured}; it was left unchanged. To switch: perch whatsapp instance set --url ${origin}\n`);
+        return false;
+      }
+      await deps.store(origin, username, password);
+      return true;
+    } catch (err) {
+      if (deps.now() >= deadline) {
+        // PerchError messages are safe to show; anything else is reported by withSteps without details.
+        if (err instanceof PerchError) throw fail(`Storing the bridge in Perch failed (step: store): ${err.message}`, err.code);
+        throw err;
+      }
+    }
+    await deps.sleep(deps.pollIntervalMs);
   }
-  await deps.store(origin, username, password);
-  return true;
+}
+
+type Step = 'checks' | 'download' | 'files' | 'password' | 'systemd' | 'health' | 'store';
+const STEP_LABEL: Readonly<Record<Step, string>> = {
+  checks: 'Checking the existing installation',
+  download: 'Downloading and verifying GOWA',
+  files: 'Writing the GOWA files',
+  password: 'Writing the new password',
+  systemd: 'Starting the GOWA service',
+  health: 'Waiting for GOWA',
+  store: 'Storing the bridge in Perch',
+};
+
+/**
+ * Runs `fn` and turns any error that is not a PerchError into one naming the step it happened in, so the
+ * CLI never ends with a bare "Internal error". Only the step and an errno code (e.g. EACCES) are shown.
+ */
+async function withSteps<T>(fn: (at: (s: Step) => void) => Promise<T>): Promise<T> {
+  let step: Step = 'checks';
+  try {
+    return await fn((s) => {
+      step = s;
+    });
+  } catch (err) {
+    if (err instanceof PerchError) throw err;
+    const errno = (err as NodeJS.ErrnoException | undefined)?.code;
+    const detail = typeof errno === 'string' && /^E[A-Z0-9]{1,15}$/.test(errno) ? ` (${errno})` : '';
+    throw fail(
+      `${STEP_LABEL[step]} failed (step: ${step})${detail}. Details withheld; check systemctl --user status gowa and the files in the GOWA directory.`,
+      'whatsapp_install_failed',
+    );
+  }
+}
+
+type UnitState = 'missing' | 'current' | 'legacy' | 'foreign';
+
+async function inspectUnit(unitFile: string, dir: string, home: string): Promise<UnitState> {
+  const st = await lstatOrNull(unitFile);
+  if (!st) return 'missing';
+  if (st.isSymbolicLink() || !st.isFile()) throw fail(`${unitFile} is not a regular file; remove it or install by hand.`, 'foreign_files');
+  const text = await readPrivateFileOrPlain(unitFile);
+  if (text === unitFileContent(dir, home)) return 'current';
+  if (legacyUnitFileContents(dir, home).includes(text)) return 'legacy';
+  return 'foreign';
+}
+
+/** Creates the unit (missing) or replaces an older Perch-written unit (legacy). */
+async function writeUnit(unitFile: string, unit: string, state: UnitState): Promise<void> {
+  if (state === 'missing') {
+    await mkdir(path.dirname(unitFile), { recursive: true, mode: 0o700 });
+    if (!(await writePrivateFileExclusive(unitFile, Buffer.from(unit)))) throw fail(`${unitFile} appeared while installing; run the install again.`, 'foreign_files');
+  } else if (state === 'legacy') {
+    await writePrivateFileAtomic(unitFile, Buffer.from(unit));
+  }
+}
+
+/** Warns when systemd is too old for LogFilterPatterns= (it then ignores the line). */
+async function checkSystemdVersion(deps: InstallDeps): Promise<void> {
+  const r = await deps.run('systemctl', ['--version']);
+  const m = r.code === 0 ? /^systemd (\d+)/m.exec(r.stdout) : null;
+  const v = m ? Number(m[1]) : undefined;
+  if (v !== undefined && v >= MIN_SYSTEMD_LOG_FILTER) return;
+  deps.out(
+    `Warning: ${v === undefined ? 'could not determine the systemd version' : `systemd ${v} is older than ${MIN_SYSTEMD_LOG_FILTER}`}; ` +
+      `LogFilterPatterns= needs systemd ${MIN_SYSTEMD_LOG_FILTER} or newer. Without it GOWA's startup log line with the ` +
+      'bridge password (app_basic_auth) lands in the journal.\n',
+  );
 }
 
 export async function installGowa(opts: InstallOptions, deps: InstallDeps): Promise<InstallResult> {
+  return withSteps((at) => installSteps(opts, deps, at));
+}
+
+async function installSteps(opts: InstallOptions, deps: InstallDeps, at: (s: Step) => void): Promise<InstallResult> {
   if (deps.platform !== 'linux') {
     throw fail('perch whatsapp install supports Linux with systemd only. Install GOWA by hand as in docs/SETUP.md §4f.1.', 'unsupported_platform');
   }
@@ -319,19 +425,14 @@ export async function installGowa(opts: InstallOptions, deps: InstallDeps): Prom
   if (!arch) throw fail(`Unsupported CPU architecture ${deps.arch} (x64 and arm64 only). Install GOWA by hand as in docs/SETUP.md §4f.1.`, 'unsupported_platform');
   if (deps.uid === 0) throw fail('Refusing to install GOWA as root. Run perch as the normal user that runs Perch.', 'refused_root');
   const pin = deps.pins?.[arch] ?? GOWA_PINS[arch];
-  const dir = path.resolve(opts.dir ?? path.join(deps.home, 'gowa'));
-  if (!SAFE_DIR.test(dir) || dir.split('/').includes('..')) throw fail('--dir must be a plain absolute path (letters, digits, ".", "_", "-", "/")', 'usage');
-  const unitDir = path.join(deps.home, '.config', 'systemd', 'user');
-  const unitFile = path.join(unitDir, 'gowa.service');
+  const dir = resolveDir(opts.dir, deps.home);
+  const unitFile = unitPathOf(deps.home);
   const unit = unitFileContent(dir, deps.home);
 
   // --- inspect what is already there (nothing is written in this phase) ---
-  const unitSt = await lstatOrNull(unitFile);
-  if (unitSt) {
-    if (unitSt.isSymbolicLink() || !unitSt.isFile()) throw fail(`${unitFile} is not a regular file; remove it or install by hand.`, 'foreign_files');
-    if ((await readPrivateFileOrPlain(unitFile)) !== unit) {
-      throw fail(`A different ${unitFile} exists. Remove it (systemctl --user disable --now gowa) or install by hand.`, 'foreign_files');
-    }
+  const unitState = await inspectUnit(unitFile, dir, deps.home);
+  if (unitState === 'foreign') {
+    throw fail(`A different ${unitFile} exists. Remove it (systemctl --user disable --now gowa) or install by hand.`, 'foreign_files');
   }
   let marker: Marker | undefined;
   const dirSt = await lstatOrNull(dir);
@@ -339,11 +440,7 @@ export async function installGowa(opts: InstallOptions, deps: InstallDeps): Prom
     if (dirSt.isSymbolicLink() || !dirSt.isDirectory()) throw fail(`${dir} is not a directory. Choose another --dir.`, 'foreign_files');
     const entries = await readdir(dir);
     if (entries.includes(MARKER)) {
-      try {
-        marker = JSON.parse((await readPrivateFile(path.join(dir, MARKER))).toString('utf8')) as Marker;
-      } catch {
-        throw fail(`${path.join(dir, MARKER)} is unreadable. Remove ${dir} by hand or choose another --dir.`, 'foreign_files');
-      }
+      marker = await readMarker(dir);
       if (marker.version !== GOWA_VERSION || marker.arch !== arch) {
         throw fail(
           `${dir} holds GOWA ${marker.version} (${marker.arch}); this Perch installs ${GOWA_VERSION} (${arch}). ` +
@@ -365,7 +462,7 @@ export async function installGowa(opts: InstallOptions, deps: InstallDeps): Prom
     }
     haveBinary = true;
   }
-  let existingEnv: { port: number; username: string; password: string } | undefined;
+  let existingEnv: GowaEnv | undefined;
   if (marker && (await lstatOrNull(envPath))) {
     existingEnv = parseEnv((await readPrivateFile(envPath)).toString('utf8'));
     if (!existingEnv) throw fail(`${envPath} lacks APP_PORT or APP_BASIC_AUTH. Fix it or remove ${dir} by hand.`, 'foreign_files');
@@ -376,14 +473,35 @@ export async function installGowa(opts: InstallOptions, deps: InstallDeps): Prom
   const port = existingEnv?.port ?? opts.port ?? DEFAULT_GOWA_PORT;
   const origin = `http://127.0.0.1:${port}`;
 
-  // --- already installed: only check and report ---
-  if (haveBinary && existingEnv && unitSt) {
+  // --- already installed: only check and report (or replace a unit written by an older Perch) ---
+  if (haveBinary && existingEnv && unitState !== 'missing') {
+    if (unitState === 'legacy') {
+      deps.out(`GOWA ${GOWA_VERSION} is already installed in ${dir}; updating ${unitFile} (keeps the password out of the journal) ...\n`);
+      at('files');
+      await writeUnit(unitFile, unit, unitState);
+      at('systemd');
+      await checkSystemdVersion(deps);
+      await systemctl(deps, ['daemon-reload']);
+      await systemctl(deps, ['restart', 'gowa']);
+      deps.out(`GOWA restarted; waiting for ${origin}/devices ...\n`);
+      at('health');
+      await waitHealthy(deps, origin, existingEnv.username, existingEnv.password);
+      at('store');
+      const stored = await storeInstance(deps, origin, existingEnv.username, existingEnv.password);
+      deps.out(
+        `GOWA answers on ${origin}${stored ? ' and is stored in Perch' : ''}. Earlier journal entries may still hold the ` +
+          'password: perch whatsapp rotate-password sets a new one.\n',
+      );
+      return { status: 'unit_updated', origin, dir };
+    }
     deps.out(`GOWA ${GOWA_VERSION} is already installed in ${dir}; nothing was changed. Checking ${origin} ...\n`);
+    at('health');
     try {
       await deps.probe(origin, existingEnv.username, existingEnv.password);
     } catch {
       throw fail(`GOWA is installed but does not answer on ${origin}/devices. Check: systemctl --user status gowa and journalctl --user -u gowa -n 50`, 'gowa_unhealthy');
     }
+    at('store');
     const stored = await storeInstance(deps, origin, existingEnv.username, existingEnv.password);
     deps.out(`GOWA answers on ${origin}${stored ? ' and is stored in Perch' : ''}.\n`);
     return { status: 'already_installed', origin, dir };
@@ -393,6 +511,7 @@ export async function installGowa(opts: InstallOptions, deps: InstallDeps): Prom
   await confirm(deps, opts, dir, port);
   let binary: Buffer | undefined;
   if (!haveBinary) {
+    at('download');
     const url = gowaDownloadUrl(arch);
     deps.out(`Downloading ${url} ...\n`);
     const zip = await download(deps, url);
@@ -402,6 +521,7 @@ export async function installGowa(opts: InstallOptions, deps: InstallDeps): Prom
     }
     binary = extractZipEntry(zip, pin.entry, MAX_BINARY_BYTES);
   }
+  at('files');
   await ensurePrivateDir(dir);
   if (!marker) {
     marker = { version: GOWA_VERSION, arch };
@@ -414,27 +534,132 @@ export async function installGowa(opts: InstallOptions, deps: InstallDeps): Prom
   }
   let creds = existingEnv;
   if (!creds) {
-    const password = deps.password();
-    if (!/^[A-Za-z0-9_-]{32,}$/.test(password)) throw fail('Internal error: unusable generated password', 'internal');
+    const password = newPassword(deps);
     if (!(await writePrivateFileExclusive(envPath, Buffer.from(envFileContent(port, password))))) {
       throw fail(`${envPath} appeared while installing; remove it or run the install again.`, 'foreign_files');
     }
     creds = { port, username: GOWA_USER, password };
   }
-  if (!unitSt) {
-    await mkdir(unitDir, { recursive: true, mode: 0o700 });
-    if (!(await writePrivateFileExclusive(unitFile, Buffer.from(unit)))) throw fail(`${unitFile} appeared while installing; run the install again.`, 'foreign_files');
-  }
+  await writeUnit(unitFile, unit, unitState);
+  at('systemd');
+  await checkSystemdVersion(deps);
   await systemctl(deps, ['daemon-reload']);
   await systemctl(deps, ['enable', '--now', 'gowa']);
+  // enable --now leaves a service that already runs under the old unit alone.
+  if (unitState === 'legacy') await systemctl(deps, ['restart', 'gowa']);
   deps.out(`GOWA service started; waiting for ${origin}/devices ...\n`);
+  at('health');
   await waitHealthy(deps, origin, creds.username, creds.password);
+  at('store');
   const stored = await storeInstance(deps, origin, creds.username, creds.password);
   deps.out(
     `GOWA ${GOWA_VERSION} installed in ${dir} and running on ${origin}${stored ? '; stored in Perch (password encrypted, never shown)' : ''}.\n` +
       'So that GOWA keeps running after you log out: sudo loginctl enable-linger $USER\n',
   );
   return { status: 'installed', origin, dir };
+}
+
+export interface RotateOptions {
+  dir?: string;
+}
+
+export interface RotateResult {
+  origin: string;
+  dir: string;
+  stored: boolean;
+}
+
+/**
+ * `perch whatsapp rotate-password`: new random basic-auth password for a Perch-installed GOWA. Writes it to
+ * .env (0600, atomic), restarts the service, waits until /devices accepts it and stores it in Perch. The
+ * device store (storages/) is not touched, so paired devices stay linked. The password is never printed.
+ */
+export async function rotateGowaPassword(opts: RotateOptions, deps: InstallDeps): Promise<RotateResult> {
+  return withSteps((at) => rotateSteps(opts, deps, at));
+}
+
+async function rotateSteps(opts: RotateOptions, deps: InstallDeps, at: (s: Step) => void): Promise<RotateResult> {
+  if (deps.platform !== 'linux') throw fail('perch whatsapp rotate-password supports Linux with systemd only.', 'unsupported_platform');
+  if (deps.uid === 0) throw fail('Refusing to run as root. Run perch as the normal user that runs GOWA.', 'refused_root');
+  const dir = resolveDir(opts.dir, deps.home);
+  const notOurs = (why: string) =>
+    fail(
+      `${why} rotate-password only works on a GOWA installed by perch whatsapp install. For a GOWA set up by hand, ` +
+        'change APP_BASIC_AUTH in its .env, restart it and run perch whatsapp instance set.',
+      'not_perch_gowa',
+    );
+  const dirSt = await lstatOrNull(dir);
+  if (!dirSt || dirSt.isSymbolicLink() || !dirSt.isDirectory() || !(await lstatOrNull(path.join(dir, MARKER)))) {
+    throw notOurs(`No Perch-installed GOWA in ${dir} (${MARKER} missing).`);
+  }
+  await readMarker(dir);
+  const envPath = path.join(dir, ENV);
+  if (!(await lstatOrNull(envPath))) throw notOurs(`${envPath} is missing.`);
+  const envText = (await readPrivateFile(envPath)).toString('utf8');
+  const env = parseEnv(envText);
+  if (!env) throw fail(`${envPath} lacks APP_PORT or APP_BASIC_AUTH. Fix it or reinstall.`, 'foreign_files');
+  const unitFile = unitPathOf(deps.home);
+  const unitState = await inspectUnit(unitFile, dir, deps.home);
+  if (unitState === 'missing') throw notOurs(`${unitFile} is missing (perch whatsapp install completes the installation).`);
+  if (unitState === 'foreign') throw notOurs(`${unitFile} was not written by Perch for ${dir}.`);
+  const origin = `http://127.0.0.1:${env.port}`;
+
+  at('password');
+  const password = newPassword(deps);
+  if (password === env.password) throw fail('Internal error: the new password equals the old one', 'internal');
+  const lines = envText.split('\n');
+  const i = lines.findIndex((l) => /^APP_BASIC_AUTH=/.test(l));
+  lines[i] = `APP_BASIC_AUTH=${env.username}:${password}`;
+  await writePrivateFileAtomic(envPath, Buffer.from(lines.join('\n')));
+  const again = ` ${envPath} already holds the new password; once GOWA runs again, run perch whatsapp rotate-password again.`;
+  try {
+    at('systemd');
+    if (unitState === 'legacy') {
+      await writeUnit(unitFile, unitFileContent(dir, deps.home), unitState);
+      deps.out(`Updated ${unitFile} (keeps the password out of the journal).\n`);
+    }
+    await checkSystemdVersion(deps);
+    if (unitState === 'legacy') await systemctl(deps, ['daemon-reload']);
+    await systemctl(deps, ['restart', 'gowa']);
+    deps.out(`GOWA restarted with a new password; waiting for ${origin}/devices ...\n`);
+    at('health');
+    await waitHealthy(deps, origin, env.username, password);
+  } catch (err) {
+    if (err instanceof PerchError) throw fail(err.message + again, err.code);
+    throw err;
+  }
+  at('store');
+  const stored = await storeInstance(deps, origin, env.username, password);
+  deps.out(
+    `New GOWA password set${stored ? ' and stored in Perch (encrypted, never shown)' : ''}; paired devices stay linked.\n` +
+      'Older journal entries can still contain the previous password. Only root can delete them, and this deletes ' +
+      'ALL archived journal entries of the machine: sudo journalctl --rotate && sudo journalctl --vacuum-time=1s\n',
+  );
+  return { origin, dir, stored };
+}
+
+const unitPathOf = (home: string) => path.join(home, '.config', 'systemd', 'user', 'gowa.service');
+
+function resolveDir(dirOpt: string | undefined, home: string): string {
+  const dir = path.resolve(dirOpt ?? path.join(home, 'gowa'));
+  if (!SAFE_DIR.test(dir) || dir.split('/').includes('..')) throw fail('--dir must be a plain absolute path (letters, digits, ".", "_", "-", "/")', 'usage');
+  return dir;
+}
+
+async function readMarker(dir: string): Promise<Marker> {
+  try {
+    const m = JSON.parse((await readPrivateFile(path.join(dir, MARKER))).toString('utf8')) as Marker | null;
+    if (!m || typeof m !== 'object' || typeof m.version !== 'string') throw new Error('bad marker');
+    return m;
+  } catch {
+    throw fail(`${path.join(dir, MARKER)} is unreadable. Remove ${dir} by hand or choose another --dir.`, 'foreign_files');
+  }
+}
+
+function newPassword(deps: InstallDeps): string {
+  const password = deps.password();
+  if (!/^[A-Za-z0-9_-]{32,}$/.test(password)) throw fail('Internal error: unusable generated password', 'internal');
+  return password;
 }
 
 /** The unit file is not secret; read it without the owner-only check of readPrivateFile. */
@@ -467,11 +692,14 @@ export function defaultInstallDeps(
           resolve({ code, stdout: String(stdout), stderr: String(stderr || (err && code === 127 ? `${cmd} not found` : '')) });
         });
       }),
-    sleep: base.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
     now: () => Date.now(),
     password: () => randomBytes(32).toString('base64url'),
     healthTimeoutMs: 60_000,
     pollIntervalMs: 1000,
     ...base,
+    // After the spread: the CLI passes `sleep: io.sleep`, which is undefined in production. Spreading that
+    // over the default left deps.sleep undefined, so the first failed health probe threw a TypeError
+    // ("Internal error" after "waiting for .../devices") in the first live install.
+    sleep: base.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
   };
 }
