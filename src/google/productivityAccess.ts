@@ -20,6 +20,8 @@ type Need = keyof ProductivityCapabilities;
 const NEED: Record<ProductivityCapability, Need> = {
   calendar_read: 'calendarRead',
   calendar_write: 'calendarWrite',
+  // Invitations use the same Google permission as other event writes (calendar.events.owned).
+  calendar_invite: 'calendarWrite',
   contacts_read: 'contactsRead',
 };
 
@@ -103,7 +105,7 @@ export function bounded(name: string, value: number | undefined, def: number, ma
  */
 export async function listProductivityAccounts(store: CredentialStore, principal: Principal) {
   const operator = principal.kind === 'operator_readonly';
-  const caps = (['calendar_read', 'calendar_write', 'contacts_read'] as const).filter((c) => principal.capabilities.has(c));
+  const caps = (['calendar_read', 'calendar_write', 'calendar_invite', 'contacts_read'] as const).filter((c) => principal.capabilities.has(c));
   const visible = (id: string) => principal.productivityAccounts === 'all' || principal.productivityAccounts.has(id);
   return (await store.read()).googleProductivity.filter((a) => visible(a.id)).map((a) => {
     const provider = productivityCapabilities(a);

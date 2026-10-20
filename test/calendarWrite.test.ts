@@ -124,11 +124,14 @@ describe('calendar_create_event [MOCK Google]', () => {
     expect(google.calls.filter((c) => c.url.pathname.startsWith('/calendar/'))).toEqual([]);
   });
 
-  it('rejects attendees and other forbidden fields before any I/O', async () => {
-    for (const extra of [{ attendees: [{ email: 'guest@example.test' }] }, { conferenceData: {} }, { sendUpdates: 'all' }]) {
+  it('rejects conference data and other forbidden fields before any I/O; sendUpdates without guests stays none', async () => {
+    for (const extra of [{ conferenceData: {} }, { organizer: { email: 'x@example.test' } }, { attachments: [] }]) {
       expect((await rejection(service.createEvent(writer(), { ...createArgs(), ...extra }))).message).toMatch(/not supported/i);
     }
     expect(google.calls).toEqual([]);
+    const r = await service.createEvent(writer(), { ...createArgs(), sendUpdates: 'all' });
+    expect(r).toMatchObject({ status: 'created', sendUpdates: 'none' });
+    expect(google.calls.find(isInsert)!.url.searchParams.get('sendUpdates')).toBe('none');
   });
 });
 
@@ -148,9 +151,9 @@ describe('calendar_update_event [MOCK Google]', () => {
     expect(res.event).toMatchObject({ visibility: 'private', reminders: { useDefault: false, overrides: [] } });
   });
 
-  it('turns an existing public event with email reminders private and popup-only in the same PATCH (nothing republished publicly)', async () => {
+  it('turns an existing guest-less event with default visibility and email reminders private and popup-only in the same PATCH', async () => {
     const ev = events().find((e) => e.id === 'evt0timed002')!;
-    Object.assign(ev, { visibility: 'public', reminders: { useDefault: false, overrides: [{ method: 'email', minutes: 60 }, { method: 'popup', minutes: 10 }] } });
+    Object.assign(ev, { visibility: 'default', reminders: { useDefault: false, overrides: [{ method: 'email', minutes: 60 }, { method: 'popup', minutes: 10 }] } });
     const res = await service.updateEvent(writer(), upd({ description: 'secret' }));
     expect(res.status).toBe('updated');
     expect(google.calls.filter(isPatch)).toHaveLength(1);
@@ -186,9 +189,12 @@ describe('calendar_update_event [MOCK Google]', () => {
     expect(google.calls.filter(isPatch)).toHaveLength(1);
   });
 
-  it('refuses events with guests, organised by others or recurring, without writing', async () => {
-    const r = await rejection(service.updateEvent(writer(), upd({ eventId: 'evt0guests03', etag: '"3"' })));
-    expect(r.message).toMatch(/guests/i);
+  it('refuses events organised by others and single occurrences, without writing', async () => {
+    Object.assign(events().find((e) => e.id === 'evt0timed002')!, { organizer: { email: 'boss@example.test' } });
+    expect((await rejection(service.updateEvent(writer(), upd()))).message).toMatch(/organized by someone else/i);
+    expect((await rejection(service.updateEvent(writer(), upd({ eventId: 'evt0timed002_20261006T070000Z' })))).message).toMatch(/single occurrences .*not supported/i);
+    events().push({ id: 'evt0inst0004', etag: '"4"', status: 'confirmed', recurringEventId: 'evt0series05', organizer: { email: 'dummy.a@example.test', self: true }, start: { date: '2026-10-08' }, end: { date: '2026-10-09' } });
+    expect((await rejection(service.updateEvent(writer(), upd({ eventId: 'evt0inst0004', etag: '"4"' })))).message).toMatch(/single occurrences .*not supported/i);
     expect(google.calls.filter(isPatch)).toEqual([]);
   });
 
