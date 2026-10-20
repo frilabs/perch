@@ -58,7 +58,7 @@ export interface StatusReport {
   namespace: string;
   checked: boolean;
   accounts: AccountStatus[];
-  clients: Array<{ id: string; label: string; capabilities: string[]; accountIds: string[]; createdAt: string }>;
+  clients: Array<{ id: string; label: string; capabilities: string[]; accountIds: string[]; full?: boolean; createdAt: string }>;
   whatsappBridge?: { origin: string; configuredAt: string };
   ledger: { sends: number; maxSends: number; pending: number; auditEvents: number; auditDropped: number; lastActivityAt?: string } | { error: string };
   /** Public access (OAuth): never tokens or codes. */
@@ -244,7 +244,7 @@ export async function collectStatus(ctx: PerchContext, opts: StatusOptions = {})
     namespace: ctx.store.namespace,
     checked: live,
     accounts,
-    clients: d.clients.map((c) => ({ id: c.id, label: c.label, capabilities: [...c.capabilities], accountIds: [...c.accountIds], createdAt: c.createdAt })),
+    clients: d.clients.map((c) => ({ id: c.id, label: c.label, capabilities: [...c.capabilities], accountIds: [...c.accountIds], ...(c.full ? { full: true } : {}), createdAt: c.createdAt })),
     ...(d.whatsappInstance ? { whatsappBridge: { origin: d.whatsappInstance.origin, configuredAt: d.whatsappInstance.createdAt } } : {}),
     ledger: await ledgerStatus(ctx),
     publicAccess: await publicAccessStatus(ctx, opts),
@@ -268,7 +268,7 @@ export function formatStatusText(r: StatusReport): string {
     }
   }
   lines.push('', `Client grants${r.clients.length ? '' : ': none'}`);
-  for (const c of r.clients) lines.push(`  ${c.id}  "${c.label}"  ${c.capabilities.join(',')}  → ${c.accountIds.join(', ')}`);
+  for (const c of r.clients) lines.push(c.full ? `  ${c.id}  "${c.label}"  FULL access → every account (also later ones)` : `  ${c.id}  "${c.label}"  ${c.capabilities.join(',')}  → ${c.accountIds.join(', ')}`);
   if (r.whatsappBridge) lines.push('', `WhatsApp bridge: ${r.whatsappBridge.origin}`);
   lines.push('');
   if ('error' in r.ledger) lines.push(`Send ledger: ERROR ${r.ledger.error}`);

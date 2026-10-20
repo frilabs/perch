@@ -18,6 +18,16 @@ npm run smoke             # baut und testet dist/cli.js über stdio und HTTP
 
 CLI-Aufruf: `node dist/cli.js …`. Optional global per `npm link`, dann heißt der Befehl `perch …`. Unten steht der Kürze halber `perch`.
 
+## 1a. Schnellster Weg: `perch setup`
+
+```bash
+perch setup
+```
+
+Der Assistent legt Schlüssel, Speicher und Token an (wie `perch init`), fragt dann Dienst für Dienst „verbinden?“, zeigt die nötigen Vorbereitungen und Links und ruft die normalen `perch <dienst> add`-Befehle auf. Jedes `add` fragt **„nur lesen oder lesen + schreiben?“** und fordert die passenden Rechte beim Anbieter an (`--read-only` / `--write` überspringen die Frage; die `--allow-…`-Flags gehen weiter). Zum Schluss legt er auf Wunsch einen Client mit **vollem Zugriff** an (`perch client add --full`: alle Fähigkeiten, alle Konten, auch später verbundene) und zeigt den fertigen `claude mcp add`-Befehl für den Laptop.
+
+Jeder weitere Claude- oder Codex-Account braucht nur noch einen Befehl auf dem Server: `perch client add --label NAME --full` (im Tailnet) oder `perch oauth pair` und bei der Frage „lesen oder voll“ `f` (claude.ai übers Internet).
+
 ## 2. Initialisieren
 
 ```bash
@@ -230,6 +240,8 @@ perch imap remove imap-1a2b3c4d
 - **Gesendet-Ordner:** Perch legt nach `mail_send` per SMTP **keine Kopie in „Gesendet“** ab. Ob GMX das serverseitig tut, ist nicht verifiziert. Ausnahme: `mail_send_draft` verschiebt den gesendeten Entwurf nach „Gesendet“ (Abschnitt 4a.5).
 
 ### 4a.4 Client-Grants für Entwürfe und Senden
+
+Einfachster Weg: `perch client add --label "Claude Code" --full` gibt einem Client Lesen und Schreiben auf allen Konten (auch später verbundenen). Die feine Variante unten bleibt für Clients, die nur einen Teil dürfen sollen.
 
 ```bash
 perch client add --label "Laptop Claude" --allow read,send --account imap-1a2b3c4d --account microsoft-1a2b3c4d \

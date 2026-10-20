@@ -126,6 +126,23 @@ function accountIdsOf(data: StoreData, family: AccountFamily): string[] {
 }
 
 export function principalFromGrant(grant: ClientGrant): Principal {
+  if (grant.full) {
+    // Resolved on every call: new accounts and new capabilities are covered without a new grant.
+    return {
+      kind: 'client',
+      clientId: grant.id,
+      clientLabel: grant.label,
+      tokenSha256: grant.tokenSha256,
+      capabilities: new Set(CAPABILITIES),
+      mailAccounts: 'all',
+      productivityAccounts: 'all',
+      slackAccounts: 'all',
+      whatsappAccounts: 'all',
+      lumaAccounts: 'all',
+      driveAccounts: 'all',
+      notionAccounts: 'all',
+    };
+  }
   const of = (f: AccountFamily) => new Set(grant.accountIds.filter((id) => familyOf(id) === f));
   return {
     kind: 'client',
@@ -255,14 +272,15 @@ export function parseCapabilities(list: string[]): Capability[] {
  */
 export async function createClientGrant(
   store: CredentialStore,
-  input: { label: string; capabilities: Capability[]; accountIds: string[]; tokenFile: string },
+  input: { label: string; capabilities: Capability[]; accountIds: string[]; tokenFile: string; full?: boolean },
 ): Promise<{ client: ClientGrant; token: string }> {
   const label = validateLabel(input.label);
-  const capabilities = parseCapabilities(input.capabilities);
+  const full = input.full === true;
+  const capabilities = full ? [...CAPABILITIES] : parseCapabilities(input.capabilities);
   if (!capabilities.length) throw new PerchError(`A client grant needs at least one capability (${CAPABILITIES.join(', ')})`, 'bad_argument');
-  const accountIds = [...new Set(input.accountIds)];
-  if (!accountIds.length) throw new PerchError('A client grant needs at least one account id', 'bad_argument');
-  validateGrantShape(await store.read(), capabilities, accountIds);
+  const accountIds = full ? [] : [...new Set(input.accountIds)];
+  if (!full && !accountIds.length) throw new PerchError('A client grant needs at least one account id', 'bad_argument');
+  if (!full) validateGrantShape(await store.read(), capabilities, accountIds);
 
   const token = randomBytes(32).toString('base64url');
   await ensurePrivateDir(path.dirname(input.tokenFile));
@@ -271,13 +289,14 @@ export async function createClientGrant(
   }
   const client = await store.update((data) => {
     const now = new Date().toISOString();
-    validateGrantShape(data, capabilities, accountIds);
+    if (!full) validateGrantShape(data, capabilities, accountIds);
     const grant: ClientGrant = {
       id: newAccountId('client', data.clients.map((c) => c.id)),
       label,
       tokenSha256: tokenSha256(token),
       capabilities,
       accountIds,
+      ...(full ? { full: true as const } : {}),
       createdAt: now,
     };
     data.clients.push(grant);
@@ -294,21 +313,23 @@ export async function createClientGrant(
  */
 export async function createDeviceGrant(
   store: CredentialStore,
-  input: { label: string; capabilities: Capability[]; accountIds: string[] },
+  input: { label: string; capabilities: Capability[]; accountIds: string[]; full?: boolean },
 ): Promise<ClientGrant> {
   const label = validateLabel(input.label);
-  const capabilities = parseCapabilities(input.capabilities);
+  const full = input.full === true;
+  const capabilities = full ? [...CAPABILITIES] : parseCapabilities(input.capabilities);
   if (!capabilities.length) throw new PerchError(`A grant needs at least one capability (${CAPABILITIES.join(', ')})`, 'bad_argument');
-  const accountIds = [...new Set(input.accountIds)];
-  if (!accountIds.length) throw new PerchError('A grant needs at least one account id', 'bad_argument');
+  const accountIds = full ? [] : [...new Set(input.accountIds)];
+  if (!full && !accountIds.length) throw new PerchError('A grant needs at least one account id', 'bad_argument');
   return store.update((data) => {
-    validateGrantShape(data, capabilities, accountIds);
+    if (!full) validateGrantShape(data, capabilities, accountIds);
     const grant: ClientGrant = {
       id: newAccountId('client', data.clients.map((c) => c.id)),
       label,
       tokenSha256: tokenSha256(randomBytes(32).toString('base64url')),
       capabilities,
       accountIds,
+      ...(full ? { full: true as const } : {}),
       createdAt: new Date().toISOString(),
     };
     data.clients.push(grant);
