@@ -1,5 +1,12 @@
 # Handoff: Perch
 
+## Update 2026-10-20: Einfacheres Onboarding (Branch `feat/easy-onboarding`)
+
+- **Auftrag:** Fritz: „setze A–D um“ (beim Verbinden lesen/schreiben fragen; `--full`; Kopplung fragt lesen/voll; `perch setup`).
+- **Umgesetzt:** `src/cli/onboarding.ts` (`chooseAccess`, `runSetup`, `claudeAddCommand`); `perch <google|gmail|microsoft|imap|google-productivity> add` fragt „[r]ead / [w]rite“ (ohne TTY: nur lesen; `--read-only`/`--write`; alte `--allow-…` gehen weiter); Client-Grants mit `full: true` (Store-Feld; Fähigkeiten und Konten werden bei jedem Aufruf neu als „alle“ aufgelöst, auch künftige); `perch client add --full`, `perch oauth grant <id> --full`; `perch oauth pair` fragt nach `y` „[r]ead / [f]ull“; `perch setup` ruft die normalen Befehle auf; Status und `client list` zeigen volle Grants.
+- **Getestet (nur Mocks):** `npm run check` grün: 824 Tests (60 Dateien), Smoke 11/11, Lizenzprüfung OK.
+
+
 ## Update 2026-10-20: Schreib-Erweiterungen für Drive, Notion, Mail, Slack, WhatsApp (Branch `feat/full-access`)
 
 - **Auftrag:** Fritz: „Drive und Notion anlegen/bearbeiten, Mail verschieben/löschen/markieren/Entwürfe senden, Slack Dateien und Reaktionen, WhatsApp Medien – implementiere das“. Löschen nur Papierkorb (Entscheidung vom selben Tag). Rechtemodell unverändert (Schreiben nur mit Client-Grant); `docs/FULL_ACCESS_SPEC.md` §1/§2 bleiben Entwurf.

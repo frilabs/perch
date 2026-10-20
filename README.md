@@ -24,14 +24,19 @@ Status as of 2026-10-14:
 Perch has two kinds of access tokens:
 
 - **The global token** (`~/.config/perch/http-token`, or plain stdio) can **only read**, but across all connected accounts. Write tools are not even listed for it.
-- **A client grant** is a separate token you create on the server for one client, e.g. "Claude Code on the laptop" or "Codex". It names exactly which capabilities it has and for which accounts:
+- **A client grant** is a separate token you create on the server for one client, e.g. "Claude Code on the laptop" or "Codex". The simple way is **full access**: read and write on every connected account, including accounts you connect later:
 
   ```bash
-  perch client add --label "Claude Code" --allow read,send --account gmail-1a2b3c4d
-  perch client add --label "Codex" --allow slack_read,slack_send --account slack-5e6f7a8b
+  perch client add --label "Claude Code" --full
   ```
 
-  The first client can read and send mail from that one Gmail account only; it cannot write anywhere else. "Local" means the grant is created with the CLI on the server itself; it cannot be created or widened over MCP.
+  Or narrow it down to exact capabilities and accounts, e.g. a client that may only read and send mail from one Gmail account:
+
+  ```bash
+  perch client add --label "Uni laptop" --allow read,send --account gmail-1a2b3c4d
+  ```
+
+  Grants are created with the CLI on the server itself; they cannot be created or widened over MCP. Devices paired over the internet (`perch oauth pair`) are asked the same at pairing: read only or full.
 
 Capabilities, per account family:
 
@@ -41,8 +46,13 @@ Capabilities, per account family:
 | Google Calendar/Contacts (`gprod-…`) | `calendar_read`, `calendar_write`, `contacts_read` |
 | Slack (`slack-…`) | `slack_read`, `slack_send` |
 | WhatsApp (`whatsapp-…`) | `whatsapp_read`, `whatsapp_send` |
+| Google Drive (`google-…`) | `drive_read`, `drive_write` |
+| Notion (`notion-…`) | `notion_read`, `notion_write` |
+| Luma (`luma-…`) | `luma_read`, `luma_events`, `luma_guests`, `luma_blast` |
 
-Perch re-checks the grant before every tool call, so `perch client remove ID` takes effect immediately, even on open connections. Every send needs a `requestId`: repeating the same request never sends twice. All calls are written to a body-free audit log (`perch audit list`). Note that client grants cover these families only; Drive and Notion stay readable through the global token.
+**Provider permissions:** when you connect an account, `perch <service> add` asks *"read only, or read + write?"* and requests the matching permissions from Google, Microsoft or the mail server (`--read-only` / `--write` skip the question). A client can only write where the account was connected with write permissions.
+
+Perch re-checks the grant before every tool call, so `perch client remove ID` takes effect immediately, even on open connections. Every send needs a `requestId`: repeating the same request never sends twice. All calls are written to a body-free audit log (`perch audit list`). 
 
 ## Features
 
@@ -99,12 +109,11 @@ Perch re-checks the grant before every tool call, so `perch client remove ID` ta
 ```bash
 git clone https://github.com/frilabs/perch.git perch && cd perch
 npm ci && npm run build
-node dist/cli.js init
-node dist/cli.js notion add --label "Personal"         # enter the PAT at the masked prompt
-PERCH_GOOGLE_CLIENT_FILE=~/.config/perch/google-client.json \
-  node dist/cli.js google add --label "Personal" --port 8766
-node dist/cli.js serve --http                          # 127.0.0.1:8765, bearer token in ~/.config/perch/http-token
+node dist/cli.js setup        # guided: init, connect each service (read only or read + write), one full-access client
+node dist/cli.js serve --http # 127.0.0.1:8765
 ```
+
+`perch setup` ends with the ready-to-paste `claude mcp add` command for the laptop. Every further Claude/Codex account needs one command on the server: `perch client add --label NAME --full` (Tailnet) or `perch oauth pair` and `f` (claude.ai over the internet).
 
 The full guide is [`docs/SETUP.md`](docs/SETUP.md) (German): Google Cloud setup, Slack and GOWA, Tailscale or SSH, Claude Code and Codex configuration, revocation and limits.
 
@@ -129,6 +138,8 @@ perch status --no-check                         # empty overview, no errors
 Back up `~/.config/perch/store.key` **now**, separately from the data directory. Without it nothing can be decrypted.
 
 ### 2. Connect accounts (one at a time)
+
+Easiest: `perch setup` asks service by service and runs the commands below for you. Each `add` asks *"read only or read + write?"*; choose `w` where Claude should be able to change things.
 
 Browser logins redirect to `127.0.0.1` on the server. If the browser runs on the laptop, open a tunnel first and keep it open during the login: `ssh -N -L 8766:127.0.0.1:8766 homeserver` (Luma: port 8768).
 
@@ -159,7 +170,9 @@ perch status                                    # every account "ok"
 
 Open `https://homeserver.<tailnet>.ts.net/status` in the browser (password: the content of `~/.config/perch/http-token`).
 
-### 4. Connect Claude Code on the laptop (read-only)
+### 4. Connect Claude Code on the laptop
+
+With the full-access client from `perch setup` (or `perch client add --label "Claude Code" --full`), use the command it printed. Read-only instead, with the global token:
 
 ```bash
 TOKEN="$(ssh homeserver 'cat ~/.config/perch/http-token')"
@@ -171,12 +184,7 @@ Try in Claude Code: "list my Perch accounts", "search Drive for X", "latest mail
 
 ### 5. Test writing (only to yourself)
 
-```bash
-perch client add --label "Claude Code write test" --allow read,send,slack_read,slack_send --account <gmail-…> --account <slack-…> \
-  --token-file ~/.config/perch/clients/write-test.token
-```
-
-Register that token as a second MCP server on the laptop (`perch-write`). Then: send one mail to yourself, post one Slack message in a private test channel, and repeat the same request with the same `requestId`: it must answer `replayed: true` and send nothing. Check `perch audit list`. Remove the grant afterwards: `perch client remove <client-…>`.
+With the full-access client from step 4: send one mail to yourself, post one Slack message in a private test channel, and repeat the same request with the same `requestId`: it must answer `replayed: true` and send nothing. Check `perch audit list`.
 
 ### 6. Optional: public access (claude.ai on web and phone)
 
