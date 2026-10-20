@@ -16,6 +16,7 @@ As of 2026-10-19 (`main` after PR #9). This is a completion checklist, **not a c
 | `perch status` and read-only `/status` page | live check per account | `SETUP.md` §5a |
 | Write extensions (2026-10-20) | Drive create/edit/share/trash, Notion create/edit/trash/comments, mail organize + send drafts, Slack files/reactions/edit, WhatsApp media; all only with client grants, delete = trash only | `FULL_ACCESS_SPEC.md` (implemented subset) |
 | Public access over MCP OAuth | pairing windows, Google login + Perch code (TOTP), kill switch; two independent reviews | `PUBLIC_ACCESS_SPEC.md`, `SETUP.md` §6a |
+| Mail reply/forward, calendar invitations/series/delete, Slack DMs/scheduled (2026-10-20) | `mail_reply`, `mail_forward`, IMAP Sent copy; `calendar_invite`, `calendar_delete_event` (permanent), `calendar_respond_event`, RRULE, Meet; `slack_open_conversation`, `slack_schedule_message` | `MAIL_CALENDAR_SLACK_SPEC.md` |
 | OSS licence | MIT, third-party notices, `npm run licenses:check` | `OSS_LICENSE_MILESTONE.md` |
 | User isolation | **removed** on purpose (one operator per installation) | `USER_ISOLATION_MILESTONE.md` (historical) |
 
@@ -29,6 +30,7 @@ Follow the README live test. Points that only a live run can answer:
 - Luma: registration type (DCR or CIMD at `https://frilabs.dev/perch/luma-client.json`), refresh behaviour, the real tool list, response formats of `get_self` and `list_guests`, whether redirect URIs without port are accepted.
 - Public access: does claude.ai keep the up-to-10-minute pairing open; which CIMD URL the hosted Claude apps send; does Funnel pass the client IP (only then `PERCH_PUBLIC_TRUST_FORWARDED=on`); how Codex signs in.
 - Codex configuration (`SETUP.md` §6) is taken from the Codex docs and untested.
+- Mail reply/forward: Outlook conversation grouping of MIME replies, Graph 4 MB MIME limit, GMX Sent copy (duplicate?). Calendar: `calendar.events.owned` for answering others' invitations, If-Match on delete, Meet creation. Slack: `chat.scheduledMessages.list` with a user token, scheduled-id format, reinstall with `im:write`/`mpim:write`.
 - Write extensions: Drive `drive` scope consent, multipart upload, Doc/Sheet conversion, content replacement on native Docs, permission ids; Notion PAT capability names, 403 `restricted_resource`, `after` vs `position` on append, `in_trash` on PATCH; Gmail `gmail.modify` for drafts/send, Graph move response and draft send, GMX MOVE/UIDPLUS and special-use folders, IMAP send-draft without Bcc leak; Slack new scopes after reinstall, upload URL/flow, download URL format; GOWA multipart bodies, captions/replies, `/statics` media path and auth.
 
 ## 2. Operations — not implemented
@@ -36,7 +38,7 @@ Follow the README live test. Points that only a live run can answer:
 - Docker/compose image (non-root, no public port by default, no secrets baked in).
 - Backup and restore: today the operator backs up `store.key` (separately!), `store.enc`, `mail-workflow.enc` and `oauth.enc` by hand. Restoring an older `mail-workflow.enc` forgets newer send keys, so an old `requestId` could send again.
 - Versioned migrations with pre-migration backup and rollback. There is no downgrade path once Slack, WhatsApp or Luma events are in the ledger (strict schema, unchanged ledger version).
-- A rollover for the send ledger: mail, Slack, WhatsApp and Luma writes share 1000 send records; at the limit every send fails closed, including mail.
+- A rollover for the send ledger: mail, Slack (including scheduled messages), WhatsApp and Luma writes share 1000 send records; at the limit every send fails closed, including mail.
 
 ## 3. Known gaps in the code
 
@@ -46,7 +48,7 @@ Follow the README live test. Points that only a live run can answer:
   - refresh rotation has no grace window (two concurrent refreshes sign a device out);
   - `/oauth/token` with a well-formed refresh token rewrites `oauth.enc` even without a change (≤ 30/min); `readBody` keeps reading after its limit until the timeout.
 - Luma: refresh rotation between CLI and server has no shared lock; Luma tool descriptions appear in Perch's tool descriptions and are untrusted.
-- Features not built: mail reply-all/forward helpers, IMAP "Sent" copy for normal sends; calendar invitations, recurring events, deleting; writing contacts; Slack DMs open/scheduled messages; WhatsApp edit, read receipts, older-history loading; Notion sharing (not in the Notion API).
+- Features not built: changing single occurrences of a recurring event; writing contacts (decided: read only); WhatsApp edit, read receipts, older-history loading (decided: not now); Notion sharing (not in the Notion API).
 - WhatsApp stays an unofficial linked-device integration (account restriction risk, especially when sending); GOWA stores messages unencrypted.
 
 ## 4. Repository
