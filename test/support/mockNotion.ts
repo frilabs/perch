@@ -1,5 +1,5 @@
 /**
- * MOCK Notion API (in-memory fake of the 2026-03-11 read endpoints Perch uses) for tests only.
+ * MOCK Notion API (in-memory fake of the 2026-03-11 endpoints Perch uses: reads, page/block writes, comments) for tests only.
  * Nothing here talks to Notion; passing tests are NOT evidence of a live integration.
  */
 import type { UpstreamRequest, UpstreamResponse, UpstreamTransport } from '../../src/upstream.js';
@@ -10,14 +10,35 @@ export const NOTION_VERSION = '2026-03-11';
 export interface MockBlock {
   id: string;
   text: string;
+  type?: string;
+  inTrash?: boolean;
   children?: MockBlock[];
+}
+
+export interface MockPage {
+  id: string;
+  title: string;
+  blocks?: MockBlock[];
+  inTrash?: boolean;
+  parentId?: string;
+  properties?: Record<string, unknown>;
+  icon?: unknown;
+  cover?: unknown;
+}
+
+export interface MockComment {
+  id: string;
+  discussionId: string;
+  parentId: string;
+  text: string;
 }
 
 export interface MockWorkspace {
   token: string;
   owner: { id: string; name: string };
-  pages: Array<{ id: string; title: string; blocks?: MockBlock[] }>;
-  dataSources: Array<{ id: string; title: string; rows: Array<{ id: string; title: string }> }>;
+  pages: MockPage[];
+  dataSources: Array<{ id: string; title: string; rows: Array<{ id: string; title: string; properties?: Record<string, unknown> }> }>;
+  comments: MockComment[];
   databases: Array<{ id: string; title: string; dataSourceIds: string[] }>;
 }
 
@@ -54,6 +75,12 @@ export class MockNotion {
   private rateLimited = new Map<string, number>();
   /** Block ids whose children endpoint fails with HTTP 500. */
   failingBlockIds = new Set<string>();
+  /** Tokens without the "Update/Insert content" capabilities: writes answer 403 restricted_resource. */
+  restrictedTokens = new Set<string>();
+  /** When set, every write (POST/PATCH except search/query) answers with this HTTP status. */
+  failWritesWith: number | null = null;
+  /** Count of write requests that reached the mock. */
+  writes = 0;
 
   addWorkspace(name: string): MockWorkspace {
     const ws: MockWorkspace = {
@@ -62,6 +89,7 @@ export class MockNotion {
       pages: [],
       dataSources: [],
       databases: [],
+      comments: [],
     };
     this.workspaces.push(ws);
     return ws;
@@ -83,6 +111,133 @@ export class MockNotion {
       if (found) return found;
     }
     return undefined;
+  }
+
+  private findBlock(ws: MockWorkspace, id: string): MockBlock | undefined {
+    const walk = (blocks: MockBlock[]): MockBlock | undefined => {
+      for (const b of blocks) {
+        if (b.id === id) return b;
+        const found = b.children && walk(b.children);
+        if (found) return found;
+      }
+      return undefined;
+    };
+    for (const p of ws.pages) {
+      const found = walk(p.blocks ?? []);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  private pageJson(page: MockPage) {
+    return {
+      object: 'page',
+      id: page.id,
+      url: `https://www.notion.so/${page.id}`,
+      in_trash: page.inTrash === true,
+      last_edited_time: '2026-10-20T10:00:00.000Z',
+      properties: { ...(page.properties ?? {}), Name: { type: 'title', title: richText(page.title) } },
+      ...(page.icon ? { icon: page.icon } : {}),
+    };
+  }
+
+  /** Write endpoints (POST /v1/pages, PATCH pages/blocks, comments); null when the request is not one. */
+  private write(ws: MockWorkspace, req: UpstreamRequest, body: Record<string, unknown>): UpstreamResponse | null {
+    const p = req.url.pathname;
+    const isWrite =
+      (req.method === 'POST' && (p === '/v1/pages' || p === '/v1/comments')) || req.method === 'PATCH' || req.method === 'DELETE';
+    if (!isWrite) {
+      if (req.method === 'GET' && p === '/v1/comments') {
+        const blockId = req.url.searchParams.get('block_id') ?? '';
+        const items = ws.comments.filter((c) => c.parentId === blockId);
+        const { page, next_cursor, has_more } = paginate(items, req.url.searchParams.get('start_cursor'), Number(req.url.searchParams.get('page_size') ?? 100));
+        return json(200, {
+          object: 'list',
+          results: page.map((c) => ({ object: 'comment', id: c.id, discussion_id: c.discussionId, parent: { type: 'page_id', page_id: c.parentId }, rich_text: richText(c.text) })),
+          next_cursor,
+          has_more,
+        });
+      }
+      return null;
+    }
+    this.writes++;
+    if (this.restrictedTokens.has(ws.token)) return json(403, { object: 'error', code: 'restricted_resource', message: 'mock' });
+    if (this.failWritesWith !== null) return json(this.failWritesWith, { object: 'error', code: 'internal_server_error', message: 'mock' });
+    if (req.method === 'DELETE') return json(405, { object: 'error', code: 'invalid_request', message: 'mock' });
+    const textOf = (rt: unknown) =>
+      Array.isArray(rt) ? rt.map((t: { text?: { content?: string } }) => t.text?.content ?? '').join('') : '';
+    const toBlock = (b: Record<string, unknown>): MockBlock => {
+      const type = String(b.type ?? Object.keys(b).find((k) => k !== 'object' && k !== 'type') ?? 'paragraph');
+      const data = (b[type] ?? {}) as { rich_text?: unknown; children?: Array<Record<string, unknown>> };
+      return { id: mockId(), type, text: textOf(data.rich_text), ...(data.children ? { children: data.children.map(toBlock) } : {}) };
+    };
+    if (p === '/v1/pages') {
+      const parent = body.parent as { page_id?: string; data_source_id?: string };
+      const props = (body.properties ?? {}) as Record<string, { title?: unknown }>;
+      const titleProp = Object.values(props).find((x) => x && Array.isArray(x.title));
+      const title = titleProp ? textOf(titleProp.title) : '';
+      if (parent.data_source_id) {
+        const ds = ws.dataSources.find((d) => d.id === parent.data_source_id);
+        if (!ds) return json(404, { object: 'error', code: 'object_not_found' });
+        const row = { id: mockId(), title, properties: props };
+        ds.rows.push(row);
+        return json(200, { object: 'page', id: row.id, in_trash: false, parent: { type: 'data_source_id', data_source_id: ds.id } });
+      }
+      if (!parent.page_id || !ws.pages.some((x) => x.id === parent.page_id)) return json(404, { object: 'error', code: 'object_not_found' });
+      const page: MockPage = {
+        id: mockId(),
+        title,
+        parentId: parent.page_id,
+        blocks: ((body.children ?? []) as Array<Record<string, unknown>>).map(toBlock),
+        ...(body.icon ? { icon: body.icon } : {}),
+      };
+      ws.pages.push(page);
+      return json(200, this.pageJson(page));
+    }
+    if (p === '/v1/comments') {
+      const parent = body.parent as { page_id?: string } | undefined;
+      const discussion = body.discussion_id as string | undefined;
+      const parentId = parent?.page_id ?? ws.comments.find((c) => c.discussionId === discussion)?.parentId;
+      if (!parentId) return json(404, { object: 'error', code: 'object_not_found' });
+      const c: MockComment = { id: mockId(), discussionId: discussion ?? mockId(), parentId, text: textOf(body.rich_text) };
+      ws.comments.push(c);
+      return json(200, { object: 'comment', id: c.id, discussion_id: c.discussionId });
+    }
+    let m = /^\/v1\/pages\/([^/]+)$/.exec(p);
+    if (m) {
+      const page = ws.pages.find((x) => x.id === m![1]);
+      if (!page) return json(404, { object: 'error', code: 'object_not_found' });
+      if (typeof body.in_trash === 'boolean') page.inTrash = body.in_trash;
+      if (body.properties) page.properties = { ...(page.properties ?? {}), ...(body.properties as Record<string, unknown>) };
+      if ('icon' in body) page.icon = body.icon;
+      if ('cover' in body) page.cover = body.cover;
+      return json(200, this.pageJson(page));
+    }
+    m = /^\/v1\/blocks\/([^/]+)\/children$/.exec(p);
+    if (m) {
+      const target = this.findBlocks(ws, m[1]!);
+      if (!target) return json(404, { object: 'error', code: 'object_not_found' });
+      const added = ((body.children ?? []) as Array<Record<string, unknown>>).map(toBlock);
+      const page = ws.pages.find((x) => x.id === m![1]);
+      const block = page ? undefined : this.findBlock(ws, m[1]!);
+      const list = page ? (page.blocks ??= []) : (block!.children ??= []);
+      const after = typeof body.after === 'string' ? list.findIndex((b) => b.id === body.after) : -1;
+      list.splice(after >= 0 ? after + 1 : list.length, 0, ...added);
+      return json(200, { object: 'list', results: added.map((b) => ({ object: 'block', id: b.id, type: b.type })), next_cursor: null, has_more: false });
+    }
+    m = /^\/v1\/blocks\/([^/]+)$/.exec(p);
+    if (m) {
+      const block = this.findBlock(ws, m[1]!);
+      if (!block) return json(404, { object: 'error', code: 'object_not_found' });
+      if (typeof body.in_trash === 'boolean') block.inTrash = body.in_trash;
+      const type = Object.keys(body).find((k) => k !== 'in_trash');
+      if (type) {
+        block.type = type;
+        block.text = textOf((body[type] as { rich_text?: unknown }).rich_text);
+      }
+      return json(200, { object: 'block', id: block.id, type: block.type ?? 'paragraph', in_trash: block.inTrash === true });
+    }
+    return json(404, { object: 'error', code: 'invalid_request_url' });
   }
 
   transport: UpstreamTransport = async (req) => {
@@ -110,6 +265,8 @@ export class MockNotion {
     const body = req.body ? (JSON.parse(req.body) as Record<string, unknown>) : {};
     const p = req.url.pathname;
     const qp = req.url.searchParams;
+    const written = this.write(ws, req, body);
+    if (written) return written;
 
     if (p === '/v1/users/me') return json(200, { object: 'user', id: ws.owner.id, name: ws.owner.name, type: 'person' });
     if (p === '/v1/search') {
