@@ -1,15 +1,20 @@
-// Constrained calendar write subset: schema, forbidden fields (no invitations/notifications), dates and
-// time zones, size bounds, deterministic event ids from requestId, and the "private/self event" check.
+// Calendar write subset: schema, forbidden fields, guests/recurrence/visibility/Meet validation, dates and
+// time zones, size bounds, deterministic ids from requestId, and the "own event, no single occurrence" check.
 // Pure functions; no upstream.
 import { describe, expect, it } from 'vitest';
 import {
-  assertSelfOnlyEvent,
+  assertOwnEvent,
   buildCreateBody,
   buildPatchBody,
   eventIdForRequest,
   MAX_DESCRIPTION_LENGTH,
+  meetRequestId,
   parseCreateInput,
+  parseDeleteInput,
+  parseRespondInput,
   parseUpdateInput,
+  planPatch,
+  validateRecurrence,
   validateTimes,
 } from '../src/google/calendarWrite.js';
 import { assertTimestamp, instantOf, parseDateTime } from '../src/google/calendarTime.js';
@@ -36,9 +41,9 @@ describe('parseCreateInput', () => {
     expect(v.summary).toBe('Dentist');
   });
 
-  it('rejects every invitation/notification/sharing field with an explicit reason', () => {
-    for (const field of ['attendees', 'organizer', 'conferenceData', 'attachments', 'guestsCanInviteOthers', 'anyoneCanAddSelf', 'sendUpdates', 'recurrence', 'source', 'extendedProperties', 'id', 'iCalUID', 'acl']) {
-      expect(() => parseCreateInput({ ...base, [field]: field === 'attendees' ? [{ email: 'x@example.test' }] : 'x' }), field).toThrow(
+  it('rejects organizer, conference data, attachments, special types and other forbidden fields with an explicit reason', () => {
+    for (const field of ['organizer', 'conferenceData', 'hangoutLink', 'attachments', 'anyoneCanAddSelf', 'source', 'extendedProperties', 'id', 'iCalUID', 'acl', 'recurringEventId', 'status', 'eventType', 'attendeesOmitted']) {
+      expect(() => parseCreateInput({ ...base, [field]: 'x' }), field).toThrow(
         new RegExp(`${field}.*not supported`, 'i'),
       );
     }
@@ -53,8 +58,9 @@ describe('parseCreateInput', () => {
     expect(() => parseCreateInput({ ...base, reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 40321 }] } })).toThrow(/40320/);
   });
 
-  it('rejects public visibility (it shares details with every calendar reader)', () => {
-    expect(() => parseCreateInput({ ...base, visibility: 'public' })).toThrow(/visibility/i);
+  it('accepts every documented visibility and nothing else', () => {
+    for (const visibility of ['default', 'public', 'private', 'confidential']) expect(parseCreateInput({ ...base, visibility }).visibility).toBe(visibility);
+    expect(() => parseCreateInput({ ...base, visibility: 'secret' })).toThrow(/visibility must be one of/i);
   });
 
   it('validates all-day and timed dates and time zones', () => {
@@ -99,9 +105,13 @@ describe('create: private and silent by construction (review blockers)', () => {
     expect(buildCreateBody(parseCreateInput({ ...base, visibility: 'confidential' })).visibility).toBe('confidential');
   });
 
-  it("rejects visibility 'default' (inherits the calendar's sharing, which may be public) and 'public'", () => {
-    expect(() => parseCreateInput({ ...base, visibility: 'default' })).toThrow(/visibility.*private or confidential/i);
-    expect(() => parseCreateInput({ ...base, visibility: 'public' })).toThrow(/visibility.*private or confidential/i);
+  it('defaults to visibility "default" and sendUpdates all only when guests are invited', () => {
+    const v = parseCreateInput({ ...base, attendees: ['guest@example.test'] });
+    expect(v).toMatchObject({ visibility: 'default', sendUpdates: 'all' });
+    expect(parseCreateInput({ ...base, attendees: ['guest@example.test'], sendUpdates: 'none', visibility: 'private' })).toMatchObject({ visibility: 'private', sendUpdates: 'none' });
+    // Without guests nobody can be notified: always none.
+    expect(parseCreateInput({ ...base, sendUpdates: 'all' }).sendUpdates).toBe('none');
+    expect(parseCreateInput({ ...base, attendees: [] })).toMatchObject({ visibility: 'private', sendUpdates: 'none', attendees: [] });
   });
 
   it('never inherits calendar default reminders (they may be email): absent -> {useDefault:false, overrides:[]}', () => {
@@ -168,7 +178,9 @@ describe('updates', () => {
     expect(() => parseUpdateInput({ ...ok, etag: undefined })).toThrow(/etag/i);
     expect(() => parseUpdateInput({ ...ok, etag: 'W/"x"\r\n' })).toThrow(/etag/i);
     expect(() => parseUpdateInput({ accountId: 'gprod-0000000a', calendarId: 'primary', eventId: 'evt0timed002', etag: '"2"' })).toThrow(/at least one/i);
-    expect(() => parseUpdateInput({ ...ok, attendees: [] })).toThrow(/attendees.*not supported/i);
+    expect(() => parseUpdateInput({ ...ok, organizer: { email: 'x@example.test' } })).toThrow(/organizer.*not supported/i);
+    expect(parseUpdateInput({ ...ok, summary: undefined, attendees: [] }).attendees).toEqual([]);
+    expect(() => parseUpdateInput({ ...ok, summary: undefined, addMeet: false })).toThrow(/at least one/i);
     expect(() => parseUpdateInput({ ...ok, eventId: '../x' })).toThrow(/event id/i);
   });
 
@@ -181,34 +193,34 @@ describe('updates', () => {
     expect(buildPatchBody(fine, { ...existing, visibility: 'private', reminders: { useDefault: false, overrides: [] } })).toEqual({ summary: 'Moved', location: 'Graz' });
   });
 
-  it('only touches private/self events: no guests, not organised by someone else, no series, no special types', () => {
-    expect(() => assertSelfOnlyEvent(existing)).not.toThrow();
-    expect(() => assertSelfOnlyEvent({ ...existing, attendees: [{ email: 'dummy.a@example.test', self: true }] })).not.toThrow();
+  it('only touches events you organise: guests and whole series are fine, occurrences, other organisers and special types are not', () => {
+    expect(() => assertOwnEvent(existing)).not.toThrow();
+    expect(() => assertOwnEvent({ ...existing, attendees: [{ email: 'guest@example.test' }] })).not.toThrow();
+    expect(() => assertOwnEvent({ ...existing, recurrence: ['RRULE:FREQ=WEEKLY'] })).not.toThrow();
     const cases: Array<[Record<string, unknown>, RegExp]> = [
-      [{ attendees: [{ email: 'guest@example.test' }] }, /guests/i],
       [{ organizer: { email: 'boss@example.test' } }, /organi[sz]ed by someone else/i],
-      [{ recurrence: ['RRULE:FREQ=WEEKLY'] }, /recurring/i],
-      [{ recurringEventId: 'abcde12345' }, /recurring/i],
+      [{ recurringEventId: 'abcde12345' }, /single occurrences/i],
       [{ eventType: 'outOfOffice' }, /type/i],
       [{ status: 'cancelled' }, /cancelled/i],
     ];
     for (const [change, re] of cases) {
-      expect(() => assertSelfOnlyEvent({ ...existing, ...change }), JSON.stringify(change)).toThrow(re);
+      expect(() => assertOwnEvent({ ...existing, ...change }), JSON.stringify(change)).toThrow(re);
     }
   });
 
   it('fails closed when the existing event has no organizer or no organizer.self', () => {
     const { organizer: _o, ...noOrganizer } = existing;
-    expect(() => assertSelfOnlyEvent(noOrganizer)).toThrow(/organizer/i);
-    expect(() => assertSelfOnlyEvent({ status: 'confirmed' })).toThrow(/organizer/i);
-    expect(() => assertSelfOnlyEvent({ ...existing, organizer: { email: 'dummy.a@example.test' } })).toThrow(/organi[sz]e/i);
+    expect(() => assertOwnEvent(noOrganizer)).toThrow(/organizer/i);
+    expect(() => assertOwnEvent({ status: 'confirmed' })).toThrow(/organizer/i);
+    expect(() => assertOwnEvent({ ...existing, organizer: { email: 'dummy.a@example.test' } })).toThrow(/organi[sz]e/i);
   });
 
   const safe = { visibility: 'private', reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 10 }] } };
   const summaryOnly = () => parseUpdateInput({ accountId: 'gprod-0000000a', calendarId: 'primary', eventId: 'evt0timed002', etag: '"2"', summary: 'S' });
 
-  it('makes the result private in the same PATCH when the existing event is public, default or unset', () => {
-    for (const visibility of ['public', 'default', undefined]) {
+  it('makes a guest-less result private in the same PATCH when the existing visibility is default or unset (public stays a deliberate choice)', () => {
+    expect(buildPatchBody(summaryOnly(), { ...existing, ...safe, visibility: 'public' })).toEqual({ summary: 'S' });
+    for (const visibility of ['default', undefined]) {
       expect(buildPatchBody(summaryOnly(), { ...existing, ...safe, visibility }), String(visibility)).toEqual({ summary: 'S', visibility: 'private' });
     }
     expect(buildPatchBody(summaryOnly(), { ...existing, ...safe })).toEqual({ summary: 'S' });
@@ -217,10 +229,10 @@ describe('updates', () => {
     expect(buildPatchBody(conf, { ...existing, ...safe, visibility: 'public' })).toEqual({ visibility: 'confidential' });
   });
 
-  it("rejects update visibility 'default'/'public' and reminders.useDefault=true", () => {
+  it('accepts every update visibility but rejects reminders.useDefault=true', () => {
     const ok = { accountId: 'gprod-0000000a', calendarId: 'primary', eventId: 'evt0timed002', etag: '"2"' };
-    expect(() => parseUpdateInput({ ...ok, visibility: 'default' })).toThrow(/visibility.*private or confidential/i);
-    expect(() => parseUpdateInput({ ...ok, visibility: 'public' })).toThrow(/visibility.*private or confidential/i);
+    expect(parseUpdateInput({ ...ok, visibility: 'public' }).visibility).toBe('public');
+    expect(buildPatchBody(parseUpdateInput({ ...ok, visibility: 'default' }), { ...existing, ...safe })).toEqual({ visibility: 'default' });
     expect(() => parseUpdateInput({ ...ok, reminders: { useDefault: true } })).toThrow(/useDefault.*false/i);
   });
 
@@ -244,5 +256,151 @@ describe('updates', () => {
     expect(buildPatchBody(explicit, { ...existing, ...vis, reminders: { useDefault: false, overrides: [{ method: 'email', minutes: 1 }] } })).toEqual({
       reminders: { useDefault: false, overrides: [] },
     });
+  });
+});
+
+describe('guests, recurrence, Meet and occurrences (MAIL_CALENDAR_SLACK_SPEC §2)', () => {
+  const emails = (n: number) => Array.from({ length: n }, (_, i) => `guest${i}@example.test`);
+
+  it('accepts up to 50 attendees as addresses or {email, optional} and refuses more, duplicates and non-addresses', () => {
+    const v = parseCreateInput({ ...base, attendees: ['a@example.test', { email: 'b@example.test', optional: true }, { email: 'c@example.test', optional: false }] });
+    expect(v.attendees).toEqual([{ email: 'a@example.test' }, { email: 'b@example.test', optional: true }, { email: 'c@example.test' }]);
+    expect(parseCreateInput({ ...base, attendees: emails(50) }).attendees).toHaveLength(50);
+    expect(() => parseCreateInput({ ...base, attendees: emails(51) })).toThrow(/at most 50/i);
+    expect(() => parseCreateInput({ ...base, attendees: ['a@example.test', 'A@Example.test'] })).toThrow(/twice/i);
+    for (const bad of ['no-at-sign', 'a@b', 'Name <a@example.test>', 'a b@example.test', 'a@example.test\r\nBcc: x@example.test', 'a,b@example.test', 'x'.repeat(65) + '@example.test']) {
+      expect(() => parseCreateInput({ ...base, attendees: [bad] }), bad).toThrow(/attendee/i);
+    }
+    expect(() => parseCreateInput({ ...base, attendees: [{ email: 'a@example.test', responseStatus: 'accepted' }] })).toThrow(/responseStatus/);
+  });
+
+  it('puts attendees, guest permissions, recurrence and a requestId-derived Meet request into the create body', () => {
+    const v = parseCreateInput({
+      ...base,
+      attendees: ['a@example.test'],
+      guestsCanModify: true,
+      guestsCanInviteOthers: false,
+      guestsCanSeeOtherGuests: false,
+      recurrence: ['RRULE:FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10', 'EXDATE;TZID=Europe/Vienna:20261012T090000'],
+      addMeet: true,
+    });
+    const body = buildCreateBody(v);
+    expect(body).toMatchObject({
+      attendees: [{ email: 'a@example.test' }],
+      guestsCanModify: true,
+      guestsCanInviteOthers: false,
+      guestsCanSeeOtherGuests: false,
+      recurrence: ['RRULE:FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10', 'EXDATE;TZID=Europe/Vienna:20261012T090000'],
+      visibility: 'default',
+      conferenceData: { createRequest: { requestId: meetRequestId('gprod-0000000a', 'primary', base.requestId), conferenceSolutionKey: { type: 'hangoutsMeet' } } },
+    });
+    expect(buildCreateBody(parseCreateInput({ ...base, addMeet: true })).conferenceData).toEqual(body.conferenceData);
+    expect(meetRequestId('gprod-0000000a', 'primary', 'req-other-0001')).not.toBe(meetRequestId('gprod-0000000a', 'primary', base.requestId));
+    expect(buildCreateBody(parseCreateInput(base))).not.toHaveProperty('conferenceData');
+    expect(buildCreateBody(parseCreateInput(base))).not.toHaveProperty('attendees');
+  });
+
+  it('validates recurrence strictly', () => {
+    const ok = [
+      ['RRULE:FREQ=DAILY'],
+      ['RRULE:FREQ=MONTHLY;BYMONTHDAY=1;UNTIL=20271231T235959Z'],
+      ['RRULE:FREQ=YEARLY;INTERVAL=2', 'RDATE;VALUE=DATE:20261224,20261231', 'EXDATE:20261225T090000Z'],
+    ];
+    for (const recurrence of ok) expect(validateRecurrence(recurrence), recurrence.join('|')).toEqual(recurrence);
+    const bad: Array<[string[], RegExp]> = [
+      [['RRULE:INTERVAL=2'], /FREQ/],
+      [['RRULE:FREQ=HOURLY'], /FREQ must be/],
+      [['RRULE:FREQ=WEEKLY;FREQ=DAILY'], /twice/],
+      [['RRULE:FREQ=WEEKLY;COUNT=3;UNTIL=20270101'], /COUNT or UNTIL/],
+      [['RRULE:FREQ=WEEKLY;COUNT=0'], /COUNT/],
+      [['RRULE:FREQ=WEEKLY;X-NAME=1'], /RRULE parts|unknown RRULE part/],
+      [['RRULE:FREQ=WEEKLY;BYWHAT=1'], /unknown RRULE part/],
+      [['RRULE:FREQ=WEEKLY\r\nATTENDEE:mailto:x@example.test'], /whitespace or control/],
+      [['RRULE:FREQ=WEEKLY;BYDAY=MO TU'], /whitespace/],
+      [['RRULE;X=1:FREQ=WEEKLY'], /no parameters/],
+      [['EXDATE:20261012'], /exactly one RRULE/],
+      [['RRULE:FREQ=DAILY', 'RRULE:FREQ=WEEKLY'], /exactly one RRULE/],
+      [['EXRULE:FREQ=DAILY'], /start with RRULE/],
+      [['rrule:freq=daily'], /start with RRULE/],
+      [['RRULE:FREQ=DAILY', 'EXDATE;TZID=Mars/Base:20261012T090000'], /TZID/],
+      [['RRULE:FREQ=DAILY', 'RDATE;VALUE=PERIOD:20261012T090000Z/PT1H'], /VALUE/],
+      [['RRULE:FREQ=DAILY', 'EXDATE:2026-10-12'], /yyyymmdd/],
+    ];
+    for (const [recurrence, re] of bad) expect(() => validateRecurrence(recurrence), recurrence.join('|')).toThrow(re);
+    expect(() =>
+      parseCreateInput({ ...base, recurrence: ['RRULE:FREQ=DAILY', 'EXDATE:20261012', 'EXDATE:20261013', 'EXDATE:20261014', 'EXDATE:20261015', 'EXDATE:20261016'] }),
+    ).toThrow(/at most 5/i);
+    expect(() => parseCreateInput({ ...base, recurrence: [] })).toThrow(/at least one/i);
+    // Google expands timed series in start/end.timeZone, which is then required.
+    expect(() => parseCreateInput({ ...base, start: { dateTime: '2026-10-06T09:00:00Z' }, end: { dateTime: '2026-10-06T10:00:00Z' }, recurrence: ['RRULE:FREQ=DAILY'] })).toThrow(
+      /timeZone is required/,
+    );
+    expect(() => parseCreateInput({ ...base, start: { date: '2026-10-06' }, end: { date: '2026-10-07' }, recurrence: ['RRULE:FREQ=DAILY'] })).not.toThrow();
+  });
+
+  it('refuses single occurrences (instance ids) for update, delete and respond before any I/O', () => {
+    const id = { accountId: 'gprod-0000000a', calendarId: 'primary', eventId: 'abcde12345_20261012T090000Z' };
+    expect(() => parseUpdateInput({ ...id, etag: '"2"', summary: 'x' })).toThrow(/single occurrences .*not supported/i);
+    expect(() => parseDeleteInput(id)).toThrow(/single occurrences .*not supported/i);
+    expect(() => parseRespondInput({ ...id, response: 'accepted' })).toThrow(/single occurrences .*not supported/i);
+    expect(() => parseRespondInput({ ...id, eventId: 'abcde12345', response: 'maybe' })).toThrow(/response must be one of/i);
+    expect(() => parseDeleteInput({ ...id, eventId: 'abcde12345', sendUpdates: 'everyone' })).toThrow(/sendUpdates/i);
+  });
+
+  const existing = {
+    id: 'evt0guests03',
+    etag: '"3"',
+    status: 'confirmed',
+    organizer: { email: 'dummy.a@example.test', self: true },
+    start: { dateTime: '2026-10-07T15:00:00Z' },
+    end: { dateTime: '2026-10-07T16:00:00Z' },
+    visibility: 'default',
+    reminders: { useDefault: false, overrides: [] },
+    attendees: [
+      { email: 'dummy.a@example.test', self: true, responseStatus: 'accepted' },
+      { email: 'guest@example.test', responseStatus: 'accepted' },
+    ],
+  };
+  const upd = (extra: Record<string, unknown>) => parseUpdateInput({ accountId: 'gprod-0000000a', calendarId: 'primary', eventId: 'evt0guests03', etag: '"3"', ...extra });
+
+  it('plans guest changes: full new list, own entry and existing answers kept, no forced privacy with guests', () => {
+    const plan = planPatch(upd({ attendees: ['guest@example.test', { email: 'new@example.test', optional: true }] }), existing);
+    expect(plan).toMatchObject({ changesGuests: true, guestsInvolved: true, addsMeet: false });
+    expect(plan.body).toEqual({
+      attendees: [
+        { email: 'dummy.a@example.test', responseStatus: 'accepted' },
+        { email: 'guest@example.test', responseStatus: 'accepted' },
+        { email: 'new@example.test', optional: true },
+      ],
+    });
+    // A summary change of a guest event: guests involved (notification decision), the guest list untouched, visibility not forced.
+    expect(planPatch(upd({ summary: 'S' }), existing)).toMatchObject({ body: { summary: 'S' }, changesGuests: false, guestsInvolved: true });
+    // Removing every guest is a guest change; the event then is guest-less and becomes private.
+    expect(planPatch(upd({ attendees: [] }), existing)).toMatchObject({
+      body: { attendees: [{ email: 'dummy.a@example.test', responseStatus: 'accepted' }], visibility: 'private' },
+      changesGuests: true,
+      guestsInvolved: true,
+    });
+    // Listing only yourself on a guest-less event is not a guest change.
+    const solo = { ...existing, attendees: [existing.attendees[0]!] };
+    const soloPlan = planPatch(upd({ attendees: ['dummy.a@example.test'] }), { ...solo, visibility: 'private' });
+    expect(soloPlan).toMatchObject({ changesGuests: false, guestsInvolved: false });
+    expect(soloPlan.body).not.toHaveProperty('attendees');
+  });
+
+  it('plans a Meet link from the event and the etag, and refuses a second conference', () => {
+    const plan = planPatch(upd({ addMeet: true }), existing);
+    expect(plan.addsMeet).toBe(true);
+    expect(plan.body.conferenceData).toEqual({
+      createRequest: { requestId: meetRequestId('gprod-0000000a', 'primary', 'evt0guests03', '"3"'), conferenceSolutionKey: { type: 'hangoutsMeet' } },
+    });
+    expect(() => planPatch(upd({ addMeet: true }), { ...existing, hangoutLink: 'https://meet.google.com/x' })).toThrow(/already has a conference/i);
+  });
+
+  it('requires a time zone when a timed series is created or retimed by an update', () => {
+    expect(() => planPatch(upd({ recurrence: ['RRULE:FREQ=WEEKLY'] }), existing)).toThrow(/timeZone is required/);
+    const zoned = { ...existing, start: { dateTime: '2026-10-07T15:00:00Z', timeZone: 'UTC' }, end: { dateTime: '2026-10-07T16:00:00Z', timeZone: 'UTC' } };
+    expect(planPatch(upd({ recurrence: ['RRULE:FREQ=WEEKLY'] }), zoned).body).toEqual({ recurrence: ['RRULE:FREQ=WEEKLY'] });
+    expect(() => planPatch(upd({ start: { dateTime: '2026-10-07T14:00:00Z' } }), { ...existing, recurrence: ['RRULE:FREQ=WEEKLY'] })).toThrow(/timeZone is required/);
   });
 });

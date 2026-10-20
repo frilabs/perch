@@ -19,6 +19,7 @@ import {
 import { createGmailTokenProvider, gmailScopesFor, registerGmailAccount, removeGmailAccount } from '../mail/gmailAccounts.js';
 import { addImapAccount, removeImapAccount, verifyImapAccount } from '../mail/imapAccounts.js';
 import { IMAP_PRESETS } from '../mail/imapPresets.js';
+import { imapSentCopyEnabled } from '../mail/imap.js';
 import { PRUNE_REFUSED, resolveSend } from '../mail/workflow.js';
 import {
   ACCOUNT_ID_PATTERN,
@@ -99,7 +100,8 @@ Usage:
   perch microsoft list | remove ID
   perch imap add --label NAME --email ADDRESS [--username USER] [--preset gmx|gmx-com]
                  [--imap-host H --imap-port N --smtp-host H --smtp-port N --smtp-security tls|starttls]
-                 [--allow-drafts] [--allow-send] [--allow-modify] [--drafts-mailbox NAME]   password via masked prompt
+                 [--allow-drafts] [--allow-send] [--allow-modify] [--drafts-mailbox NAME] [--no-sent-copy]
+                 password via masked prompt; --no-sent-copy: never file sent mail in the Sent folder
   perch imap presets | list | remove ID
   perch google-productivity add --label NAME --services calendar,contacts [--allow-calendar-write]
                       [--port N] [--timeout SECONDS] [--login-hint EMAIL]
@@ -113,7 +115,7 @@ Usage:
   perch whatsapp list | status | remove ID [--keep-device]
   perch client add --label NAME --full [--token-file PATH]   read + write on every account (also later ones)
   perch client add --label NAME --allow CAPS --account ID [--account ID ...] [--token-file PATH]
-                      CAPS: read,draft,send,modify (mail accounts); calendar_read,calendar_write,contacts_read (gprod accounts);
+                      CAPS: read,draft,send,modify (mail accounts); calendar_read,calendar_write,calendar_invite,contacts_read (gprod accounts);
                             slack_read,slack_send (slack accounts); whatsapp_read,whatsapp_send (whatsapp accounts);
                             luma_read,luma_events,luma_guests,luma_blast (luma accounts)
   perch client list | remove ID
@@ -191,7 +193,9 @@ function formatMail(data: StoreData, which: AccountSection): string[] {
       ? data.imap.map((a) => ({
           a,
           kind: 'imap',
-          extra: `${a.imap.host}/${a.smtp.host}; drafts ${a.allowDrafts ? 'on' : 'off'}, send ${a.allowSend ? 'on' : 'off'}, organize ${a.allowModify ? 'on' : 'off'}`,
+          extra:
+            `${a.imap.host}/${a.smtp.host}; drafts ${a.allowDrafts ? 'on' : 'off'}, send ${a.allowSend ? 'on' : 'off'}, ` +
+            `organize ${a.allowModify ? 'on' : 'off'}, sent copy ${imapSentCopyEnabled(a) ? 'on' : 'off'}`,
         }))
       : []),
   ];
@@ -525,7 +529,7 @@ async function cmdProductivity(config: PerchConfig, io: CliIo, sub: string | und
   });
   const account = await registerProductivityAccount(store, upstream, { label: values.label, client, grant, services, allowCalendarWrite });
   io.stdout(`Connected Google account ${account.id} (${account.email}) as "${account.label}" for ${what}.\n`);
-  if (allowCalendarWrite) io.stdout(`Calendar writes additionally need a client grant: perch client add --allow calendar_read,calendar_write --account ${account.id}\n`);
+  if (allowCalendarWrite) io.stdout(`Calendar writes additionally need a client grant: perch client add --allow calendar_read,calendar_write[,calendar_invite] --account ${account.id} (calendar_invite: guests, invitations, responses)\n`);
 }
 
 function optPort(values: Record<string, unknown>, name: string): number | undefined {
@@ -575,6 +579,7 @@ async function cmdImap(config: PerchConfig, io: CliIo, sub: string | undefined, 
       allowDrafts: Boolean(values['allow-drafts']),
       allowSend: Boolean(values['allow-send']),
       allowModify: Boolean(values['allow-modify']),
+      ...(values['no-sent-copy'] ? { sentCopy: false } : {}),
       ...(str('username') ? { username: str('username')! } : {}),
       ...(str('preset') ? { preset: str('preset')! } : {}),
       ...(str('imap-host') ? { imapHost: str('imap-host')! } : {}),
@@ -588,7 +593,8 @@ async function cmdImap(config: PerchConfig, io: CliIo, sub: string | undefined, 
   );
   io.stdout(
     `Connected IMAP account ${account.id} (${account.email}) as "${account.label}" via ${account.imap.host}/${account.smtp.host} ` +
-      `(drafts ${account.allowDrafts ? 'on' : 'off'}, send ${account.allowSend ? 'on' : 'off'}, organize ${account.allowModify ? 'on' : 'off'}).\n`,
+      `(drafts ${account.allowDrafts ? 'on' : 'off'}, send ${account.allowSend ? 'on' : 'off'}, organize ${account.allowModify ? 'on' : 'off'}, ` +
+      `sent copy ${imapSentCopyEnabled(account) ? 'on' : 'off'}).\n`,
   );
 }
 
@@ -607,7 +613,7 @@ async function cmdSlack(config: PerchConfig, io: CliIo, sub: string | undefined,
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
   const token = await io.readSecret(`Slack user token (xoxp-…) for "${values.label}" (input hidden): `);
   const ws = await addSlackWorkspace(store, new Upstream(io.transport ?? createFetchTransport()), { label: values.label, token });
-  const missing = ['search:read', 'chat:write', 'reactions:read', 'reactions:write', 'files:read', 'files:write'].filter((s) => !ws.scopes.includes(s));
+  const missing = ['search:read', 'chat:write', 'reactions:read', 'reactions:write', 'files:read', 'files:write', 'im:write', 'mpim:write'].filter((s) => !ws.scopes.includes(s));
   io.stdout(
     `Connected Slack workspace ${ws.id} "${ws.label}" (${ws.teamName ?? ws.teamId}, user ${ws.userName ?? ws.userId}).\n` +
       (missing.length
@@ -730,7 +736,7 @@ async function cmdClient(config: PerchConfig, io: CliIo, sub: string | undefined
   }
   if (typeof values.allow !== 'string') {
     throw new UsageError(
-      '--allow is required (comma separated: read,draft,send for mail; calendar_read,calendar_write,contacts_read for gprod accounts; ' +
+      '--allow is required (comma separated: read,draft,send for mail; calendar_read,calendar_write,calendar_invite,contacts_read for gprod accounts; ' +
         'slack_read,slack_send for slack accounts; whatsapp_read,whatsapp_send for whatsapp accounts)',
     );
   }
@@ -889,6 +895,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         'read-all': { type: 'boolean' },
         'allow-write': { type: 'boolean' },
         'allow-modify': { type: 'boolean' },
+        'no-sent-copy': { type: 'boolean' },
         write: { type: 'boolean' },
         'read-only': { type: 'boolean' },
         full: { type: 'boolean' },

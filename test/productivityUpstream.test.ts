@@ -78,10 +78,14 @@ describe('Calendar / People / userinfo allowlist [MOCK transport]', () => {
     ] as const) {
       expect((await rejection(upstream.json('calendar', { method: 'POST', path, capability }))).message, path).toMatch(/non-allowlisted/i);
     }
-    // No DELETE (or PUT) method exists at all.
-    expect(
-      (await rejection(upstream.json('calendar', { method: 'DELETE' as 'GET', path: `${CAL}/abc`, capability: 'calendar_write' }))).message,
-    ).toMatch(/non-allowlisted/i);
+    // DELETE exists only for one event or a whole series (calendarInvite.test.ts); never for calendars, untagged or as PUT.
+    for (const [method, path, capability] of [
+      ['DELETE', '/calendar/v3/calendars/dummy%40example.test', 'calendar_write'],
+      ['DELETE', `${CAL}/abcde12345`, 'read'],
+      ['PUT', `${CAL}/abcde12345`, 'calendar_write'],
+    ] as const) {
+      expect((await rejection(upstream.json('calendar', { method: method as 'GET', path, capability }))).message, `${method} ${path}`).toMatch(/non-allowlisted/i);
+    }
     expect(calls).toHaveLength(0);
   });
 

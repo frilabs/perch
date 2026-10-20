@@ -237,7 +237,7 @@ perch imap remove imap-1a2b3c4d
 
 - **Transport:** IMAP nur mit implizitem TLS. SMTP mit implizitem TLS (465) oder STARTTLS mit Pflicht-TLS (587). TLS ≥ 1.2 mit Zertifikatsprüfung ist nicht abschaltbar. Nur Hostnamen, keine IP-Adressen.
 - **Prüfung beim Hinzufügen:** `add` meldet sich vor dem Speichern bei IMAP an (bei `--allow-send` zusätzlich SMTP-`verify`). Bei einem Fehler wird nichts gespeichert.
-- **Gesendet-Ordner:** Perch legt nach `mail_send` per SMTP **keine Kopie in „Gesendet“** ab. Ob GMX das serverseitig tut, ist nicht verifiziert. Ausnahme: `mail_send_draft` verschiebt den gesendeten Entwurf nach „Gesendet“ (Abschnitt 4a.5).
+- **Gesendet-Ordner:** Nachdem SMTP eine Mail angenommen hat (`mail_send`, `mail_reply`/`mail_forward` mit `send: true`), legt Perch per IMAP-APPEND eine Kopie (mit Bcc, `\Seen`) in den `\Sent`-Ordner, sonst in einen Ordner mit üblichem Namen („Sent“, „Gesendet“, „Gesendete Objekte“ …). `mail_send_draft` verschiebt den Entwurf dorthin (ohne MOVE/UIDPLUS: Kopie, der Entwurf bleibt). Scheitert die Ablage, bleibt das Ergebnis `accepted` mit `sentCopy: false`; Perch sendet **nie** erneut über SMTP. Abschalten pro Konto: `perch imap add … --no-sent-copy`. Für SMTP-Server, die selbst ablegen (`smtp.gmail.com`, `smtp.office365.com`, `smtp-mail.outlook.com`), ist die Kopie automatisch aus (sonst läge jede Mail doppelt da). `perch imap list` zeigt „sent copy on/off“. Ob GMX bei SMTP-Versand selbst ablegt, ist nicht live geprüft; falls ja, das Konto mit `--no-sent-copy` neu hinzufügen.
 
 ### 4a.4 Client-Grants für Entwürfe und Senden
 
@@ -302,20 +302,22 @@ perch google-productivity remove gprod-1a2b3c4d [--revoke]
 ```
 
 - Perch prüft nach dem Consent: Refresh-Token vorhanden, jeder angefragte Scope gewährt (ein entferntes Häkchen bricht `add` ab), E-Mail über den festen Endpunkt `https://openidconnect.googleapis.com/v1/userinfo` mit `email_verified: true`. Ein zweiter Grant für dasselbe Google-Konto (`sub`) wird abgelehnt.
-- **Schreiben** braucht drei Freigaben: `--allow-calendar-write` beim Verbinden, den von Google tatsächlich gewährten Scope `calendar.events.owned` (zusätzlich beim Token-Refresh erneut geprüft) und einen Client-Grant mit `calendar_write`.
+- **Schreiben** braucht drei Freigaben: `--allow-calendar-write` beim Verbinden, den von Google tatsächlich gewährten Scope `calendar.events.owned` (zusätzlich beim Token-Refresh erneut geprüft) und einen Client-Grant mit `calendar_write`. Termine mit Gästen (jede Änderung daran), Einladungen und Antworten brauchen zusätzlich `calendar_invite` (gleicher Google-Scope; `--full` enthält es).
 - **Client-Grants** für Calendar/Contacts gelten nur für `gprod-…`-Konten und geben keinen Mail-Zugriff:
 
 ```bash
-perch client add --label "Laptop Kalender" --allow calendar_read,calendar_write --account gprod-1a2b3c4d \
+perch client add --label "Laptop Kalender" --allow calendar_read,calendar_write,calendar_invite --account gprod-1a2b3c4d \
   --token-file ~/.config/perch/clients/calendar.token
 perch client add --label "Kontakte" --allow contacts_read --account gprod-1a2b3c4d
 ```
 
-  `calendar_read` → `calendar_list_calendars`, `calendar_list_events`, `calendar_get_event`; `contacts_read` → `contacts_list`, `contacts_get`; `calendar_write` → `calendar_create_event`, und zusammen mit `calendar_read` auch `calendar_update_event`. Mail-Capabilities (`read`, `draft`, `send`) gelten weiterhin nur für Mail-Konten; ein Grant, dessen Capabilities nicht zu den Konten passen, wird abgelehnt.
-- **Was Perch schreibt:** nur private Termine im eigenen Kalender. Keine Teilnehmer, Einladungen, Benachrichtigungen an andere (`sendUpdates=none`), Konferenzen, Anhänge oder Serien. Änderungen nur an Terminen ohne Gäste, die man selbst organisiert, mit `etag` (If-Match). Details: Meilenstein-Doku §5.
-  - **Sichtbarkeit:** nur `private` oder `confidential`. Beim Anlegen sendet Perch immer ausdrücklich `private`, wenn nichts angegeben ist. `default` erbt die Freigabe des Kalenders, die öffentlich sein kann; Perch lehnt `default` und `public` ab.
-  - **Erinnerungen:** nur Popup-Erinnerungen. Perch nutzt nie die Standard-Erinnerungen des Kalenders, weil diese E-Mails sein können: `useDefault: true` wird abgelehnt; ohne Angabe sendet Perch `{useDefault: false, overrides: []}`.
-  - **Ändern:** Ist ein bestehender Termin öffentlich, hat er `default`-Sichtbarkeit oder Standard- bzw. E-Mail-Erinnerungen, setzt Perch im **selben** PATCH `visibility: "private"` und behält nur die Popup-Erinnerungen. Ein öffentlicher Termin wird beim Ändern also privat.
+  `calendar_read` → `calendar_list_calendars`, `calendar_list_events`, `calendar_get_event`; `contacts_read` → `contacts_list`, `contacts_get`; `calendar_write` → `calendar_create_event`, und zusammen mit `calendar_read` auch `calendar_update_event` und `calendar_delete_event`; `calendar_invite` + `calendar_read` → `calendar_respond_event`. Mail-Capabilities (`read`, `draft`, `send`) gelten weiterhin nur für Mail-Konten; ein Grant, dessen Capabilities nicht zu den Konten passen, wird abgelehnt.
+- **Was Perch schreibt** (Spec `MAIL_CALENDAR_SLACK_SPEC.md` §2): Termine im eigenen Kalender, optional mit Gästen (`attendees`, höchstens 50 Adressen, `optional`), Gast-Rechten (`guestsCanModify`, `guestsCanInviteOthers`, `guestsCanSeeOtherGuests`), Serie (`recurrence`: genau eine `RRULE` mit `FREQ` DAILY/WEEKLY/MONTHLY/YEARLY, dazu `EXDATE`/`RDATE`, höchstens 5 Zeilen; Zeittermine brauchen `timeZone`) und Google-Meet-Link (`addMeet: true`). Ändern und Löschen nur bei Terminen, die man selbst organisiert, mit `etag` (If-Match). Nie: Organisator, Anhänge, Kalender löschen/leeren, Freigaben, **einzelne Vorkommen einer Serie** (Instanz-IDs `…_20261012T090000Z` werden abgelehnt; Serien nur als Ganzes über die Serien-ID = `recurringEventId`).
+  - **Ohne Gäste** bleibt alles wie bisher privat und still: `sendUpdates=none`, ohne Angabe `visibility: "private"`; beim Ändern eines gästelosen Termins mit `default`/ohne Sichtbarkeit setzt Perch im selben PATCH `private`. Ausdrücklich gesetzte Sichtbarkeit (`default`, `public`, `private`, `confidential`) wird übernommen; ein öffentlicher Termin bleibt beim Ändern öffentlich.
+  - **Mit Gästen** braucht **jeder** Write `calendar_invite`, sobald der Termin vor oder nach der Änderung Gäste hat: Gäste hinzufügen/ändern/entfernen, aber auch Zeit, Serie, Meet-Link, Gast-Rechte oder Titel ändern, und zwar auch mit `sendUpdates: "none"` (Gäste sehen die Änderung trotzdem). `calendar_write` allein deckt nur Termine ohne Gäste ab. `sendUpdates` ist mit Gästen standardmäßig `all` (`externalOnly`, `none` wählbar). Ohne Angabe ist die Sichtbarkeit `default`. Bleibende Gäste behalten Antwort, Kommentar, `additionalGuests` und Anzeigenamen, der eigene Eintrag bleibt erhalten.
+  - **Erinnerungen:** nur Popup-Erinnerungen. Perch nutzt nie die Standard-Erinnerungen des Kalenders, weil diese E-Mails sein können: `useDefault: true` wird abgelehnt; ohne Angabe sendet Perch `{useDefault: false, overrides: []}`, beim Ändern behält Perch nur Popup-Erinnerungen.
+  - **Löschen** (`calendar_delete_event`) ist **endgültig** (kein Papierkorb), bei Serien-ID die ganze Serie. Mit Gästen braucht es `calendar_invite` und Google verschickt Absagen (`sendUpdates` Standard `all`). Perch sendet immer das aktuelle `etag` als If-Match; ein übergebenes `etag` muss passen. Ein bereits abgesagter Termin (`status: "cancelled"`) ergibt `not_found`.
+  - **Antworten** (`calendar_respond_event`): `accepted`/`declined`/`tentative` für den eigenen Teilnehmer-Eintrag, PATCH nur mit diesem Eintrag und `attendeesOmitted: true`, `sendUpdates` Standard `all`. Eigene Termine (man ist Organisator) werden abgelehnt; die ändert man mit `calendar_update_event`. Ob `calendar.events.owned` das Antworten auf fremde Einladungen erlaubt, ist noch live zu prüfen.
 - **Wiederholen:** `calendar_create_event` braucht eine stabile `requestId`. Bei `indeterminate` (Ausgang unbekannt) dieselbe `requestId` und dieselbe `calendarId` erneut senden: Der Termin entsteht dann höchstens einmal, sonst kommt `conflict`. Perch wiederholt nie selbst.
 - **Widerruf:** <https://myaccount.google.com/permissions> oder `remove --revoke`.
 
@@ -402,8 +404,9 @@ Die App hat nur User-Scopes:
 | `reactions:read`, `reactions:write` | `slack_add_reaction`, `slack_remove_reaction` (nur mit Client-Grant) |
 | `files:read` | `slack_get_file` (Metadaten und Inhalt einer Datei) |
 | `files:write` | `slack_upload_file` (nur mit Client-Grant) |
+| `im:write`, `mpim:write` | `slack_open_conversation`: DM bzw. Gruppen-DM öffnen (nur mit Client-Grant) |
 
-**Bestehende Workspaces (Manifest vor Oktober 2026):** Die Scopes `reactions:*` und `files:*` sind neu. Im Workspace die App-Seite öffnen → **App Manifest** → durch `perch slack manifest` ersetzen → **Reinstall to Workspace** → neues User OAuth Token kopieren. Dann in Perch `perch slack remove ID` und `perch slack add --label …` (Perch liest die Scopes nur beim Verbinden). Ohne Neuinstallation lehnen die neuen Tools mit `provider_scope_missing` ab, bevor sie Slack aufrufen.
+**Bestehende Workspaces (Manifest vor dem 20. Oktober 2026):** Die Scopes `reactions:*`, `files:*` und zuletzt `im:write`, `mpim:write` sind neu. Im Workspace die App-Seite öffnen → **App Manifest** → durch `perch slack manifest` ersetzen → **Reinstall to Workspace** → neues User OAuth Token kopieren. Dann in Perch `perch slack remove ID` und `perch slack add --label …` (Perch liest die Scopes nur beim Verbinden). Ohne Neuinstallation lehnen die neuen Tools mit `provider_scope_missing` ab, bevor sie Slack aufrufen. `perch status` zeigt fehlende Scopes eines Workspaces als Hinweis (`hint: token lacks …`), nicht als Fehler; Grundlage sind die Scopes, die Slack beim Verbinden im Header `x-oauth-scopes` gemeldet hat.
 
 Token-Rotation ist im Manifest aus, das Token läuft also nicht ab.
 
@@ -414,7 +417,7 @@ perch slack add --label "Firma"     # Token verdeckt eingeben
 perch slack list
 ```
 
-Perch prüft das Token mit `auth.test` und speichert Workspace, Nutzer und die tatsächlich gewährten Scopes. Fehlen Scopes des aktuellen Manifests (etwa `search:read`, `chat:write`, `files:write`), warnt `slack add`. Das gleiche Workspace-Konto zweimal zu verbinden wird abgelehnt.
+Perch prüft das Token mit `auth.test` und speichert Workspace, Nutzer und die tatsächlich gewährten Scopes. Fehlen Scopes des aktuellen Manifests (etwa `search:read`, `chat:write`, `files:write`, `im:write`, `mpim:write`), warnt `slack add`. Das gleiche Workspace-Konto zweimal zu verbinden wird abgelehnt.
 
 ### 4e.3 Lesen und Senden
 
@@ -432,6 +435,12 @@ Perch prüft das Token mit `auth.test` und speichert Workspace, Nutzer und die t
   - `slack_add_reaction`, `slack_remove_reaction`, `slack_edit_message` (nur eigene Nachrichten; Slack lehnt fremde ab): nur mit `slack_send`.
   - `slack_upload_file` (bis 10 MiB, optional in einen Thread mit Kommentar): nur mit `slack_send`, idempotent per `requestId` wie `slack_send_message`. Die Bytes gehen nur an `https://files.slack.com/upload/v1/…`; jede andere Upload-Adresse wird abgelehnt, bevor Daten fließen.
   - Löschen (Nachrichten, Dateien) und öffentliche Datei-Links gibt es nicht: Löschen ist bei Slack endgültig.
+
+- **DMs und geplante Nachrichten:**
+  - `slack_open_conversation` (nur mit `slack_send`): öffnet per `conversations.open` eine DM mit einem Nutzer (`im:write`) oder eine Gruppen-DM mit 2–8 Nutzern (`mpim:write`) und gibt die `channelId` zurück. Es wird nichts gepostet; geschrieben wird danach mit `slack_send_message` oder `slack_schedule_message`. Kanäle anlegen, archivieren oder Mitglieder einladen/entfernen gibt es nicht.
+  - `slack_schedule_message` (nur mit `slack_send`, `chat:write`): plant eine Nachricht per `chat.scheduleMessage`. `postAt` als Unix-Sekunden oder RFC 3339 mit Offset, mindestens 60 s und höchstens 120 Tage in der Zukunft (sonst Ablehnung vor jedem Slack-Aufruf), optional `threadTs`. Pflichtfeld `requestId` über denselben Versand-Ledger wie `slack_send_message`; das Ergebnis enthält die `scheduledMessageId`. Eine Wiederholung mit gleicher `requestId` liefert das gespeicherte Ergebnis, auch wenn der Zeitpunkt inzwischen vorbei ist. `slack_send_status` zeigt für diese `requestId` die `scheduledMessageId` (`Q…`); im Audit-Log erscheint das Planen als `slack_send_message`.
+  - `slack_list_scheduled_messages` (lesen, globales Token und `slack_read`): noch nicht gesendete geplante Nachrichten eines Workspaces, optional eines Kanals, seitenweise (höchstens 100 pro Seite).
+  - `slack_cancel_scheduled_message` (nur mit `slack_send`): zieht eine noch nicht gesendete geplante Nachricht per `chat.deleteScheduledMessage` zurück. Bereits gesendete Nachrichten löscht Perch nie (`chat.delete` bleibt gesperrt). Der Ledger hält nur das Planen fest: Nach dem Zurückziehen liefert die ursprüngliche `requestId` von `slack_schedule_message` weiterhin `accepted` (ohne erneut zu planen), und `slack_send_status` zeigt weiterhin die geplante Nachricht. Ob sie noch aussteht, zeigt `slack_list_scheduled_messages`; neu planen nur mit neuer `requestId`.
 
   **Achtung Limit:** Slack-, WhatsApp- und Mail-Sends teilen sich 1000 Sende-Einträge pro Namespace. Danach schlagen alle Sends fehl, auch Mail (`ledger_full`), bis es einen Ledger-Rollover gibt (`docs/SLACK_WHATSAPP_MILESTONE.md` §6).
 
@@ -851,13 +860,17 @@ perch public on      # wieder an; Geräte müssen neu gekoppelt werden
 | `contacts_list` | Alle Kontakte seitenweise (keine Suche), nur Kontaktquellen, `personFields` aus einer Allowlist |
 | `contacts_get` | Ein Kontakt per `people/c…`. Profile fremder Google-Konten sind nicht abrufbar |
 | `mail_send_status` | nur mit Client-Grant `send` für das Konto: Stand eines **eigenen** früheren `mail_send` (gleicher Client, gleiches Konto, gleiche `requestId`), ohne zu senden. Andere Clients, Nutzer oder Konten finden ihn nicht |
-| `calendar_create_event` | Nur mit Client-Grant `calendar_write` und Provider-Freigabe. Private Termine (`private`/`confidential`, ohne Angabe `private`) ohne Gäste/Benachrichtigungen an andere, nur Popup-Erinnerungen; `requestId` macht Wiederholungen idempotent. Ergebnis `created`, `conflict`, `rejected` oder `indeterminate` |
-| `calendar_update_event` | Nur mit `calendar_write` + `calendar_read`. PATCH mit `If-Match: etag`, `sendUpdates=none`, nur eigene Termine ohne Gäste und ohne Serie. Das Ergebnis ist immer privat und nur mit Popup-Erinnerungen (wird im selben PATCH gesetzt). Ergebnis `updated`, `precondition_failed`, `rejected` oder `indeterminate` |
+| `calendar_create_event` | Nur mit Client-Grant `calendar_write` und Provider-Freigabe; mit `attendees` zusätzlich `calendar_invite`. Ohne Gäste privat und still, mit Gästen `sendUpdates` Standard `all`; Serien, Meet-Link, nur Popup-Erinnerungen (Abschnitt 4b); `requestId` macht Wiederholungen idempotent (auch die Meet-Anfrage). Ergebnis `created`, `conflict`, `rejected` oder `indeterminate` |
+| `calendar_update_event` | Nur mit `calendar_write` + `calendar_read`; jede Änderung an einem Termin mit Gästen (vorher oder nachher, auch mit `sendUpdates: "none"`) zusätzlich `calendar_invite`. PATCH mit `If-Match: etag`, nur selbst organisierte Termine oder ganze Serien, keine einzelnen Vorkommen. Ergebnis `updated`, `precondition_failed`, `rejected` oder `indeterminate` |
+| `calendar_delete_event` | Nur mit `calendar_write` + `calendar_read` (mit Gästen zusätzlich `calendar_invite`). **Endgültiges** Löschen eines Termins oder einer ganzen Serie, If-Match auf das aktuelle `etag`. Ergebnis `deleted`, `not_found`, `precondition_failed`, `rejected` oder `indeterminate` |
+| `calendar_respond_event` | Nur mit `calendar_invite` + `calendar_read`. Einladung annehmen/ablehnen/vorläufig für den eigenen Eintrag. Ergebnis `responded`, `precondition_failed`, `rejected` oder `indeterminate` |
 
 | `slack_list_conversations` | Kanäle, private Kanäle, Gruppen-DMs und DMs aller lesbaren Workspaces oder eines. `query` filtert nach Kanal- oder Personenname. Herkunft `workspaceId`/`workspaceLabel` |
 | `slack_get_history`, `slack_get_thread` | Nachrichten mit Namen (`userName`), Thread-Hinweisen (`threadTs`, `replyCount`) und Datei-Metadaten. Zeitfenster `oldest`/`latest` (RFC 3339). Cursor an Workspace und Kanal gebunden |
 | `slack_search` | Slacks Suche (`in:#kanal`, `from:@person`, `before:`/`after:`) über alle Workspaces, neueste zuerst, mit Permalink. Workspaces ohne `search:read` erscheinen in `errors[]` |
 | `slack_send_message`, `slack_send_status` | nur mit Client-Grant `slack_send`. Postet als der verbundene Nutzer, optional im Thread (`threadTs`, `replyBroadcast`). Pflichtfeld `requestId`; Ergebnis `accepted`/`rejected`/`indeterminate` wie bei Mail |
+| `slack_open_conversation`, `slack_schedule_message`, `slack_cancel_scheduled_message` | nur mit Client-Grant `slack_send`. DM/Gruppen-DM öffnen (1–8 Nutzer), Nachricht planen (60 s bis 120 Tage, Pflichtfeld `requestId`), geplante Nachricht zurückziehen (Abschnitt 4e.3) |
+| `slack_list_scheduled_messages` | geplante, noch nicht gesendete Nachrichten eines Workspaces |
 | `whatsapp_list_chats` | Chats (Personen, Gruppen) aller lesbaren Konten oder eines, `query` nach Chatname, `archived` |
 | `whatsapp_get_messages` | Nachrichten eines Chats, Textsuche `query`, Zeitfenster `after`/`before`, `fromMe`, `mediaOnly`. Medien nur als Metadaten, keine Medien-URLs |
 | `whatsapp_search` | Textsuche in den zuletzt aktiven `chatLimit` Chats pro Konto (Default 30, max. 100), **keine** Suche über alle Chats |

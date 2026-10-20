@@ -21,6 +21,8 @@ export interface MockSlackChannel {
   kind: 'public_channel' | 'private_channel' | 'mpim' | 'im';
   messages: MockSlackMessage[];
   replies?: Record<string, MockSlackMessage[]>;
+  /** DMs / group DMs opened by conversations.open: the other members. */
+  members?: string[];
 }
 
 export interface MockSlackTeam {
@@ -36,6 +38,17 @@ export interface MockSlackTeam {
   reactions: Array<{ channel: string; ts: string; name: string }>;
   edits: Array<{ channel: string; ts: string; text: string }>;
   files: MockSlackFile[];
+  /** Scheduled, not yet posted messages (chat.scheduleMessage / chat.deleteScheduledMessage). */
+  scheduled: MockSlackScheduled[];
+}
+
+export interface MockSlackScheduled {
+  id: string;
+  channel: string;
+  text: string;
+  post_at: number;
+  thread_ts?: string;
+  date_created: number;
 }
 
 export interface MockSlackFile {
@@ -69,12 +82,18 @@ export class MockSlack {
   postMode: { kind: 'ok' } | { kind: 'error'; code: string } | { kind: 'http'; status: number } | { kind: 'throw' } = { kind: 'ok' };
   /** files.completeUploadExternal behaviour (same shapes as postMode). */
   completeMode: { kind: 'ok' } | { kind: 'error'; code: string } | { kind: 'http'; status: number } | { kind: 'throw' } = { kind: 'ok' };
+  /** chat.scheduleMessage behaviour (same shapes as postMode). */
+  scheduleMode: { kind: 'ok' } | { kind: 'error'; code: string } | { kind: 'http'; status: number } | { kind: 'throw' } = { kind: 'ok' };
+  /** Clock of the mock (seconds); tests may move it. */
+  nowSeconds: () => number = () => Math.floor(Date.now() / 1000);
   /** Overrides the upload_url returned by files.getUploadURLExternal (hostile-URL tests). */
   uploadUrlOverride?: string;
   /** Upload URLs handed out and not yet used: path -> (team, file id, announced length). */
   private readonly uploads = new Map<string, { team: MockSlackTeam; fileId: string; length: number; filename: string }>();
   private teamCounter = 0;
   private fileCounter = 0;
+  private convCounter = 0;
+  private scheduleCounter = 0;
 
   addTeam(name: string, opts: { scopes?: string[] } = {}): MockSlackTeam {
     this.teamCounter++;
@@ -85,13 +104,14 @@ export class MockSlack {
       team: `Mock team ${name}`,
       userId: `U0ME${n}`,
       user: `me${n}`,
-      scopes: opts.scopes ?? ['channels:read', 'channels:history', 'groups:read', 'groups:history', 'im:read', 'im:history', 'mpim:read', 'mpim:history', 'users:read', 'search:read', 'chat:write', 'reactions:read', 'reactions:write', 'files:read', 'files:write'],
+      scopes: opts.scopes ?? ['channels:read', 'channels:history', 'groups:read', 'groups:history', 'im:read', 'im:history', 'mpim:read', 'mpim:history', 'users:read', 'search:read', 'chat:write', 'reactions:read', 'reactions:write', 'files:read', 'files:write', 'im:write', 'mpim:write'],
       users: {},
       channels: [],
       posted: [],
       reactions: [],
       edits: [],
       files: [],
+      scheduled: [],
     };
     this.teams.push(team);
     return team;
@@ -283,6 +303,57 @@ export class MockSlack {
             permalink: `https://mock.slack.example/files/${file.id}`,
           },
         });
+      }
+      case 'conversations.open': {
+        if (req.method !== 'POST') return json(405, { ok: false, error: 'method_not_allowed' });
+        const users = (new URLSearchParams(req.body ?? '').get('users') ?? '').split(',').filter(Boolean);
+        if (!users.length) return json(200, { ok: false, error: 'users_list_not_supplied' });
+        if (users.length > 8) return json(200, { ok: false, error: 'too_many_users' });
+        if (!team.scopes.includes(users.length > 1 ? 'mpim:write' : 'im:write')) return json(200, { ok: false, error: 'missing_scope' });
+        if (users.some((u) => u !== team.userId && !team.users[u])) return json(200, { ok: false, error: 'user_not_found' });
+        const key = [...users].sort().join(',');
+        const kind = users.length > 1 ? 'mpim' : 'im';
+        const existing = team.channels.find((c) => c.kind === kind && c.members && [...c.members].sort().join(',') === key);
+        if (existing) return json(200, { ok: true, no_op: true, already_open: true, channel: { id: existing.id } });
+        const id = `${kind === 'im' ? 'D' : 'G'}0OPEN${++this.convCounter}`;
+        team.channels.push({ id, kind, members: users, ...(kind === 'im' ? { user: users[0] } : { name: `mpdm-${key}` }), messages: [] });
+        return json(200, { ok: true, channel: { id } });
+      }
+      case 'chat.scheduleMessage': {
+        if (req.method !== 'POST') return json(405, { ok: false, error: 'method_not_allowed' });
+        if (this.scheduleMode.kind === 'throw') throw new Error('MOCK: connection reset after schedule');
+        if (this.scheduleMode.kind === 'http') return json(this.scheduleMode.status, { ok: false });
+        if (this.scheduleMode.kind === 'error') return json(200, { ok: false, error: this.scheduleMode.code });
+        const f = new URLSearchParams(req.body ?? '');
+        const channel = f.get('channel') ?? '';
+        const postAt = Number(f.get('post_at'));
+        if (!team.channels.some((c) => c.id === channel)) return json(200, { ok: false, error: 'channel_not_found' });
+        const now = this.nowSeconds();
+        if (!(postAt > now)) return json(200, { ok: false, error: 'time_in_past' });
+        if (postAt > now + 120 * 86_400) return json(200, { ok: false, error: 'time_too_far' });
+        const id = `Q0MOCK${++this.scheduleCounter}`;
+        team.scheduled.push({ id, channel, text: f.get('text') ?? '', post_at: postAt, date_created: now, ...(f.get('thread_ts') ? { thread_ts: f.get('thread_ts')! } : {}) });
+        return json(200, { ok: true, channel, scheduled_message_id: id, post_at: postAt });
+      }
+      case 'chat.scheduledMessages.list': {
+        const channel = q.get('channel');
+        const all = team.scheduled.filter((m) => !channel || m.channel === channel).sort((a, b) => a.post_at - b.post_at);
+        const start = Number(q.get('cursor') ?? 0);
+        const limit = Number(q.get('limit') ?? 100);
+        const next = start + limit < all.length ? String(start + limit) : '';
+        return json(200, {
+          ok: true,
+          scheduled_messages: all.slice(start, start + limit).map((m) => ({ id: m.id, channel_id: m.channel, post_at: m.post_at, date_created: m.date_created, text: m.text })),
+          response_metadata: { next_cursor: next },
+        });
+      }
+      case 'chat.deleteScheduledMessage': {
+        if (req.method !== 'POST') return json(405, { ok: false, error: 'method_not_allowed' });
+        const f = new URLSearchParams(req.body ?? '');
+        const i = team.scheduled.findIndex((m) => m.id === f.get('scheduled_message_id') && m.channel === f.get('channel'));
+        if (i < 0) return json(200, { ok: false, error: 'invalid_scheduled_message_id' });
+        team.scheduled.splice(i, 1);
+        return json(200, { ok: true });
       }
       default:
         return json(404, { ok: false, error: 'unknown_method' });

@@ -437,11 +437,29 @@ describe('ImapMailProvider organize [MOCK ImapSession]', () => {
     const unknown = imapSetup([{ status: 'indeterminate', detail: INDETERMINATE_NOTE }]);
     expect(await unknown.provider.sendDraft(imapAccount(), draftId)).toEqual({ status: 'indeterminate', detail: INDETERMINATE_NOTE });
     expect(unknown.box('Entwürfe').messages).toHaveLength(1);
+    // Without MOVE/UIDPLUS the draft stays and a copy is APPENDed to Sent instead (one SMTP submission only).
+    const copied = imapSetup();
+    copied.session.moveExt = false;
+    const c = await copied.provider.sendDraft(imapAccount(), draftId);
+    expect(c).toMatchObject({ status: 'accepted', sentCopy: true });
+    expect(c.detail).toMatch(/copy was filed in "Gesendet".*still in the drafts folder/);
+    expect(copied.box('Gesendet').messages).toHaveLength(1);
+    expect(copied.box('Entwürfe').messages).toHaveLength(1);
+    expect(copied.smtpCalls).toHaveLength(1);
+    // With Sent copies turned off for the account, no APPEND fallback: reported, outcome unchanged.
     const unfiled = imapSetup();
     unfiled.session.moveExt = false;
-    const r = await unfiled.provider.sendDraft(imapAccount(), draftId);
-    expect(r.status).toBe('accepted');
+    const r = await unfiled.provider.sendDraft(imapAccount({ sentCopy: false }), draftId);
+    expect(r).toMatchObject({ status: 'accepted', sentCopy: false });
     expect(r.detail).toMatch(/could not be moved to the Sent folder/);
+    expect(unfiled.box('Gesendet').messages).toHaveLength(0);
+    // APPEND failing too: still accepted, never resubmitted.
+    const failing = imapSetup();
+    failing.session.moveExt = false;
+    failing.session.failOn = { op: 'append', err: new Error('MOCK: quota') };
+    const f = await failing.provider.sendDraft(imapAccount(), draftId);
+    expect(f).toMatchObject({ status: 'accepted', sentCopy: false });
+    expect(failing.smtpCalls).toHaveLength(1);
   });
 
   it('refuses before SMTP: no allowSend, not in the drafts folder, a foreign From address, a stale id', async () => {

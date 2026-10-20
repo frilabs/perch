@@ -3,7 +3,29 @@ import { assertMailCapability, currentPrincipal, type Principal } from '../auth/
 import { PerchError } from '../errors.js';
 import { fanOut, type FanOutResult } from '../fanout.js';
 import type { Capability, CredentialStore, GmailAccount, ImapAccount, MicrosoftAccount, StoreData } from '../store/credentialStore.js';
-import { composeForProvider, isMessageId, validateOutgoing, type ComposeInput } from './compose.js';
+import {
+  composeForProvider,
+  isMessageId,
+  MAX_ATTACHMENT_TOTAL_BYTES,
+  MAX_ATTACHMENTS,
+  MAX_BODY_BYTES,
+  validateOutgoing,
+  type ComposeAttachment,
+  type ComposeInput,
+} from './compose.js';
+import {
+  addressKeys,
+  deriveReplyRecipients,
+  forwardBody,
+  forwardSubject,
+  htmlWithQuote,
+  mergeRecipients,
+  quoteReply,
+  replySubject,
+  safeContentType,
+  safeFilename,
+  threadingFor,
+} from './replyForward.js';
 import {
   ACCEPTED_NOTE,
   DEFAULT_MAIL_MAX_BYTES,
@@ -12,6 +34,7 @@ import {
   MAX_MAIL_PAGE_SIZE,
   type MailDraftSummary,
   type MailFolder,
+  type MailMessage,
   type MailProvider,
   type MailProviderKind,
   type MailSummary,
@@ -20,7 +43,16 @@ import {
   type ReplyContext,
   type SendResult,
 } from './types.js';
-import { accountChanged, canonicalSendDraftPayload, canonicalSendPayload, SendWorkflow, validateRequestId, viewOf, type SendView } from './workflow.js';
+import {
+  accountChanged,
+  canonicalDerivedPayload,
+  canonicalSendDraftPayload,
+  canonicalSendPayload,
+  SendWorkflow,
+  validateRequestId,
+  viewOf,
+  type SendView,
+} from './workflow.js';
 import { MailWorkflowLedger, newOperationId, type SendReason } from './workflowLedger.js';
 
 export interface MailProviders {
@@ -52,6 +84,44 @@ export interface OutgoingRequest extends Omit<ComposeInput, 'subject'> {
 export interface SendRequest extends OutgoingRequest {
   requestId: string;
 }
+
+/** mail_reply / mail_forward input (docs/MAIL_CALENDAR_SLACK_SPEC.md §1). Recipients come from the original's headers. */
+export interface DerivedRequest {
+  accountId: string;
+  /** Perch message id (same account) of the original. */
+  messageId: string;
+  /** Plain-text body written by the caller; the quote / forward block is appended by Perch. */
+  text?: string;
+  html?: string;
+  /** Forward: required recipients. Reply: optional additional recipients. */
+  to?: string[];
+  cc?: string[];
+  bcc?: string[];
+  /** Reply only: also answer the original To and Cc (without the own address). */
+  replyAll?: boolean;
+  /** Forward only: attach the original's (non-inline) attachments; default true. */
+  includeAttachments?: boolean;
+  /** false (default): create a draft (capability "draft"); true: send now ("send" and requestId). */
+  send?: boolean;
+  requestId?: string;
+}
+
+export type DerivedKind = 'reply' | 'forward';
+
+/** What Perch derived from the original: returned so the user can check the recipients. */
+export interface DerivedSummary {
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  /** Original header entries that were not one plain address and were left out. */
+  skippedRecipients?: number;
+  /** Forward: attachments taken over, and inline parts (embedded images of the HTML) that were not. */
+  attachments?: number;
+  omittedInlineAttachments?: number;
+}
+
+const FORWARD_ATTACHMENT_HINT = 'Forward without them (includeAttachments: false) or send them separately.';
 
 export type SendOutcome = SendResult &
   MailProvenance & { from: string; operationId: string; requestState: SendView['requestState']; replayed: boolean; manualResolution?: 'sent' | 'not_sent' };
@@ -686,6 +756,290 @@ export class MailService {
       return { result, reason: result.status === 'accepted' ? 'provider_accepted' : result.status === 'rejected' ? 'provider_rejected' : 'provider_unknown' };
     } catch (err) {
       // Adapters throw PerchError only before the message reaches the transport (scope, token, draft lookup).
+      if (err instanceof PerchError) return notSent(err.message, 'not_submitted_provider_precheck');
+      return { result: { status: 'indeterminate', detail: 'The send failed unexpectedly after it may have reached the provider; the outcome is unknown.' }, reason: 'adapter_error' };
+    }
+  }
+
+  // ---- reply and forward (mail_reply / mail_forward) -----------------------------------------------------
+
+  /** Reply (replyAll) to one message: a draft by default, or sent now with send: true (idempotent, needs requestId). */
+  reply(stale: Principal, req: DerivedRequest) {
+    return this.derived('reply', stale, req);
+  }
+
+  /** Forward one message with its attachments: a draft by default, or sent now with send: true. */
+  forward(stale: Principal, req: DerivedRequest) {
+    return this.derived('forward', stale, req);
+  }
+
+  private derived(kind: DerivedKind, stale: Principal, req: DerivedRequest) {
+    return req?.send === true ? this.sendDerived(kind, stale, req) : this.draftDerived(kind, stale, req);
+  }
+
+  /** Current grant: the capability plus "read" (the original is read), the account, and its provider permission. */
+  private async derivedAllowed(principal: Principal, accountId: string, cap: 'draft' | 'send'): Promise<Entry> {
+    const p = await this.caller(principal);
+    const e = await this.authorised(p, accountId, cap);
+    assertMailCapability(p, accountId, 'read');
+    this.assertProviderAllows(e, cap);
+    return e;
+  }
+
+  /** Local checks of the caller's own input (before any ledger write or provider I/O). */
+  private prevalidateDerived(kind: DerivedKind, e: Entry, req: DerivedRequest): void {
+    const bad = (m: string) => new PerchError(m, 'bad_argument');
+    if (typeof req.messageId !== 'string' || !req.messageId || req.messageId.length > 2048 || /[\u0000-\u001f\u007f]/.test(req.messageId)) {
+      throw bad('messageId of the original message is required (from mail_search / mail_read_message)');
+    }
+    if (req.text !== undefined && typeof req.text !== 'string') throw bad('text must be a string');
+    if (req.html !== undefined && typeof req.html !== 'string') throw bad('html must be a string');
+    if (kind === 'reply' && (req.text === undefined || !req.text.trim())) throw bad('text is required for a reply');
+    if (kind === 'forward' && !(Array.isArray(req.to) && req.to.length)) throw bad('to is required for a forward');
+    if (kind === 'reply' && req.includeAttachments !== undefined) throw bad('includeAttachments applies to mail_forward only');
+    if (kind === 'forward' && req.replyAll !== undefined) throw bad('replyAll applies to mail_reply only');
+    // Caller addresses, body sizes and the sender, exactly as validateOutgoing checks them again on the derived message.
+    validateOutgoing(
+      {
+        to: kind === 'forward' ? (req.to ?? []) : [...(req.to ?? []), e.account.email],
+        ...(req.cc ? { cc: req.cc } : {}),
+        ...(req.bcc ? { bcc: req.bcc } : {}),
+        subject: '',
+        text: req.text ?? '',
+        ...(req.html !== undefined ? { html: req.html } : {}),
+      },
+      e.account.email,
+    );
+  }
+
+  /**
+   * Reads the original and derives the outgoing message: recipients (reply), subject, threading, quote or forward
+   * block, and for a forward the original attachments within the outgoing limits (over the limits: an error, never
+   * silently dropped). Only provider reads; nothing is written.
+   */
+  private async deriveOutgoing(kind: DerivedKind, e: Entry, req: DerivedRequest): Promise<{ request: OutgoingRequest; threadId?: string; summary: DerivedSummary }> {
+    const p = this.provider(e);
+    const original: MailMessage = await p.read(e.account, req.messageId, { maxBytes: MAX_BODY_BYTES });
+    const text = req.text ?? '';
+    let to: string[];
+    let cc: string[];
+    let skipped = 0;
+    if (kind === 'reply') {
+      const r = deriveReplyRecipients(original, e.account.email, req.replyAll === true);
+      const taken = addressKeys([...r.to, ...r.cc]);
+      to = mergeRecipients(r.to, req.to, taken);
+      cc = mergeRecipients(r.cc, req.cc, taken);
+      skipped = r.skipped;
+    } else {
+      to = [...(req.to ?? [])];
+      cc = [...(req.cc ?? [])];
+    }
+    // A caller bcc that is already a visible recipient would get the message twice: drop it (case-insensitive address).
+    const bcc = mergeRecipients([], req.bcc, addressKeys([...to, ...cc]));
+    const quote = kind === 'reply' ? quoteReply(original, '') : forwardBody(original, '');
+    const body = kind === 'reply' ? quoteReply(original, text) : forwardBody(original, text);
+    const subject = kind === 'reply' ? replySubject(original.subject) : forwardSubject(original.subject);
+    const thread = threadingFor(original, kind === 'reply');
+
+    const attachments: ComposeAttachment[] = [];
+    let omittedInline = 0;
+    if (kind === 'forward' && req.includeAttachments !== false) {
+      const all = original.attachments ?? [];
+      const files = all.filter((a) => a.inline !== true);
+      omittedInline = all.length - files.length;
+      if (files.length > MAX_ATTACHMENTS) {
+        throw new PerchError(
+          `The original has ${files.length} attachments, over the limit of ${MAX_ATTACHMENTS} per message. Nothing was created or sent. ${FORWARD_ATTACHMENT_HINT}`,
+          'too_many_attachments',
+        );
+      }
+      const tooLarge = () =>
+        new PerchError(
+          `The original's attachments are larger than ${MAX_ATTACHMENT_TOTAL_BYTES} bytes in total. Nothing was created or sent. ${FORWARD_ATTACHMENT_HINT}`,
+          'attachments_too_large',
+        );
+      // Provider sizes are hints (IMAP reports the encoded size): refuse early only when clearly over the limit.
+      const reported = files.reduce((n, a) => n + (typeof a.size === 'number' ? a.size : 0), 0);
+      if (reported > Math.ceil((MAX_ATTACHMENT_TOTAL_BYTES * 4) / 3) + 64 * 1024) throw tooLarge();
+      let total = 0;
+      for (const [i, a] of files.entries()) {
+        const remaining = MAX_ATTACHMENT_TOTAL_BYTES - total;
+        if (remaining < 1) throw tooLarge();
+        let content;
+        try {
+          content = await p.getAttachment(e.account, req.messageId, a.attachmentId, { maxBytes: remaining });
+        } catch (err) {
+          if (err instanceof PerchError && err.code === 'attachment_too_large') throw tooLarge();
+          if (err instanceof PerchError && err.code === 'unsupported_attachment') {
+            throw new PerchError(
+              `Attachment ${i + 1} of the original cannot be forwarded (${err.message}). Nothing was created or sent. ${FORWARD_ATTACHMENT_HINT}`,
+              'unsupported_attachment',
+            );
+          }
+          throw err;
+        }
+        total += content.size;
+        if (total > MAX_ATTACHMENT_TOTAL_BYTES) throw tooLarge();
+        attachments.push({
+          filename: safeFilename(content.filename ?? a.filename, i),
+          contentType: safeContentType(content.contentType),
+          contentBase64: content.contentBase64,
+        });
+      }
+    }
+
+    const request: OutgoingRequest = {
+      accountId: e.account.id,
+      to,
+      ...(cc.length ? { cc } : {}),
+      ...(bcc.length ? { bcc } : {}),
+      subject,
+      text: body,
+      ...(req.html !== undefined ? { html: htmlWithQuote(req.html, quote.replace(/^\n+/, '')) } : {}),
+      ...(attachments.length ? { attachments } : {}),
+      ...(thread.inReplyTo ? { inReplyTo: thread.inReplyTo } : {}),
+      ...(thread.references.length ? { references: thread.references } : {}),
+    };
+    const summary: DerivedSummary = {
+      to,
+      cc,
+      bcc,
+      subject,
+      ...(skipped ? { skippedRecipients: skipped } : {}),
+      ...(kind === 'forward' ? { attachments: attachments.length, omittedInlineAttachments: omittedInline } : {}),
+    };
+    // Gmail keeps the message in the original's thread with threadId (it must match the References/subject rules).
+    return { request, ...(original.threadId && e.kind === 'gmail' ? { threadId: original.threadId } : {}), summary };
+  }
+
+  /** Validates the derived message like any caller input (headers, addresses, sizes) and builds the MIME. */
+  private async composeDerived(e: Entry, d: { request: OutgoingRequest; threadId?: string }, mode: 'api' | 'smtp') {
+    const { accountId: _a, replyToMessageId: _r, subject, ...rest } = d.request;
+    const validated = validateOutgoing({ ...rest, subject: subject ?? '' }, e.account.email);
+    return composeForProvider(validated, mode, d.threadId);
+  }
+
+  /** Draft (default): audited like mail_create_draft, with the attempt recorded before the provider write. */
+  private draftDerived(kind: DerivedKind, stale: Principal, req: DerivedRequest) {
+    return this.audited(
+      `mail_${kind}`,
+      stale,
+      req?.accountId,
+      async (p) => {
+        const e = await this.derivedAllowed(p, req.accountId, 'draft');
+        this.prevalidateDerived(kind, e, req);
+        if (req.requestId !== undefined) throw new PerchError('requestId is only used with send: true', 'bad_argument');
+        const d = await this.deriveOutgoing(kind, e, req);
+        const mail = await this.composeDerived(e, d, 'api');
+        // The original was read (provider I/O): grant, account identity and provider permission again before the write.
+        const current = await this.derivedAllowed(p, req.accountId, 'draft');
+        if (!sameBinding(e, current)) throw accountChanged();
+        const draft = await this.provider(current).createDraft(current.account, mail);
+        return { ...provenance(current), from: current.account.email, ...draft, ...d.summary, sent: false as const };
+      },
+      true,
+    );
+  }
+
+  /**
+   * send: true goes through the idempotent send workflow like mail_send: capability "send" (+ "read"), account,
+   * provider permission, requestId and the caller's input, all before the atomic ledger claim. The fingerprint covers
+   * the CALLER's payload (original id, mode, text, extra recipients), not the derived message, so a retry with the
+   * same requestId replays the stored outcome without reading the original again. Exactly one provider attempt per key.
+   */
+  private async sendDerived(kind: DerivedKind, stale: Principal, req: DerivedRequest): Promise<SendOutcome & Partial<DerivedSummary> & { sent: true }> {
+    const actor = actorOf(stale);
+    let principal: Principal;
+    let e: Entry;
+    let ids: { key: string; operationId: string };
+    let fp: string;
+    let binding: string;
+    try {
+      principal = await this.caller(stale);
+      e = await this.authorised(principal, req?.accountId, 'send');
+      assertMailCapability(principal, req.accountId, 'read');
+      this.assertProviderAllows(e, 'send');
+      const requestId = validateRequestId(req.requestId);
+      this.prevalidateDerived(kind, e, req);
+      ids = await this.workflow.ids(actor, e.account.id, requestId);
+      fp = await this.workflow.fingerprint(ids.key, canonicalDerivedPayload(kind, req));
+      binding = await this.workflow.binding(bindingParts(e));
+    } catch (err) {
+      await this.audit.record({ type: `mail_${kind}`, actor, accountId: safeAccountId(req?.accountId), outcome: outcomeOf(err), code: auditCode(err) });
+      throw err;
+    }
+    const claim = await this.workflow.claim({ key: ids.key, fp, binding, operationId: ids.operationId, accountId: e.account.id, provider: e.kind, actor });
+    const head = { ...provenance(e), from: e.account.email };
+    if (claim.kind === 'existing') {
+      const { createdAt: _c, finalizedAt: _f, ...view } = viewOf(claim.record);
+      return { ...head, ...view, replayed: true, sent: true };
+    }
+    let summary: DerivedSummary | undefined;
+    const { result, reason } = await this.attemptDerived(kind, principal, e, req, binding, (s) => {
+      summary = s;
+    }).catch(
+      (): { result: SendResult; reason: SendReason } => ({
+        result: { status: 'indeterminate', detail: 'The send failed unexpectedly; the outcome is unknown.' },
+        reason: 'adapter_error',
+      }),
+    );
+    const recorded = await this.workflow.finalize(ids.key, claim.attempt, result.status, reason, result.providerMessageId);
+    if (!recorded) {
+      return { ...head, status: 'indeterminate', detail: FINALIZE_FAILED_NOTE, operationId: ids.operationId, requestState: 'pending', replayed: false, sent: true };
+    }
+    return { ...head, ...result, detail: liveDetail(result), operationId: ids.operationId, requestState: result.status, replayed: false, ...(summary ?? {}), sent: true };
+  }
+
+  /** The single attempt of a claimed reply/forward send; everything that fails before the provider call is "rejected". */
+  private async attemptDerived(
+    kind: DerivedKind,
+    principal: Principal,
+    e: Entry,
+    req: DerivedRequest,
+    binding: string,
+    report: (s: DerivedSummary) => void,
+  ): Promise<{ result: SendResult; reason: SendReason }> {
+    const notSent = (detail: string, reason: SendReason) => ({ result: { status: 'rejected' as const, detail: `Not sent: ${detail}` }, reason });
+    const message = (err: unknown, fallback: string) => (err instanceof PerchError ? err.message : fallback);
+    const authorization = async () => {
+      try {
+        await this.derivedAllowed(principal, req.accountId, 'send');
+        return undefined;
+      } catch (err) {
+        return notSent(message(err, 'the request is no longer authorised'), 'not_submitted_authorization');
+      }
+    };
+    const denied = await authorization();
+    if (denied) return denied;
+    let d: Awaited<ReturnType<MailService['deriveOutgoing']>>;
+    try {
+      d = await this.deriveOutgoing(kind, e, req);
+    } catch (err) {
+      return notSent(`the original message could not be used (${message(err, 'error')})`, 'not_submitted_reply_context');
+    }
+    let mail: Awaited<ReturnType<MailService['composeDerived']>>;
+    try {
+      mail = await this.composeDerived(e, d, e.kind === 'imap' ? 'smtp' : 'api');
+    } catch (err) {
+      return notSent(message(err, 'the message could not be built'), 'not_submitted_compose');
+    }
+    report(d.summary);
+    // Immediately before submission: authorization, sender identity binding and provider grant as stored now.
+    const deniedNow = await authorization();
+    if (deniedNow) return deniedNow;
+    const current = await this.entry(e.account.id).catch(() => undefined);
+    if (!current || (await this.workflow.binding(bindingParts(current))) !== binding) {
+      return notSent(accountChanged().message, 'not_submitted_account_changed');
+    }
+    try {
+      this.assertProviderAllows(current, 'send');
+    } catch (err) {
+      return notSent(message(err, 'the provider grant no longer allows sending'), 'not_submitted_provider_precheck');
+    }
+    try {
+      const result = await this.provider(current).send(current.account, mail);
+      return { result, reason: result.status === 'accepted' ? 'provider_accepted' : result.status === 'rejected' ? 'provider_rejected' : 'provider_unknown' };
+    } catch (err) {
       if (err instanceof PerchError) return notSent(err.message, 'not_submitted_provider_precheck');
       return { result: { status: 'indeterminate', detail: 'The send failed unexpectedly after it may have reached the provider; the outcome is unknown.' }, reason: 'adapter_error' };
     }

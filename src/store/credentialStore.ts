@@ -86,6 +86,12 @@ const ImapAccountSchema = z.object({
    */
   allowModify: z.boolean().optional(),
   draftsMailbox: z.string().optional(),
+  /**
+   * File a copy of every accepted SMTP send in the IMAP Sent folder. Optional so older stores stay valid; absent
+   * means "on, unless the SMTP server files sent mail itself" (see imapSentCopyEnabled in src/mail/imap.ts).
+   * `perch imap add --no-sent-copy` stores false.
+   */
+  sentCopy: z.boolean().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -187,8 +193,11 @@ const LumaAccountSchema = z.object({
 
 /** Mail capabilities (email milestone) apply to mail accounts only. */
 export const MAIL_CAPABILITIES = ['read', 'draft', 'send', 'modify'] as const;
-/** Calendar/Contacts capabilities apply to Google productivity accounts (gprod-…) only. */
-export const PRODUCTIVITY_CAPABILITIES = ['calendar_read', 'calendar_write', 'contacts_read'] as const;
+/**
+ * Calendar/Contacts capabilities apply to Google productivity accounts (gprod-…) only. calendar_invite:
+ * writes that add/change guests or notify them (invitations, updates, cancellations, responses).
+ */
+export const PRODUCTIVITY_CAPABILITIES = ['calendar_read', 'calendar_write', 'calendar_invite', 'contacts_read'] as const;
 /** Slack capabilities apply to Slack workspaces (slack-…) only. */
 export const SLACK_CAPABILITIES = ['slack_read', 'slack_send'] as const;
 /** WhatsApp capabilities apply to WhatsApp accounts (whatsapp-…) only. */
