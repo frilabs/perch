@@ -1,5 +1,6 @@
 import MailComposer from 'nodemailer/lib/mail-composer';
 import { PerchError } from '../errors.js';
+import { stripBcc } from './draftMime.js';
 
 /**
  * Validates outbound mail input and builds the RFC 5322 message. Every header value is checked
@@ -190,11 +191,17 @@ export async function buildMime(v: ValidatedMail, opts: { keepBcc: boolean }): P
   return node.build();
 }
 
-/** Builds the complete outbound message for a provider (Bcc kept for API providers, envelope for SMTP). */
+/**
+ * Builds the complete outbound message for a provider (Bcc kept for API providers, envelope for SMTP). For SMTP the
+ * message is built once WITH Bcc (`sentCopy`, the copy an IMAP account files in its Sent folder, private to the sender)
+ * and `raw` is that same message with the Bcc header removed, so both copies share one Message-ID and Date.
+ */
 export async function composeForProvider(v: ValidatedMail, kind: 'api' | 'smtp', threadId?: string) {
+  const full = await buildMime(v, { keepBcc: true });
   return {
-    raw: await buildMime(v, { keepBcc: kind === 'api' }),
+    raw: kind === 'api' ? full : stripBcc(full),
     envelope: { from: v.from, to: envelopeRecipients(v) },
+    ...(kind === 'smtp' ? { sentCopy: full } : {}),
     ...(threadId ? { threadId } : {}),
   };
 }

@@ -19,6 +19,7 @@ import {
 import { createGmailTokenProvider, gmailScopesFor, registerGmailAccount, removeGmailAccount } from '../mail/gmailAccounts.js';
 import { addImapAccount, removeImapAccount, verifyImapAccount } from '../mail/imapAccounts.js';
 import { IMAP_PRESETS } from '../mail/imapPresets.js';
+import { imapSentCopyEnabled } from '../mail/imap.js';
 import { PRUNE_REFUSED, resolveSend } from '../mail/workflow.js';
 import {
   ACCOUNT_ID_PATTERN,
@@ -99,7 +100,8 @@ Usage:
   perch microsoft list | remove ID
   perch imap add --label NAME --email ADDRESS [--username USER] [--preset gmx|gmx-com]
                  [--imap-host H --imap-port N --smtp-host H --smtp-port N --smtp-security tls|starttls]
-                 [--allow-drafts] [--allow-send] [--allow-modify] [--drafts-mailbox NAME]   password via masked prompt
+                 [--allow-drafts] [--allow-send] [--allow-modify] [--drafts-mailbox NAME] [--no-sent-copy]
+                 password via masked prompt; --no-sent-copy: never file sent mail in the Sent folder
   perch imap presets | list | remove ID
   perch google-productivity add --label NAME --services calendar,contacts [--allow-calendar-write]
                       [--port N] [--timeout SECONDS] [--login-hint EMAIL]
@@ -191,7 +193,9 @@ function formatMail(data: StoreData, which: AccountSection): string[] {
       ? data.imap.map((a) => ({
           a,
           kind: 'imap',
-          extra: `${a.imap.host}/${a.smtp.host}; drafts ${a.allowDrafts ? 'on' : 'off'}, send ${a.allowSend ? 'on' : 'off'}, organize ${a.allowModify ? 'on' : 'off'}`,
+          extra:
+            `${a.imap.host}/${a.smtp.host}; drafts ${a.allowDrafts ? 'on' : 'off'}, send ${a.allowSend ? 'on' : 'off'}, ` +
+            `organize ${a.allowModify ? 'on' : 'off'}, sent copy ${imapSentCopyEnabled(a) ? 'on' : 'off'}`,
         }))
       : []),
   ];
@@ -575,6 +579,7 @@ async function cmdImap(config: PerchConfig, io: CliIo, sub: string | undefined, 
       allowDrafts: Boolean(values['allow-drafts']),
       allowSend: Boolean(values['allow-send']),
       allowModify: Boolean(values['allow-modify']),
+      ...(values['no-sent-copy'] ? { sentCopy: false } : {}),
       ...(str('username') ? { username: str('username')! } : {}),
       ...(str('preset') ? { preset: str('preset')! } : {}),
       ...(str('imap-host') ? { imapHost: str('imap-host')! } : {}),
@@ -588,7 +593,8 @@ async function cmdImap(config: PerchConfig, io: CliIo, sub: string | undefined, 
   );
   io.stdout(
     `Connected IMAP account ${account.id} (${account.email}) as "${account.label}" via ${account.imap.host}/${account.smtp.host} ` +
-      `(drafts ${account.allowDrafts ? 'on' : 'off'}, send ${account.allowSend ? 'on' : 'off'}, organize ${account.allowModify ? 'on' : 'off'}).\n`,
+      `(drafts ${account.allowDrafts ? 'on' : 'off'}, send ${account.allowSend ? 'on' : 'off'}, organize ${account.allowModify ? 'on' : 'off'}, ` +
+      `sent copy ${imapSentCopyEnabled(account) ? 'on' : 'off'}).\n`,
   );
 }
 
@@ -889,6 +895,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         'read-all': { type: 'boolean' },
         'allow-write': { type: 'boolean' },
         'allow-modify': { type: 'boolean' },
+        'no-sent-copy': { type: 'boolean' },
         write: { type: 'boolean' },
         'read-only': { type: 'boolean' },
         full: { type: 'boolean' },
