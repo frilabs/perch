@@ -3,6 +3,7 @@
  * tests only. Nothing here talks to WhatsApp or a real bridge; passing tests are NOT evidence of a live
  * integration.
  */
+import { PerchError } from '../../src/errors.js';
 import type { UpstreamRequest, UpstreamResponse, UpstreamTransport } from '../../src/upstream.js';
 
 export interface MockWaMessage {
@@ -18,6 +19,49 @@ export interface MockWaMessage {
   url?: string | null;
 }
 
+/** One parsed multipart/form-data part (MOCK parser, enough for Perch's own bodies). */
+export interface MockFormPart {
+  name: string;
+  filename?: string;
+  contentType?: string;
+  data: Buffer;
+}
+
+export interface MockMediaSend {
+  route: 'image' | 'video' | 'audio' | 'file';
+  deviceId: string | undefined;
+  /** Field names in order of appearance. */
+  fieldNames: string[];
+  fields: Record<string, string>;
+  file?: MockFormPart;
+}
+
+/** Parses multipart/form-data strictly by the boundary from the content type (MOCK). */
+export function parseMultipart(contentType: string | undefined, body: Buffer): MockFormPart[] {
+  const m = /^multipart\/form-data; boundary=([A-Za-z0-9'()+_,.\/:=?-]{1,70})$/.exec(contentType ?? '');
+  if (!m) throw new Error(`MOCK GOWA: not multipart/form-data: ${contentType}`);
+  const delim = Buffer.from(`--${m[1]}`);
+  const parts: MockFormPart[] = [];
+  let pos = body.indexOf(delim);
+  if (pos !== 0) throw new Error('MOCK GOWA: body must start with the boundary');
+  for (;;) {
+    pos += delim.length;
+    if (body.subarray(pos, pos + 2).toString() === '--') break;
+    if (body.subarray(pos, pos + 2).toString() !== '\r\n') throw new Error('MOCK GOWA: malformed boundary line');
+    pos += 2;
+    const headerEnd = body.indexOf('\r\n\r\n', pos);
+    const head = body.subarray(pos, headerEnd).toString('utf8');
+    const next = body.indexOf(Buffer.concat([Buffer.from('\r\n'), delim]), headerEnd + 4);
+    if (headerEnd < 0 || next < 0) throw new Error('MOCK GOWA: truncated part');
+    const disp = /^Content-Disposition: form-data; name="([^"]+)"(?:; filename="([^"]+)")?$/m.exec(head);
+    if (!disp) throw new Error('MOCK GOWA: part without form-data disposition');
+    const ct = /^Content-Type: (.+)$/m.exec(head);
+    parts.push({ name: disp[1]!, ...(disp[2] ? { filename: disp[2] } : {}), ...(ct ? { contentType: ct[1]! } : {}), data: body.subarray(headerEnd + 4, next) });
+    pos = next + 2;
+  }
+  return parts;
+}
+
 export interface MockWaDevice {
   id: string;
   loggedIn: boolean;
@@ -25,6 +69,8 @@ export interface MockWaDevice {
   displayName?: string;
   chats: Array<{ jid: string; name: string; last_message_time: string; archived?: boolean }>;
   messages: MockWaMessage[];
+  /** Media the bridge can "download" per message id: bytes and what /download reports. */
+  media?: Record<string, { data: Buffer; filename: string; mimeType?: string; mediaType: string; chatDigits: string; fileName?: string; reportSize?: number }>;
   sent: Array<{ phone: string; message: string; reply_message_id?: string }>;
   /** Status polls until the device reports logged in (simulates the user entering the code). */
   loginAfterPolls?: number;
@@ -46,6 +92,11 @@ export class MockGowa {
   sendMode: { kind: 'ok' } | { kind: 'http'; status: number } | { kind: 'throw' } | { kind: 'no_success' } = { kind: 'ok' };
   /** Inject rows of another chat into message responses (a confused bridge). */
   leakForeignRows = false;
+  readonly mediaSent: MockMediaSend[] = [];
+  /** Overrides what /message/{id}/download reports as location (hostile bridge tests). */
+  downloadLocation: { file_path?: unknown; file_url?: unknown } | undefined;
+  /** Files served under /statics (path -> bytes); filled by /download. */
+  readonly statics = new Map<string, { data: Buffer; contentType?: string }>();
   private msgCounter = 0;
 
   constructor(
@@ -134,6 +185,43 @@ export class MockGowa {
       const body = JSON.parse(req.body ?? '{}') as { phone: string; message: string; reply_message_id?: string };
       d.sent.push(body);
       return ok({ message_id: `3EB0MOCK${String(++this.msgCounter).padStart(8, '0')}`, status: 'Message sent' });
+    }
+    m = /^\/send\/(image|video|audio|file)$/.exec(path);
+    if (req.method === 'POST' && m) {
+      if (this.sendMode.kind === 'throw') throw new Error('MOCK: connection reset after send');
+      if (this.sendMode.kind === 'http') return json(this.sendMode.status, { code: String(this.sendMode.status), message: 'failed', results: null });
+      if (this.sendMode.kind === 'no_success') return json(200, { code: 'PENDING', message: '?', results: {} });
+      if (!req.bodyBytes) return json(400, { code: '400', message: 'multipart body required', results: null });
+      const parts = parseMultipart(req.headers['content-type'], req.bodyBytes);
+      const route = m[1] as MockMediaSend['route'];
+      const fields: Record<string, string> = {};
+      for (const p of parts) if (p.filename === undefined) fields[p.name] = p.data.toString('utf8');
+      const file = parts.find((p) => p.filename !== undefined);
+      if (!file || file.name !== route || !fields.phone) return json(400, { code: '400', message: 'file and phone required', results: null });
+      this.mediaSent.push({ route, deviceId: deviceHeader, fieldNames: parts.map((p) => p.name), fields, file });
+      return ok({ message_id: `3EB0MEDIA${String(++this.msgCounter).padStart(8, '0')}`, status: `Send ${route} success` });
+    }
+    m = /^\/message\/([^/]+)\/download$/.exec(path);
+    if (req.method === 'GET' && m) {
+      const media = d.media?.[m[1]!];
+      if (!media || !q.get('phone')) return json(404, { code: '404', message: 'Message or media not found', results: null });
+      const rel = `statics/media/${media.chatDigits}/2026-10-20/${media.fileName ?? media.filename}`;
+      this.statics.set(`/${rel}`, { data: media.data, ...(media.mimeType ? { contentType: media.mimeType } : {}) });
+      return ok({
+        status: 'Media downloaded successfully',
+        message_id: m[1],
+        media_type: media.mediaType,
+        filename: media.filename,
+        ...(this.downloadLocation ?? { file_path: rel, file_url: `http://localhost:3000/${rel}` }),
+        file_size: media.reportSize ?? media.data.length,
+        ...(media.mimeType ? { mime_type: media.mimeType } : {}),
+      });
+    }
+    if (req.method === 'GET' && path.startsWith('/statics/')) {
+      const f = this.statics.get(path);
+      if (!f) return json(404, { code: '404', message: 'not found', results: null });
+      if (f.data.length > req.maxBytes) throw new PerchError(`Upstream response exceeds the ${req.maxBytes} byte limit`, 'response_too_large'); // as createFetchTransport does
+      return { status: 200, headers: { 'content-type': f.contentType ?? 'application/octet-stream' }, body: f.data };
     }
     return json(404, { code: '404', message: 'not found', results: null });
   };

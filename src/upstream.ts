@@ -115,6 +115,8 @@ const JID_PATH = '[0-9]{5,20}(?:-[0-9]{5,20})?%40(?:s\\.whatsapp\\.net|lid|g\\.u
 /** Device slots Perch creates in GOWA (`perch-` + 16 hex); other slots are never addressed. */
 export const GOWA_DEVICE_ID = /^perch-[a-f0-9]{16}$/;
 const DEVICE_PATH = 'perch-[a-f0-9]{16}';
+/** WhatsApp message ids as Perch accepts them from whatsapp_get_messages. */
+const WA_MESSAGE_PATH = '[A-Za-z0-9]{8,64}';
 
 type Route = [method: string, path: RegExp, capability?: RouteCapability];
 
@@ -183,6 +185,11 @@ const ROUTES: Record<Service, Route[]> = {
     ['GET', /^\/chats$/],
     ['GET', new RegExp(`^/chat/${JID_PATH}/messages$`)],
     ['POST', /^\/send\/message$/, 'whatsapp_send'],
+    // Media sends: multipart bodies built by Perch (file bytes only, never *_url fields).
+    ['POST', /^\/send\/(?:image|video|audio|file)$/, 'whatsapp_send'],
+    // Media download: the bridge saves the file and names its path; Perch then reads only that saved file.
+    ['GET', new RegExp(`^/message/${WA_MESSAGE_PATH}/download$`)],
+    ['GET', /^\/statics\/media\/[0-9]{5,20}(?:-[0-9]{5,20})?\/[0-9]{4}-[0-9]{2}-[0-9]{2}\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,199}$/],
     // Local CLI only (pairing and unlinking); no MCP tool passes the admin capability.
     ['GET', /^\/devices$/, 'admin'],
     ['POST', /^\/devices$/, 'admin'],
