@@ -214,8 +214,9 @@ const ROUTES: Record<Service, Route[]> = {
     ['GET', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events$`)],
     ['GET', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events/${EVENT_ID}$`)],
     // Writes: events.insert/patch/delete on one event or a whole series (never an instance id), tagged
-    // calendar_write (no guests involved: sendUpdates=none, no attendees in the body, see
-    // assertCalendarRequestSafe) or calendar_invite (guests, invitations, responses). Never: calendars.delete,
+    // calendar_write (events without guests: sendUpdates=none, no attendees in the body, see
+    // assertCalendarRequestSafe) or calendar_invite (any write to an event with guests, invitations,
+    // responses; CalendarService checks the existing event and picks the tag). Never: calendars.delete,
     // calendars.clear, calendarList/acl writes, events.move/import/quickAdd/instances.
     ['POST', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events$`), 'calendar_write'],
     ['POST', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events$`), 'calendar_invite'],
@@ -366,8 +367,10 @@ const CALENDAR_SEND_UPDATES = new Set(['all', 'externalOnly', 'none']);
 
 /**
  * Calendar writes carry only sendUpdates (all/externalOnly/none) and, on insert/patch, conferenceDataVersion
- * (0/1) as query parameters. A calendar_write call (no guests involved) must not notify anyone
- * (sendUpdates absent or none) and must not carry attendees; guests need the calendar_invite tag.
+ * (0/1) as query parameters. A calendar_write call is only for events without guests: it must not notify
+ * anyone (sendUpdates absent or none) and must not carry attendees or attendeesOmitted. Whether the existing
+ * event has guests is not visible here; CalendarService reads it first and uses the calendar_invite tag for
+ * any write to an event with guests (before or after the change).
  */
 function assertCalendarRequestSafe(opts: CallOptions): void {
   if (opts.method === 'GET') return;
@@ -382,7 +385,7 @@ function assertCalendarRequestSafe(opts: CallOptions): void {
     } else throw bad(`query parameter ${k}`);
   }
   const body = opts.json;
-  if (opts.capability === 'calendar_write' && body !== null && typeof body === 'object' && 'attendees' in body) throw bad('attendees need calendar_invite');
+  if (opts.capability === 'calendar_write' && body !== null && typeof body === 'object' && ('attendees' in body || 'attendeesOmitted' in body)) throw bad('attendees need calendar_invite');
 }
 
 /** True when (service, method, path) is allowlisted for exactly this capability. */

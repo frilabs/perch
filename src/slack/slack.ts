@@ -708,8 +708,10 @@ export class SlackService {
     const ws = await this.workspace(input.workspaceId);
     const view = await messageSendStatus(this.workflow, actorOf(p), ws.id, input.requestId, bindingParts(ws));
     const ts = decodeTs(view.providerMessageId);
+    // slack_schedule_message shares this ledger: its record holds the scheduled message id (Q…), not a ts.
+    const scheduled = view.providerMessageId && SLACK_SCHEDULED_ID.test(view.providerMessageId) ? view.providerMessageId : undefined;
     const { providerMessageId: _ref, ...rest } = view;
-    return { ...this.prov(ws), ...rest, ...(ts ? { messageTs: ts } : {}) };
+    return { ...this.prov(ws), ...rest, ...(ts ? { messageTs: ts } : {}), ...(scheduled ? { scheduledMessageId: scheduled } : {}) };
   }
 
   private assertScope(ws: SlackWorkspace, scope: (typeof SLACK_USER_SCOPES)[number]): void {

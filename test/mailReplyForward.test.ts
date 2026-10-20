@@ -307,6 +307,17 @@ describe.each(KINDS)('mail_reply / mail_forward [$name, MOCK provider]', (k) => 
     expect(addrs(h.get('to')).concat(addrs(h.get('cc')))).not.toContain(OWN[k.name]);
   });
 
+  it('drops a Bcc that is already a derived To/Cc recipient (case-insensitive address)', async () => {
+    const p = await client(['read', 'draft'], [k.accountId]);
+    const r = await service.reply(p, {
+      accountId: k.accountId, messageId: k.messageId, replyAll: true, text: 'All of you', cc: ['carol@example.test'],
+      bcc: ['Bob <BOB@example.test>', 'Carol@Example.test', 'hidden@example.test'],
+    });
+    expect(r.bcc).toEqual(['hidden@example.test']);
+    const f = await service.forward(p, { accountId: k.accountId, messageId: k.messageId, to: ['Eve <eve@example.test>'], bcc: ['EVE@example.test', 'x@example.test'], text: 'FYI' });
+    expect(f.bcc).toEqual(['x@example.test']);
+  });
+
   it('forward: a draft with the original attachment, a forward block and "Fwd: "; inline parts are counted, not attached', async () => {
     const p = await client(['read', 'draft'], [k.accountId]);
     const r = await service.forward(p, { accountId: k.accountId, messageId: k.messageId, to: ['Eve <eve@example.test>'], text: 'FYI' });

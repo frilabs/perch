@@ -494,21 +494,32 @@ function remindersAreSafe(r: GoogleEvent['reminders']): boolean {
   return Array.isArray(list) && list.length === popupOverrides(r).length;
 }
 
+/** What an existing attendee entry keeps through a guest-list PATCH: their answer, note, extra guests and name. */
+function kept(a: NonNullable<GoogleEvent['attendees']>[number] | undefined): Record<string, unknown> {
+  if (!a) return {};
+  return {
+    ...(typeof a.responseStatus === 'string' ? { responseStatus: a.responseStatus } : {}),
+    ...(typeof a.comment === 'string' ? { comment: a.comment } : {}),
+    ...(Number.isInteger(a.additionalGuests) ? { additionalGuests: a.additionalGuests } : {}),
+    ...(typeof a.displayName === 'string' ? { displayName: a.displayName } : {}),
+  };
+}
+
 /**
  * The new guest list for a PATCH (arrays are replaced): the owner's own entries are kept as they are, and a
- * guest who stays keeps their response, so changing the list never resets answers.
+ * guest who stays keeps their response, comment, additionalGuests and displayName, so changing the list
+ * never resets answers or notes.
  */
 function mergedAttendees(given: Attendee[], existing: GoogleEvent): { list: Array<Record<string, unknown>>; guests: number } {
   const current = Array.isArray(existing.attendees) ? existing.attendees : [];
   const own = current.filter((a) => a?.self === true && typeof a.email === 'string');
   const ownEmails = new Set(own.map((a) => a.email!.toLowerCase()));
   const byEmail = new Map(current.filter((a) => typeof a?.email === 'string').map((a) => [a.email!.toLowerCase(), a]));
-  const list: Array<Record<string, unknown>> = own.map((a) => ({ email: a.email, ...(typeof a.responseStatus === 'string' ? { responseStatus: a.responseStatus } : {}) }));
+  const list: Array<Record<string, unknown>> = own.map((a) => ({ email: a.email, ...kept(a) }));
   let guests = 0;
   for (const g of given) {
     if (ownEmails.has(g.email.toLowerCase())) continue;
-    const prev = byEmail.get(g.email.toLowerCase());
-    list.push({ email: g.email, ...(g.optional ? { optional: true } : {}), ...(typeof prev?.responseStatus === 'string' ? { responseStatus: prev.responseStatus } : {}) });
+    list.push({ email: g.email, ...(g.optional ? { optional: true } : {}), ...kept(byEmail.get(g.email.toLowerCase())) });
     guests++;
   }
   return { list, guests };
@@ -518,7 +529,7 @@ export interface PatchPlan {
   body: Record<string, unknown>;
   /** The update touches the guest list of an event that has (or gets, or loses) guests. */
   changesGuests: boolean;
-  /** Guests are involved before or after the change (sendUpdates would notify them). */
+  /** Guests are involved before or after the change: calendar_invite is needed (sendUpdates would notify them). */
   guestsInvolved: boolean;
   /** conferenceDataVersion=1 is needed (a Meet link is requested). */
   addsMeet: boolean;

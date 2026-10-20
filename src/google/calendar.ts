@@ -461,8 +461,8 @@ export class CalendarService {
   /**
    * events.patch with the caller's ETag in If-Match, for events (or whole series) the user organises.
    * Needs calendar_write and calendar_read (the existing event is checked first and the updated event is
-   * returned), plus calendar_invite when the guest list changes or guests are notified. sendUpdates
-   * defaults to all when guests are involved, otherwise none.
+   * returned), plus calendar_invite whenever the event has guests before or after the change (also with
+   * sendUpdates none). sendUpdates defaults to all when guests are involved, otherwise none.
    */
   async updateEvent(principal: Principal, raw: Record<string, unknown>): Promise<UpdateEventResult> {
     const input = parseUpdateInput(raw);
@@ -481,12 +481,17 @@ export class CalendarService {
     assertOwnEvent(existing);
     const plan = planPatch(input, existing);
     const sendUpdates: SendUpdates = plan.guestsInvolved ? (input.sendUpdates ?? 'all') : 'none';
-    const invite = plan.changesGuests || (plan.guestsInvolved && sendUpdates !== 'none');
+    // Any write to an event that has guests (before or after the change) needs calendar_invite, even with
+    // sendUpdates "none": guests see the changed time, recurrence, Meet link or their permissions anyway.
+    // calendar_write alone only covers events without guests.
+    const invite = plan.guestsInvolved;
     if (invite) {
       await this.requireInvite(
         principal,
         account.id,
-        plan.changesGuests ? 'Changing the guest list needs calendar_invite.' : 'Notifying guests needs calendar_invite (or pass sendUpdates: "none" to change the event without notifying them).',
+        plan.changesGuests
+          ? 'Changing the guest list needs calendar_invite.'
+          : 'Changing an event that has guests needs calendar_invite, also with sendUpdates "none" (calendar_write alone only covers events without guests).',
       );
     }
     const query = { sendUpdates, ...(plan.addsMeet ? { conferenceDataVersion: 1 } : {}) };
@@ -529,6 +534,9 @@ export class CalendarService {
         detail: 'The event changed since you read it (etag mismatch); nothing was deleted. Read it again and decide again.',
       };
     }
+    if (existing.status === 'cancelled') {
+      return { ...base, status: 'not_found', detail: 'Google reports the event as already deleted (status "cancelled"); nothing was deleted now.' };
+    }
     assertOwnEvent(existing);
     const guests = guestsOf(existing).length > 0;
     if (guests) await this.requireInvite(principal, account.id, 'Deleting an event with guests needs calendar_invite.');
@@ -565,6 +573,9 @@ export class CalendarService {
       return { ...base, status: 'precondition_failed', detail: 'The event changed since you read it (etag mismatch); nothing was sent. Read it again and decide again.' };
     }
     if (existing.status === 'cancelled') throw new PerchError('This event is cancelled; there is nothing to answer.', 'unsupported_event');
+    if (existing.organizer?.self === true) {
+      throw new PerchError('You organize this event, so there is no invitation to answer; change it with calendar_update_event instead. Nothing was sent.', 'unsupported_event');
+    }
     if (existing.recurringEventId !== undefined) throw new PerchError(SINGLE_OCCURRENCE_REFUSED, 'unsupported_event');
     const list = Array.isArray(existing.attendees) ? existing.attendees : [];
     const email = account.email.toLowerCase();

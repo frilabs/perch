@@ -188,7 +188,10 @@ export const slackExtraTools: ToolModule = {
         description:
           'Schedule a message as the connected user for a later time (at least 60 seconds, at most 120 days ahead), optionally as a thread ' +
           'reply. Slack posts it at postAt; until then slack_cancel_scheduled_message can withdraw it. Only use after the user confirmed ' +
-          `workspace, conversation, text and time. Requires slack_send. ${SCHEDULE_NOTE}`,
+          `workspace, conversation, text and time. Requires slack_send. ${SCHEDULE_NOTE} The requestId shares the send ledger with ` +
+          'slack_send_message: slack_send_status shows it with its scheduledMessageId (Q…), and a repeat with the same ' +
+          'requestId keeps replaying "accepted" even after the schedule was cancelled or posted (the ledger records the scheduling, not ' +
+          'its later fate); check slack_list_scheduled_messages for what is still pending.',
         inputSchema: {
           workspaceId,
           channelId,
@@ -208,7 +211,9 @@ export const slackExtraTools: ToolModule = {
       {
         description:
           'Withdraw a scheduled Slack message that has not been posted yet (ids from slack_list_scheduled_messages). Already posted ' +
-          'messages are never deleted. Only use after the user confirmed which message to cancel. Requires slack_send.',
+          'messages are never deleted. Only use after the user confirmed which message to cancel. Requires slack_send. The original ' +
+          'slack_schedule_message requestId still replays "accepted" afterwards (and slack_send_status still shows it); it is not ' +
+          'scheduled again. Use a new requestId to schedule the message anew.',
         inputSchema: { workspaceId, channelId, scheduledMessageId },
         annotations: DESTRUCTIVE,
       },

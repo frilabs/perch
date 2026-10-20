@@ -3,6 +3,7 @@
 // occurrence refusal and the narrowed allowlist. No live event is ever written.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { principalFromGrant, READONLY_PRINCIPAL, type Principal } from '../src/auth/grants.js';
+import { PerchError } from '../src/errors.js';
 import { CalendarService } from '../src/google/calendar.js';
 import { meetRequestId } from '../src/google/calendarWrite.js';
 import { createProductivityTokenProvider } from '../src/google/productivity.js';
@@ -110,7 +111,7 @@ describe('update with guests [MOCK Google]', () => {
 
   it('a change to a guest event notifies by default and then needs calendar_invite (denied before any write)', async () => {
     const r = await rejection(service.updateEvent(writer(), upd()));
-    expect(r.message).toMatch(/calendar_invite.*sendUpdates: "none"/i);
+    expect(r.message).toMatch(/event that has guests needs calendar_invite/i);
     expect(writes()).toEqual([]);
     const ok = await service.updateEvent(inviter(), upd());
     expect(ok).toMatchObject({ status: 'updated', sendUpdates: 'all' });
@@ -119,11 +120,47 @@ describe('update with guests [MOCK Google]', () => {
     expect(JSON.parse(writes()[0]!.body!)).toEqual({ summary: 'Moved', reminders: { useDefault: false, overrides: [] } });
   });
 
-  it('a silent change (sendUpdates none) of a guest event needs only calendar_write', async () => {
-    const r = await service.updateEvent(writer(), upd({ sendUpdates: 'none' }));
+  it('any change to a guest event needs calendar_invite, also silent ones (time, recurrence, Meet, guest permissions)', async () => {
+    const changes: Array<Record<string, unknown>> = [
+      { sendUpdates: 'none' },
+      { summary: undefined, guestsCanModify: true, sendUpdates: 'none' },
+      { summary: undefined, guestsCanInviteOthers: true },
+      { summary: undefined, guestsCanSeeOtherGuests: false, sendUpdates: 'none' },
+      { summary: undefined, start: { dateTime: '2026-10-07T17:00:00Z' }, end: { dateTime: '2026-10-07T18:00:00Z' }, sendUpdates: 'none' },
+      {
+        summary: undefined,
+        recurrence: ['RRULE:FREQ=WEEKLY;COUNT=3'],
+        start: { dateTime: '2026-10-07T15:00:00', timeZone: 'Europe/Vienna' },
+        end: { dateTime: '2026-10-07T16:00:00', timeZone: 'Europe/Vienna' },
+        sendUpdates: 'none',
+      },
+      { summary: undefined, addMeet: true, sendUpdates: 'none' },
+    ];
+    for (const c of changes) {
+      const r = await rejection(service.updateEvent(writer(), upd(c)));
+      expect((r as PerchError).code, JSON.stringify(c)).toBe('capability_denied');
+      expect(r.message).toMatch(/guests needs calendar_invite.*calendar_write alone only covers events without guests/i);
+    }
+    expect(writes()).toEqual([]);
+    const r = await service.updateEvent(inviter(), upd({ sendUpdates: 'none' }));
     expect(r).toMatchObject({ status: 'updated', sendUpdates: 'none' });
     expect(r.detail).toMatch(/NOT notified/);
     expect(query(writes()[0]!)).toEqual({ sendUpdates: 'none' });
+    // An event without guests stays calendar_write only, guest permissions included.
+    const ok = await service.updateEvent(writer(), { ...at, eventId: 'evt0timed002', etag: '"2"', guestsCanModify: true, start: { dateTime: '2026-10-06T11:00:00+02:00', timeZone: 'Europe/Vienna' }, end: { dateTime: '2026-10-06T12:00:00+02:00', timeZone: 'Europe/Vienna' } });
+    expect(ok).toMatchObject({ status: 'updated', sendUpdates: 'none' });
+  });
+
+  it('keeps comment, additionalGuests and displayName of guests who stay on the list', async () => {
+    (ev('evt0guests03')!.attendees as Array<Record<string, unknown>>)[1] = {
+      email: 'guest@example.test', responseStatus: 'accepted', comment: 'bringing slides', additionalGuests: 2, displayName: 'Gina Guest',
+    };
+    await service.updateEvent(inviter(), upd({ summary: undefined, attendees: ['GUEST@example.test', 'new@example.test'] }));
+    expect(JSON.parse(writes()[0]!.body!).attendees).toEqual([
+      { email: 'dummy.a@example.test', responseStatus: 'accepted' },
+      { email: 'GUEST@example.test', responseStatus: 'accepted', comment: 'bringing slides', additionalGuests: 2, displayName: 'Gina Guest' },
+      { email: 'new@example.test' },
+    ]);
   });
 
   it('changing the guest list always needs calendar_invite, even silently, and keeps existing answers', async () => {
@@ -205,6 +242,14 @@ describe('calendar_delete_event [MOCK Google]', () => {
     expect(r.detail).toMatch(/whole series/);
   });
 
+  it('reports a fetched event with status "cancelled" as not_found without writing', async () => {
+    Object.assign(ev('evt0timed002')!, { status: 'cancelled' });
+    const r = await service.deleteEvent(writer(), { ...at, eventId: 'evt0timed002' });
+    expect(r.status).toBe('not_found');
+    expect(r.detail).toMatch(/already deleted/i);
+    expect(writes()).toEqual([]);
+  });
+
   it('refuses events organised by others; reports already-deleted, indeterminate and denials honestly', async () => {
     events().push({ id: 'evt0other08', etag: '"8"', status: 'confirmed', organizer: { email: 'boss@example.test' }, start: { date: '2026-10-08' }, end: { date: '2026-10-09' } });
     expect((await rejection(service.deleteEvent(writer(), { ...at, eventId: 'evt0other08' }))).message).toMatch(/organized by someone else.*calendar_respond_event/i);
@@ -255,12 +300,20 @@ describe('calendar_respond_event [MOCK Google]', () => {
     invitation();
     expect((await rejection(service.respondEvent(writer(), { ...at, eventId: 'evt0invite07', response: 'declined' }))).message).toMatch(/calendar_invite.*not granted/i);
     expect(google.calls).toEqual([]);
-    expect((await rejection(service.respondEvent(inviter(), { ...at, eventId: 'evt0timed002', response: 'declined' }))).message).toMatch(/not on the guest list/i);
+    events().push({ id: 'evt0noself09', etag: '"9"', status: 'confirmed', organizer: { email: 'boss@example.test' }, start: { date: '2026-10-08' }, end: { date: '2026-10-09' } });
+    expect((await rejection(service.respondEvent(inviter(), { ...at, eventId: 'evt0noself09', response: 'declined' }))).message).toMatch(/not on the guest list/i);
     expect((await rejection(service.respondEvent(inviter(), { ...at, eventId: 'evt0invite07_20261022T090000Z', response: 'declined' }))).message).toMatch(/single occurrences/i);
     expect(await service.respondEvent(inviter(), { ...at, eventId: 'evt0invite07', response: 'declined', etag: '"1"' })).toMatchObject({ status: 'precondition_failed' });
     expect(writes()).toEqual([]);
     await service.respondEvent(inviter(), { ...at, eventId: 'evt0invite07', response: 'tentative', sendUpdates: 'none' });
     expect(query(writes()[0]!)).toEqual({ sendUpdates: 'none' });
+  });
+
+  it('refuses to answer an event the account organizes (use calendar_update_event)', async () => {
+    const r = await rejection(service.respondEvent(inviter(), { ...at, eventId: 'evt0guests03', response: 'declined' }));
+    expect((r as PerchError).code).toBe('unsupported_event');
+    expect(r.message).toMatch(/you organize this event.*calendar_update_event/i);
+    expect(writes()).toEqual([]);
   });
 
   it('finds the own entry by the account email when Google omits self', async () => {
@@ -314,6 +367,7 @@ describe('Calendar write allowlist [MOCK transport]', () => {
       [{ query: { sendUpdates: 'all' } }, 'calendar_write', /calendar_invite/],
       [{ query: { sendUpdates: 'externalOnly' } }, 'calendar_write', /calendar_invite/],
       [{ json: { attendees: [] } }, 'calendar_write', /attendees need calendar_invite/],
+      [{ json: { attendeesOmitted: true } }, 'calendar_write', /attendees need calendar_invite/],
       [{ query: { sendUpdates: 'everyone' } }, 'calendar_invite', /sendUpdates/],
       [{ query: { conferenceDataVersion: 2 } }, 'calendar_invite', /conferenceDataVersion/],
       [{ query: { supportsAttachments: true } }, 'calendar_invite', /supportsAttachments/],

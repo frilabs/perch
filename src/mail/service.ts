@@ -834,7 +834,8 @@ export class MailService {
       to = [...(req.to ?? [])];
       cc = [...(req.cc ?? [])];
     }
-    const bcc = [...(req.bcc ?? [])];
+    // A caller bcc that is already a visible recipient would get the message twice: drop it (case-insensitive address).
+    const bcc = mergeRecipients([], req.bcc, addressKeys([...to, ...cc]));
     const quote = kind === 'reply' ? quoteReply(original, '') : forwardBody(original, '');
     const body = kind === 'reply' ? quoteReply(original, text) : forwardBody(original, text);
     const subject = kind === 'reply' ? replySubject(original.subject) : forwardSubject(original.subject);
