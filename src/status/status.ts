@@ -321,9 +321,14 @@ export function formatStatusText(r: StatusReport): string {
       for (const a of r.accounts.filter((x) => x.groupId === g.id)) accountLine(a, `    ${FAMILY_TITLES[a.family]}: `);
     }
   }
+  // Google is one service: without any Google account one line; Drive and Calendar/Contacts only list accounts
+  // connected separately (own login, before account groups).
+  const anyGoogle = r.googleGroups.length > 0 || r.accounts.some((a) => a.family === 'drive' || a.family === 'calendar' || a.provider === 'gmail');
   for (const family of Object.keys(FAMILY_TITLES) as AccountFamily[]) {
     const all = r.accounts.filter((a) => a.family === family);
     const rows = all.filter((a) => !a.groupId);
+    if (family === 'drive' && !anyGoogle) lines.push('Google (Drive, Gmail, Calendar, Contacts): none');
+    if ((family === 'drive' || family === 'calendar') && !rows.length) continue;
     lines.push(`${FAMILY_TITLES[family]}${rows.length ? '' : all.length ? ': only in Google account groups' : ': none'}`);
     for (const a of rows) accountLine(a, '  ');
   }

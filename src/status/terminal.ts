@@ -1,4 +1,4 @@
-import { groupMembers, groupServices } from '../google/groupStore.js';
+import { accessCommand, groupAccess } from '../google/access.js';
 import { DRIVE_SCOPE } from '../google/oauth.js';
 import { CALENDAR_EVENTS_OWNED_SCOPE, CALENDAR_READONLY_SCOPE, CONTACTS_READONLY_SCOPE } from '../google/productivity.js';
 import { GMAIL_COMPOSE_SCOPE, GMAIL_MODIFY_SCOPE, GMAIL_SEND_SCOPE } from '../mail/gmailAccounts.js';
@@ -79,8 +79,7 @@ interface GoogleState {
   flags: GFlag[];
 }
 
-function gmailFlags(a: GmailAccount | undefined): GFlag[] {
-  if (!a) return [];
+function gmailFlags(a: GmailAccount): GFlag[] {
   return [
     ...(a.scopes.includes(GMAIL_COMPOSE_SCOPE) ? (['--allow-drafts'] as const) : []),
     ...(a.scopes.includes(GMAIL_SEND_SCOPE) || a.scopes.includes(GMAIL_COMPOSE_SCOPE) ? (['--allow-send'] as const) : []),
@@ -88,30 +87,24 @@ function gmailFlags(a: GmailAccount | undefined): GFlag[] {
   ];
 }
 
-/** Services and write opt-ins a Google account group has now (what a re-add must keep). */
-function groupState(d: StoreData, groupId: string): GoogleState {
-  const m = groupMembers(d, groupId);
-  return {
-    services: groupServices(d, groupId),
-    flags: [
-      ...(m.drive?.scopes.includes(DRIVE_SCOPE) ? (['--allow-write'] as const) : []),
-      ...gmailFlags(m.gmail),
-      ...(m.productivity?.allowCalendarWrite && m.productivity.scopes.includes(CALENDAR_EVENTS_OWNED_SCOPE) ? (['--allow-calendar-write'] as const) : []),
-    ],
-  };
-}
-
 /**
- * The `perch google add` that adds `want` to `now`. For a group member it updates the group in place (same ids);
- * for an account connected separately it first removes that account (`remove`).
+ * The command that adds `want` to `now` for a Google account connected separately (own login, no group): remove it,
+ * then connect it again through `perch google add`. Group members never get this: they change through
+ * `perch google access` (same ids, see googleMemberEnable).
  */
-function googleEnable(d: StoreData, a: { label: string; email: string; groupId?: string }, remove: string, now: GoogleState, want: { services?: GService[]; flags?: GFlag[] }): string {
-  const group = a.groupId ? d.googleGroups.find((g) => g.id === a.groupId) : undefined;
+function googleEnable(a: { label: string; email: string }, remove: string, now: GoogleState, want: { services?: GService[]; flags?: GFlag[] }): string {
   const services = G_SERVICES.filter((s) => now.services.includes(s) || want.services?.includes(s));
   const flags = G_FLAGS.filter((f) => now.flags.includes(f) || want.flags?.includes(f));
-  const add = ['perch google add', `--label ${shellQuote(group?.label ?? a.label)}`, `--services ${services.join(',')}`, ...flags, `--login-hint ${shellQuote(group?.email ?? a.email)}`].join(' ');
-  return group ? add : reconnect(remove, [add]);
+  return reconnect(remove, [['perch google add', `--label ${shellQuote(a.label)}`, `--services ${services.join(',')}`, ...flags, `--login-hint ${shellQuote(a.email)}`].join(' ')]);
 }
+
+/** A group member's missing capability: `perch google access` for the group (write, or add the service). */
+function googleMemberEnable(groupId: string, service: GService, connected: boolean): string {
+  return accessCommand(groupId, service, connected ? 'write' : 'add');
+}
+
+/** Capability-map key of one service of a Google account group (rights of that service). */
+export const groupServiceKey = (groupId: string, service: string) => `${groupId}/${service}`;
 
 /**
  * Enabled and possible capabilities per connected account, derived from the opt-ins and granted scopes in
@@ -120,25 +113,35 @@ function googleEnable(d: StoreData, a: { label: string; email: string; groupId?:
 export function accountCapabilities(d: StoreData): CapabilityMap {
   const out: CapabilityMap = {};
   const loginHint = (email: string) => `--login-hint ${shellQuote(email)}`;
+  // Groups: rights per service (key ggroup-…/SERVICE); a missing right names the `perch google access` command.
   for (const g of d.googleGroups) {
-    const now = groupState(d, g.id);
-    const svc = (name: string, s: GService, detail: string) => ({ name, enabled: now.services.includes(s), detail, enable: googleEnable(d, { ...g, groupId: g.id }, '', now, { services: [s] }) });
-    out[g.id] = [svc('Drive', 'drive', 'search, read, export files'), svc('Gmail', 'gmail', 'read, search mail'), svc('Calendar', 'calendar', 'read calendars and events'), svc('Contacts', 'contacts', 'read contacts')];
+    for (const a of groupAccess(d, g.id)) {
+      out[groupServiceKey(g.id, a.service)] = a.rights.map((r) => ({
+        name: r.name,
+        enabled: r.enabled,
+        detail: r.detail,
+        ...(!r.enabled && a.write !== 'n/a' && r.name !== 'read' ? { enable: accessCommand(g.id, a.service, 'write') } : {}),
+      }));
+    }
   }
   for (const a of d.google) {
     const write = a.scopes.includes(DRIVE_SCOPE);
-    const now = a.groupId ? groupState(d, a.groupId) : { services: ['drive' as const], flags: write ? (['--allow-write'] as GFlag[]) : [] };
     out[a.id] = [
       { name: 'read', enabled: true },
-      { name: 'write', enabled: write, detail: 'create, edit, share, trash', enable: googleEnable(d, a, `perch google remove ${a.id}`, now, { flags: ['--allow-write'] }) },
+      {
+        name: 'write',
+        enabled: write,
+        detail: 'create, edit, share, trash',
+        enable: a.groupId ? googleMemberEnable(a.groupId, 'drive', true) : googleEnable(a, `perch google remove ${a.id}`, { services: ['drive'], flags: write ? ['--allow-write'] : [] }, { flags: ['--allow-write'] }),
+      },
     ];
   }
   for (const w of d.notion) out[w.id] = [{ name: 'read', enabled: true }];
   for (const a of d.gmail) {
     const has = { drafts: a.scopes.includes(GMAIL_COMPOSE_SCOPE), send: a.scopes.includes(GMAIL_SEND_SCOPE) || a.scopes.includes(GMAIL_COMPOSE_SCOPE), organize: a.scopes.includes(GMAIL_MODIFY_SCOPE) };
-    const now = a.groupId ? groupState(d, a.groupId) : { services: ['gmail' as const], flags: gmailFlags(a) };
     const FLAG = { drafts: '--allow-drafts', send: '--allow-send', organize: '--allow-modify' } as const;
-    const cmd = (extra: keyof typeof has) => googleEnable(d, a, `perch gmail remove ${a.id}`, now, { flags: [FLAG[extra]] });
+    const cmd = (extra: keyof typeof has) =>
+      a.groupId ? googleMemberEnable(a.groupId, 'gmail', true) : googleEnable(a, `perch gmail remove ${a.id}`, { services: ['gmail'], flags: gmailFlags(a) }, { flags: [FLAG[extra]] });
     out[a.id] = [{ name: 'read', enabled: true }, ...(['drafts', 'send', 'organize'] as const).map((k) => ({ name: k, enabled: has[k], detail: MAIL_DETAILS[k], enable: cmd(k) }))];
   }
   for (const a of d.microsoft) {
@@ -169,20 +172,20 @@ export function accountCapabilities(d: StoreData): CapabilityMap {
     const calendar = a.services.includes('calendar') && a.scopes.includes(CALENDAR_READONLY_SCOPE);
     const contacts = a.services.includes('contacts') && a.scopes.includes(CONTACTS_READONLY_SCOPE);
     const write = calendar && a.allowCalendarWrite && a.scopes.includes(CALENDAR_EVENTS_OWNED_SCOPE);
-    const state = a.groupId
-      ? groupState(d, a.groupId)
-      : { services: [...(calendar ? (['calendar'] as const) : []), ...(contacts ? (['contacts'] as const) : [])], flags: write ? (['--allow-calendar-write'] as GFlag[]) : [] };
-    const cmd = (want: { calendar: boolean; contacts: boolean; write: boolean }) =>
-      googleEnable(d, a, `perch google-productivity remove ${a.id}`, state, {
-        services: [...(want.calendar ? (['calendar'] as const) : []), ...(want.contacts ? (['contacts'] as const) : [])],
-        flags: want.write ? ['--allow-calendar-write'] : [],
-      });
+    const state: GoogleState = { services: [...(calendar ? (['calendar'] as const) : []), ...(contacts ? (['contacts'] as const) : [])], flags: write ? ['--allow-calendar-write'] : [] };
+    const cmd = (want: { calendar: boolean; contacts: boolean; write: boolean }, service: 'calendar' | 'contacts') =>
+      a.groupId
+        ? googleMemberEnable(a.groupId, service, service === 'calendar' && a.services.includes('calendar'))
+        : googleEnable(a, `perch google-productivity remove ${a.id}`, state, {
+            services: [...(want.calendar ? (['calendar'] as const) : []), ...(want.contacts ? (['contacts'] as const) : [])],
+            flags: want.write ? ['--allow-calendar-write'] : [],
+          });
     const now = { calendar, contacts, write };
     out[a.id] = [
-      { name: 'calendar', enabled: calendar, detail: 'read calendars and events', enable: cmd({ ...now, calendar: true }) },
-      { name: 'contacts', enabled: contacts, detail: 'read contacts', enable: cmd({ ...now, contacts: true }) },
-      { name: 'calendar write', enabled: write, detail: 'create, move, delete own events', enable: cmd({ ...now, calendar: true, write: true }) },
-      { name: 'invitations', enabled: write, detail: 'guests, invitations, responses (client grant calendar_invite)', enable: cmd({ ...now, calendar: true, write: true }) },
+      { name: 'calendar', enabled: calendar, detail: 'read calendars and events', enable: cmd({ ...now, calendar: true }, 'calendar') },
+      { name: 'contacts', enabled: contacts, detail: 'read contacts', enable: cmd({ ...now, contacts: true }, 'contacts') },
+      { name: 'calendar write', enabled: write, detail: 'create, move, delete own events', enable: cmd({ ...now, calendar: true, write: true }, 'calendar') },
+      { name: 'invitations', enabled: write, detail: 'guests, invitations, responses (client grant calendar_invite)', enable: cmd({ ...now, calendar: true, write: true }, 'calendar') },
     ];
   }
   for (const w of d.slack) {
@@ -249,11 +252,15 @@ const ON = '☑';
 const OFF = '☐';
 const FAIL = '✗';
 
-const SERVICES: Array<{ key: string; title: string; name?: string; match: (a: AccountStatus) => boolean; does: string; add: (r: StatusReport) => string }> = [
-  { key: 'drive', title: 'Google Drive', match: (a) => a.family === 'drive', does: 'search, read, export files; opt-in: write', add: () => 'perch google add --label NAME --services drive [--allow-write]' },
+/**
+ * Services for the per-service sections (accounts with their own login) and the "Not connected" list. Google
+ * (`google: true`) is ONE service there: unconnected it is a single line (GOOGLE_UNCONNECTED); the Drive, Gmail
+ * and Calendar/Contacts sections only show accounts connected separately (before account groups).
+ */
+const SERVICES: Array<{ key: string; title: string; name?: string; google?: boolean; match: (a: AccountStatus) => boolean; does: string; add: (r: StatusReport) => string }> = [
+  { key: 'drive', title: 'Google Drive', google: true, match: (a) => a.family === 'drive', does: '', add: () => '' },
   { key: 'notion', title: 'Notion', match: (a) => a.family === 'notion', does: 'search and read pages and databases of a workspace', add: () => 'perch notion add --label NAME' },
-  { key: 'gmail', title: 'Mail · Gmail',
-    name: 'Gmail', match: (a) => a.provider === 'gmail', does: 'read, search; opt-in: drafts, send, organize', add: () => 'perch google add --label NAME --services gmail [--allow-drafts] [--allow-send] [--allow-modify]' },
+  { key: 'gmail', title: 'Mail · Gmail', google: true, match: (a) => a.provider === 'gmail', does: '', add: () => '' },
   { key: 'microsoft', title: 'Mail · Outlook / Microsoft 365',
     name: 'Outlook / Microsoft 365', match: (a) => a.provider === 'microsoft', does: 'read, search; opt-in: drafts, send, organize', add: () => 'perch microsoft add --label NAME [--allow-drafts] [--allow-send] [--allow-modify]' },
   {
@@ -264,7 +271,7 @@ const SERVICES: Array<{ key: string; title: string; name?: string; match: (a: Ac
     does: 'IMAP/SMTP, e.g. GMX; opt-in: drafts, send, organize',
     add: () => 'perch imap add --label NAME --email ADDRESS [--preset gmx] [--allow-drafts] [--allow-send] [--allow-modify]',
   },
-  { key: 'calendar', title: 'Google Calendar/Contacts', match: (a) => a.family === 'calendar', does: 'calendars + contacts; opt-in: events, invitations', add: () => 'perch google add --label NAME --services calendar,contacts [--allow-calendar-write]' },
+  { key: 'calendar', title: 'Google Calendar/Contacts', google: true, match: (a) => a.family === 'calendar', does: '', add: () => '' },
   { key: 'slack', title: 'Slack', match: (a) => a.family === 'slack', does: 'read, search and post (internal app, user token)', add: () => 'perch slack manifest, then perch slack add --label NAME' },
   {
     key: 'whatsapp',
@@ -275,6 +282,12 @@ const SERVICES: Array<{ key: string; title: string; name?: string; match: (a: Ac
   },
   { key: 'luma', title: 'Luma', match: (a) => a.family === 'luma', does: 'events and guests through the official Luma MCP', add: () => 'perch luma add --label NAME' },
 ];
+
+/** Google without any connected account: one line, one command (read/write per service later: perch google access). */
+const GOOGLE_UNCONNECTED = { title: 'Google (Drive, Gmail, Calendar, Contacts)', does: 'one login; read, opt-in: write', add: 'perch google add --label NAME' };
+const G_TITLES: Record<GService, string> = { drive: 'Drive', gmail: 'Gmail', calendar: 'Calendar', contacts: 'Contacts' };
+const G_DOES: Record<GService, string> = { drive: 'search, read, export files', gmail: 'read, search mail', calendar: 'read calendars and events', contacts: 'read contacts' };
+const G_FAMILY: Record<GService, AccountStatus['family']> = { drive: 'drive', gmail: 'mail', calendar: 'calendar', contacts: 'calendar' };
 
 const WRITE_FREE = (cap: string) => cap === 'read' || cap.endsWith('_read');
 const minute = (iso: string) => `${iso.replace('T', ' ').slice(0, 16)} UTC`;
@@ -350,30 +363,52 @@ export function formatStatusTerminal(r: StatusReport, capabilities: CapabilityMa
       if (c.enable) command(4, c.enable);
     }
   };
-  const SERVICE_TITLE: Record<string, string> = { drive: 'Drive', gmail: 'Gmail', calendar: 'Calendar/Contacts' };
+  /** Rights of one service as one line of ☑/☐ chips (wrapped). */
+  const rightsLine = (caps: AccountCapability[], indent: number) => {
+    const chips = caps.map((c) => `${c.enabled ? ON : OFF} ${clean(c.name)}`);
+    let line = '';
+    const flush = () => {
+      if (line) out.push(`${' '.repeat(indent)}${line.split(ON).join(p.ok(ON))}`);
+      line = '';
+    };
+    for (const chip of chips) {
+      if (line && width(line) + 3 + width(chip) > W - indent) flush();
+      line = line ? `${line}   ${chip}` : chip;
+    }
+    flush();
+  };
+  const checkText = (a: AccountStatus) => (!a.check ? 'not checked' : a.check.state === 'ok' ? `ok · ${a.check.ms} ms` : a.check.state === 'skipped' ? 'skipped' : 'FAILED');
 
-  // ---- Google account groups: one login, the services below it
+  // ---- Google: one block per Google account (group), the services with their rights below it
   for (const g of r.googleGroups) {
     section(`Google · ${g.label}`);
     const members = r.accounts.filter((a) => a.groupId === g.id);
     const failed = members.filter((a) => a.check?.state === 'error').length;
     row(0, failed ? FAIL : ON, failed ? p.fail : p.ok, `${g.label}  ${g.email}`, `one login · ${g.services.length} service${g.services.length === 1 ? '' : 's'}`);
     text(2, `${g.id} · since ${g.connectedAt.slice(0, 10)}`);
-    const caps = capabilities[g.id] ?? [];
-    chipLine(caps);
-    offLines(caps.filter((c) => !c.enabled));
-    for (const a of members) {
-      const name = a.family === 'drive' ? 'drive' : a.family === 'mail' ? 'gmail' : 'calendar';
-      renderAccount(a, `${SERVICE_TITLE[name]}${a.identity ? `  ${a.identity}` : ''}`);
+    for (const s of G_SERVICES) {
+      if (!g.services.includes(s as never)) {
+        row(2, OFF, (x) => x, `${G_TITLES[s].padEnd(9)}  not connected (${G_DOES[s]})`);
+        command(6, accessCommand(g.id, s, 'add'));
+        continue;
+      }
+      const a = members.find((m) => m.family === G_FAMILY[s]);
+      const bad = a?.check?.state === 'error';
+      row(2, bad ? FAIL : ON, bad ? p.fail : p.ok, `${G_TITLES[s].padEnd(9)}${a ? `  ${a.id}` : ''}`, a ? checkText(a) : '', bad ? p.fail : a?.check ? p.ok : (x) => x);
+      if (bad && a?.check?.message) prose(4, a.check.message, p.fail);
+      const caps = capabilities[groupServiceKey(g.id, s)] ?? [];
+      rightsLine(caps, 4);
+      const fix = caps.find((c) => !c.enabled && c.enable)?.enable;
+      if (fix) command(6, fix);
     }
   }
 
-  // ---- connected services (accounts with their own login)
+  // ---- connected services (accounts with their own login; Google ones only when connected separately)
   const missing: typeof SERVICES = [];
   for (const svc of SERVICES) {
     const all = r.accounts.filter(svc.match);
     if (!all.length) {
-      missing.push(svc);
+      if (!svc.google) missing.push(svc);
       continue;
     }
     const rows = all.filter((a) => !a.groupId);
@@ -381,10 +416,15 @@ export function formatStatusTerminal(r: StatusReport, capabilities: CapabilityMa
     section(svc.title);
     for (const a of rows) renderAccount(a, `${a.label}${a.identity ? `  ${a.identity}` : ''}`);
   }
+  const anyGoogle = r.googleGroups.length > 0 || r.accounts.some((a) => SERVICES.some((svc) => svc.google && svc.match(a)));
 
-  if (missing.length) {
+  if (missing.length || !anyGoogle) {
     section('Not connected');
-    const nameW = Math.min(Math.max(...missing.map((s) => width(s.name ?? s.title))), 26);
+    if (!anyGoogle) {
+      row(0, OFF, (s) => s, `${GOOGLE_UNCONNECTED.title}  ${GOOGLE_UNCONNECTED.does}`);
+      command(4, GOOGLE_UNCONNECTED.add);
+    }
+    const nameW = Math.min(Math.max(0, ...missing.map((s) => width(s.name ?? s.title))), 26);
     for (const svc of missing) {
       const name = fit(svc.name ?? svc.title, nameW).padEnd(nameW);
       row(0, OFF, (s) => s, `${name}  ${svc.does}`);

@@ -17,8 +17,19 @@ import {
   runGoogleGroupAuthorization,
   type GoogleGroupRequest,
   type GoogleService,
+  type GroupRegistration,
 } from '../google/group.js';
 import { findGroup, grantStillValidHint, groupMembers, type SharedGrantHolder } from '../google/groupStore.js';
+import {
+  accessCommand,
+  accessRequest,
+  assertWritable,
+  groupAccess,
+  notConnected,
+  resolveAccessGroup,
+  revokeServiceWrite,
+  WRITABLE_SERVICES,
+} from '../google/access.js';
 import { DEFAULT_AUTH_TIMEOUT_MS, DRIVE_SCOPE, MAX_AUTH_TIMEOUT_MS, runLoopbackAuthorization } from '../google/oauth.js';
 import { CALENDAR_EVENTS_OWNED_SCOPE } from '../google/productivity.js';
 import {
@@ -53,7 +64,7 @@ import { addNotionWorkspace, removeNotionWorkspace } from '../notion/notion.js';
 import { SLACK_APP_MANIFEST } from '../slack/manifest.js';
 import { addSlackWorkspace, removeSlackWorkspace } from '../slack/slack.js';
 import { ensurePrivateDir, pathExists, readPrivateFile, writePrivateFileAtomic, writePrivateFileExclusive } from '../secureFs.js';
-import { CredentialStore, initStore, type ImapAccount, type StoreData } from '../store/credentialStore.js';
+import { CredentialStore, initStore, type GoogleAccountGroup, type ImapAccount, type StoreData } from '../store/credentialStore.js';
 import { createFetchTransport, Upstream, type UpstreamTransport } from '../upstream.js';
 import { collectStatus, failedChecks, formatStatusText } from '../status/status.js';
 import { accountCapabilities, formatStatusTerminal } from '../status/terminal.js';
@@ -65,7 +76,6 @@ import { cmdGoogleClient, googleRequestFromFlags, loadGoogleClient } from './goo
 import { loginPrompts } from './loginPrompt.js';
 import type { FetchLike } from '../luma/client.js';
 import { PERCH_VERSION } from '../version.js';
-import { shellQuote } from '../status/terminal.js';
 import { chooseAccess, chooseGoogleServices, claudeAddCommand, runSetup, WRITE_FLAGS, yes } from './onboarding.js';
 import { defaultInstallDeps, installGowa, rotateGowaPassword, type InstallDeps } from '../whatsapp/install.js';
 import { DEFAULT_PAIR_TIMEOUT_MS, pairWhatsappAccount, probeWhatsappInstance, removeWhatsappAccount, setWhatsappInstance, whatsappDeviceStatus } from '../whatsapp/whatsapp.js';
@@ -121,12 +131,21 @@ Usage:
                                                that enable missing ones (exit code 1 if a check failed); --plain: the
                                                previous one-line-per-account text; the same page: GET /status on serve --http
   perch google add --label NAME [--services drive,gmail,calendar,contacts] [--write | --read-only]
-                   [--allow-write] [--allow-drafts] [--allow-send] [--allow-modify] [--allow-calendar-write]
                    [--yes] [--port N] [--timeout SECONDS] [--login-hint EMAIL]
-                                               ONE Google login for Drive, Gmail, Calendar and Contacts (asks for
-                                               the services, default all; then read only or read + write). Re-adding
+                                               ONE Google login for Drive, Gmail, Calendar and Contacts (asks once
+                                               for the services, default all, and once for read only or read + write
+                                               for all of them). Read/write per service: perch google access. Re-adding
                                                the same Google account updates its group (same ids; asks, without a
-                                               terminal only with --yes)
+                                               terminal only with --yes). Fine-grained, rarely needed: --allow-write
+                                               --allow-drafts --allow-send --allow-modify --allow-calendar-write
+  perch google access ggroup-ID [--service drive|gmail|calendar|contacts --write | --read-only]
+                     [--add SERVICE [--write | --read-only]] [--yes] [--port N] [--timeout SECONDS]
+                                               show the read/write access per service of a Google account (group or
+                                               member id) and change it; without flags on a terminal: asks what to
+                                               change. Write and --add start a Google login for the same account (same
+                                               ids); --read-only is local, no login. Write: Drive edit/share/trash,
+                                               Gmail drafts + send + organize, Calendar own events + invitations;
+                                               Contacts are read-only
   perch google client setup | show            guided Google Cloud preparation: project, APIs, consent screen and the
                                                "Desktop app" OAuth client (JSON pasted hidden, stored 0600); show: path
                                                and shortened client id. Every Google add starts it when the client is missing
@@ -422,11 +441,6 @@ function describeGoogleRequest(r: GoogleGroupRequest): string {
     .join(', ');
 }
 
-/** `perch google add` for the services in `services` with the write flags of `flags`, for a hint. */
-function googleAddCommand(label: string, email: string, services: readonly GoogleService[], flags: readonly string[] = []): string {
-  return ['perch google add', `--label ${shellQuote(label)}`, `--services ${services.join(',')}`, ...flags, `--login-hint ${shellQuote(email)}`].join(' ');
-}
-
 async function cmdGoogle(config: PerchConfig, io: CliIo, sub: string | undefined, rest: string[], values: Record<string, unknown>) {
   if (sub === 'client') return cmdGoogleClient(config, io, rest[0], values);
   const upstream = new Upstream(io.transport ?? createFetchTransport());
@@ -474,30 +488,17 @@ async function cmdGoogle(config: PerchConfig, io: CliIo, sub: string | undefined
     if (!values.revoke) io.stdout(grantStillValidHint(r.group.id));
     return;
   }
-  if (sub !== 'add') throw new UsageError('Usage: perch google add|list|remove');
+  if (sub === 'access') return cmdGoogleAccess(config, io, store, upstream, rest[0], values);
+  if (sub !== 'add') throw new UsageError('Usage: perch google add|access|list|remove|client');
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
-  const { port, timeoutMs } = oauthTiming(values);
+  oauthTiming(values);
   const services = await chooseGoogleServices(values, io.readLine, io.stderr);
   if (await chooseAccess('google', values, io.readLine, io.stderr)) {
     io.stdout('Requesting read and write permissions from Google. Clients still need a grant to write: perch client add --label NAME --full\n');
   }
   const request: GoogleGroupRequest = googleRequestFromFlags(services, values);
-  // After the choice: a missing client starts the guide, which lists exactly these APIs and scopes.
-  const client = await loadGoogleClient(config, io, { services, scopes: googleGroupScopes(request) });
-  const what = describeGoogleRequest(request);
-  const grant = await runGoogleGroupAuthorization({
-    client,
-    upstream,
-    request,
-    port,
-    timeoutMs,
-    ...(typeof values['login-hint'] === 'string' ? { loginHint: values['login-hint'] } : {}),
-    ...loginPrompts(io, `approve Google access for ${what} (one login) for the account you want to add`, timeoutMs),
-  });
-  const reg = await registerGoogleGroup(store, upstream, {
+  const reg = await googleGroupLogin(config, io, store, upstream, values, {
     label: values.label,
-    client,
-    grant,
     request,
     confirmUpdate: async (g, current) => {
       if (values.yes === true) return true;
@@ -522,26 +523,240 @@ async function cmdGoogle(config: PerchConfig, io: CliIo, sub: string | undefined
     `${reg.updated ? 'Updated' : 'Connected'} Google account group ${g.id} (${g.email}) as "${g.label}", one login for:\n` +
       `${groupServiceLines(data, g.id, '  ').join('\n') || '  (no service)'}\n`,
   );
-  const hint = (svcs: readonly GoogleService[], flags: string[] = []) => googleAddCommand(g.label, g.email, svcs, flags);
-  if (reg.outcome.denied.length) {
-    const names = reg.outcome.denied.map((s) => GOOGLE_SERVICE_TITLES[s]).join(', ');
-    io.stdout(`Not granted by Google (checkbox not ticked on the consent screen): ${names}. Not connected. To add later: ${hint(reg.outcome.denied)}\n`);
-  }
-  for (const m of reg.outcome.missingWrites) {
-    io.stdout(`Not granted by Google: ${m.what}; ${GOOGLE_SERVICE_TITLES[m.service]} is connected read-only. To add it: ${hint([m.service], [m.flag])}\n`);
-  }
-  for (const x of reg.separate) {
-    io.stdout(
-      `${GOOGLE_SERVICE_TITLES[x.service]} of ${g.email} is already connected separately as ${x.id} and was left unchanged. ` +
-        `To move it into this group: remove ${x.id}, then ${hint([x.service])}\n`,
-    );
-  }
+  reportGrantOutcome(io, reg);
   io.stdout(
-    `All services of ${g.id} share this login: removing it with --revoke disconnects all of them; perch google remove ${g.id} --service SERVICE removes one.\n`,
+    `All services of ${g.id} share this login: removing it with --revoke disconnects all of them; perch google remove ${g.id} --service SERVICE removes one.\n` +
+      `Change the read/write access of single services: perch google access ${g.id}\n`,
   );
   if (request.driveWrite || request.calendarWrite || request.gmail.drafts || request.gmail.send || request.gmail.modify) {
     io.stdout('Writes still need a client grant: perch client add --label NAME --full (or --allow … --account ID for single accounts)\n');
   }
+}
+
+/**
+ * The shared login path of `perch google add` and `perch google access`: Google OAuth client (guided setup when
+ * missing), one loopback flow with paste-URL fallback, then the group is created or updated in place (matched on
+ * `sub`; `expectGroupId` refuses any other Google account).
+ */
+async function googleGroupLogin(
+  config: PerchConfig,
+  io: CliIo,
+  store: CredentialStore,
+  upstream: Upstream,
+  values: Record<string, unknown>,
+  opts: {
+    label: string;
+    request: GoogleGroupRequest;
+    loginHint?: string;
+    expectGroupId?: string;
+    confirmUpdate?: (group: GoogleAccountGroup, services: GoogleService[]) => Promise<boolean>;
+  },
+): Promise<GroupRegistration> {
+  const { port, timeoutMs } = oauthTiming(values);
+  // After the choice: a missing client starts the guide, which lists exactly these APIs and scopes.
+  const client = await loadGoogleClient(config, io, { services: opts.request.services, scopes: googleGroupScopes(opts.request) });
+  const what = describeGoogleRequest(opts.request);
+  const loginHint = typeof values['login-hint'] === 'string' ? values['login-hint'] : opts.loginHint;
+  const grant = await runGoogleGroupAuthorization({
+    client,
+    upstream,
+    request: opts.request,
+    port,
+    timeoutMs,
+    ...(loginHint ? { loginHint } : {}),
+    ...loginPrompts(
+      io,
+      `approve Google access for ${what} (one login) ${opts.expectGroupId ? `with the Google account of ${opts.expectGroupId}${opts.loginHint ? ` (${opts.loginHint})` : ''}` : 'for the account you want to add'}`,
+      timeoutMs,
+    ),
+  });
+  return registerGoogleGroup(store, upstream, {
+    label: opts.label,
+    client,
+    grant,
+    request: opts.request,
+    ...(opts.confirmUpdate ? { confirmUpdate: opts.confirmUpdate } : {}),
+    ...(opts.expectGroupId ? { expectGroupId: opts.expectGroupId } : {}),
+  });
+}
+
+/** What Google did not grant of a login (granular consent), with the `perch google access` command that fixes it. */
+function reportGrantOutcome(io: CliIo, reg: GroupRegistration): void {
+  const gid = reg.group.id;
+  if (reg.outcome.denied.length) {
+    const names = reg.outcome.denied.map((s) => GOOGLE_SERVICE_TITLES[s]).join(', ');
+    io.stdout(
+      `Not granted by Google (checkbox not ticked on the consent screen): ${names}. Not connected. ` +
+        `To add later: ${reg.outcome.denied.map((s) => accessCommand(gid, s, 'add')).join(' ; ')}\n`,
+    );
+  }
+  for (const m of reg.outcome.missingWrites) {
+    io.stdout(`Not granted by Google: ${m.what}; ${GOOGLE_SERVICE_TITLES[m.service]} is connected read-only. To add it: ${accessCommand(gid, m.service, 'write')}\n`);
+  }
+  for (const x of reg.separate) {
+    io.stdout(
+      `${GOOGLE_SERVICE_TITLES[x.service]} of ${reg.group.email} is already connected separately as ${x.id} and was left unchanged. ` +
+        `To move it into this group: remove ${x.id}, then ${accessCommand(gid, x.service, 'add')}\n`,
+    );
+  }
+}
+
+/** Per-service rights of a group, one line per service (☑/☐ per right). Never prints a secret. */
+function formatGroupAccess(data: StoreData, group: GoogleAccountGroup): string {
+  const lines = [`Google account group ${group.id} "${group.label}" (${group.email}), one login:`];
+  const access = groupAccess(data, group.id);
+  const idW = Math.max(13, ...access.map((a) => a.memberId?.length ?? 0));
+  for (const a of access) {
+    const title = GOOGLE_SERVICE_TITLES[a.service].padEnd(9);
+    if (!a.memberId) {
+      lines.push(`  ☐ ${title} ${'not connected'.padEnd(idW)}  add: ${accessCommand(group.id, a.service, 'add')}`);
+      continue;
+    }
+    const rights = a.rights.map((r) => `${r.enabled ? '☑' : '☐'} ${r.name}`).join('   ');
+    lines.push(`  ☑ ${title} ${a.memberId.padEnd(idW)}  ${rights}${a.write === 'n/a' ? '   (read-only service)' : ''}`);
+  }
+  lines.push(
+    `Change: perch google access ${group.id} --service drive|gmail|calendar --write | --read-only`,
+    `Add a service: perch google access ${group.id} --add SERVICE [--write | --read-only]`,
+  );
+  return `${lines.join('\n')}\n`;
+}
+
+/** One service flag (--service / --add): exactly one of drive, gmail, calendar, contacts. */
+function oneService(values: Record<string, unknown>, flag: 'service' | 'add'): GoogleService | undefined {
+  const v = values[flag];
+  if (v === undefined) return undefined;
+  if (typeof v !== 'string' || v.includes(',')) throw new UsageError(`--${flag} takes one of drive, gmail, calendar, contacts`);
+  return parseGoogleServices([v])[0]!;
+}
+
+/**
+ * `perch google access ID` (docs/GOOGLE_UNIFIED_SPEC.md, Nachtrag 2026-10-21): shows and changes the read/write
+ * access of the services of a Google account group. Granting (write, a new service) needs a Google login for the
+ * same group; revoking is local and needs none.
+ */
+async function cmdGoogleAccess(config: PerchConfig, io: CliIo, store: CredentialStore, upstream: Upstream, id: string | undefined, values: Record<string, unknown>) {
+  if (!id) {
+    throw new UsageError('Usage: perch google access ggroup-ID [--service drive|gmail|calendar|contacts --write|--read-only] [--add SERVICE [--write|--read-only]] [--yes]');
+  }
+  const service = oneService(values, 'service');
+  const add = oneService(values, 'add');
+  if (service && add) throw new UsageError('Use either --service SERVICE (change its access) or --add SERVICE (connect it), not both');
+  if (values.write === true && values['read-only'] === true) throw new UsageError('Choose either --write or --read-only');
+  oauthTiming(values);
+  const data = await store.read();
+  const group = resolveAccessGroup(data, id);
+  const gid = group.id;
+  const mode = values.write === true ? 'write' : values['read-only'] === true ? 'read-only' : undefined;
+
+  /** Grants write or adds a service: one login for the same group with every scope the group needs then. */
+  const login = async (s: GoogleService, write: boolean) => {
+    const current = await store.read();
+    const request = accessRequest(current, gid, s, write);
+    const g = current.googleGroups.find((x) => x.id === gid)!;
+    const reg = await googleGroupLogin(config, io, store, upstream, values, { label: g.label, request, loginHint: g.email, expectGroupId: gid });
+    io.stdout(`Updated Google account group ${gid} (${g.email}).\n${formatGroupAccess(await store.read(), reg.group)}`);
+    reportGrantOutcome(io, reg);
+    if (write) io.stdout('Writes still need a client grant: perch client add --label NAME --full (or --allow … --account ID for single accounts)\n');
+  };
+
+  const change = async (s: GoogleService, to: 'write' | 'read-only') => {
+    const now = groupAccess(await store.read(), gid).find((a) => a.service === s)!;
+    if (to === 'write') assertWritable(s);
+    if (!now.memberId) throw notConnected(gid, s);
+    if (to === 'read-only') {
+      if (now.write === 'n/a' || !(await revokeServiceWrite(store, gid, s))) {
+        io.stdout(`${GOOGLE_SERVICE_TITLES[s]} of ${gid} is already read-only; nothing changed.\n`);
+        return;
+      }
+      io.stdout(
+        `${GOOGLE_SERVICE_TITLES[s]} of ${gid} is now read-only in Perch (no login needed); its write tools are refused from now on. ` +
+          'The permission itself stays granted at Google until the next login for this account.\n' +
+          formatGroupAccess(await store.read(), group),
+      );
+      return;
+    }
+    if (now.write === 'full') {
+      io.stdout(`${GOOGLE_SERVICE_TITLES[s]} of ${gid} already has write access; nothing changed.\n`);
+      return;
+    }
+    await login(s, true);
+  };
+
+  const addService = async (s: GoogleService, write: boolean | undefined) => {
+    const now = groupAccess(await store.read(), gid).find((a) => a.service === s)!;
+    if (now.memberId) {
+      io.stdout(
+        `${GOOGLE_SERVICE_TITLES[s]} is already connected in ${gid} (${now.memberId}). ` +
+          `${s === 'contacts' ? 'Contacts are read-only.' : `Change its access: ${accessCommand(gid, s, 'write')} (or --read-only)`}\n`,
+      );
+      return;
+    }
+    if (write) assertWritable(s);
+    await login(s, write ?? false);
+  };
+
+  /** read/write for a service that is being added; asked on a terminal, read-only without one. */
+  const askWrite = async (s: GoogleService): Promise<boolean> => {
+    if (!WRITABLE_SERVICES.includes(s)) return false;
+    try {
+      if (!io.readLine) throw new PerchError('no terminal', 'no_tty');
+      const a = (await io.readLine(`${GOOGLE_SERVICE_TITLES[s]}: [r]ead only, or read + [w]rite? [r/w] `)).trim().toLowerCase();
+      if (a === 'w' || a === 'write') return true;
+      if (a === '' || a === 'r' || a === 'read') return false;
+      throw new UsageError('Answer r (read only) or w (read + write)');
+    } catch (e) {
+      if (e instanceof PerchError && e.code === 'no_tty') {
+        io.stderr(`No interactive terminal: adding ${GOOGLE_SERVICE_TITLES[s]} read-only (repeat with --write for write access).\n`);
+        return false;
+      }
+      throw e;
+    }
+  };
+
+  if (add) return addService(add, mode === 'write' ? true : mode === 'read-only' ? false : await askWrite(add));
+  if (service) {
+    if (mode) return change(service, mode);
+    io.stdout(formatGroupAccess(data, group));
+    return;
+  }
+  if (mode) throw new UsageError('--write and --read-only need --service SERVICE (or --add SERVICE)');
+  io.stdout(formatGroupAccess(data, group));
+
+  // Interactive change, only with a terminal.
+  if (!io.readLine) return;
+  let pick: string;
+  try {
+    pick = (await io.readLine('Change a service? [drive/gmail/calendar/contacts, Enter = no change] ')).trim().toLowerCase();
+  } catch (e) {
+    if (e instanceof PerchError && e.code === 'no_tty') return;
+    throw e;
+  }
+  if (!pick) return;
+  const s = parseGoogleServices([pick])[0]!;
+  const now = groupAccess(data, gid).find((a) => a.service === s)!;
+  if (!now.memberId) {
+    const write = await askWrite(s);
+    if (values.yes !== true && !yes(await io.readLine(`Connect ${GOOGLE_SERVICE_TITLES[s]} ${write ? 'read + write' : 'read-only'} (needs a Google login for ${group.email})? [Y/n] `), true)) {
+      io.stdout('Nothing changed.\n');
+      return;
+    }
+    return addService(s, write);
+  }
+  if (now.write === 'n/a') {
+    io.stdout(`${GOOGLE_SERVICE_TITLES[s]} are read-only in Perch; nothing to change.\n`);
+    return;
+  }
+  const to = (await askWrite(s)) ? 'write' : 'read-only';
+  const needsLogin = to === 'write' && now.write !== 'full';
+  if (
+    values.yes !== true &&
+    !yes(await io.readLine(`Set ${GOOGLE_SERVICE_TITLES[s]} to ${to === 'write' ? 'read + write' : 'read only'}${needsLogin ? ` (needs a Google login for ${group.email})` : ''}? [Y/n] `), true)
+  ) {
+    io.stdout('Nothing changed.\n');
+    return;
+  }
+  return change(s, to);
 }
 
 async function cmdNotion(config: PerchConfig, io: CliIo, sub: string | undefined, rest: string[], values: Record<string, unknown>) {
@@ -1100,6 +1315,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         'allow-calendar-write': { type: 'boolean' },
         services: { type: 'string' },
         service: { type: 'string' },
+        add: { type: 'string' },
         'redirect-host': { type: 'string' },
         email: { type: 'string' },
         username: { type: 'string' },
