@@ -1,6 +1,7 @@
 /**
  * MOCK Google upstream for the Calendar/Contacts milestone: OAuth token endpoint, OpenID Connect
- * userinfo, Calendar v3 subset (calendarList, events list/get/insert/patch) and People v1 subset
+ * userinfo, Calendar v3 subset (calendarList, events list/get/insert/patch/delete, Meet createRequest,
+ * attendeesOmitted response patches) and People v1 subset
  * (connections.list, people.get). In-memory fake of the documented HTTP API shapes; nothing here
  * talks to Google, and passing tests that use it are NOT evidence of a live integration.
  */
@@ -236,6 +237,25 @@ export class MockGoogleProductivity {
     if (!has(SCOPE.calendarOwned)) return gErr(403, 'insufficientPermissions');
     if (cal.accessRole !== 'owner') return gErr(403, 'forbidden');
     const body = JSON.parse(req.body ?? '{}') as Record<string, unknown>;
+    // Google ignores conferenceData unless conferenceDataVersion=1; a createRequest yields a Meet link.
+    const conference = (ev: Record<string, unknown>) => {
+      const cd = body.conferenceData as { createRequest?: { requestId?: string } } | undefined;
+      delete ev.conferenceData;
+      if (q.get('conferenceDataVersion') === '1' && cd?.createRequest?.requestId) {
+        const code = createHash('sha256').update(cd.createRequest.requestId).digest('hex').slice(0, 10);
+        ev.hangoutLink = `https://meet.google.com/${code}`;
+        ev.conferenceData = { conferenceId: code, createRequest: { ...cd.createRequest, status: { statusCode: 'success' } }, entryPoints: [{ entryPointType: 'video', uri: ev.hangoutLink }] };
+      }
+    };
+    if (req.method === 'DELETE' && eventId) {
+      const i = cal.events.findIndex((e) => e.id === eventId);
+      if (i < 0) return gErr(404, 'notFound');
+      if (cal.events[i]!.status === 'cancelled') return gErr(410, 'deleted');
+      const ifMatch = req.headers['if-match'];
+      if (ifMatch !== undefined && ifMatch !== cal.events[i]!.etag) return gErr(412, 'conditionNotMet');
+      cal.events.splice(i, 1);
+      return { status: 204, headers: {}, body: Buffer.alloc(0) };
+    }
     if (req.method === 'POST' && !eventId) {
       const id = typeof body.id === 'string' ? body.id : `mock${(++etagCounter).toString(32)}`;
       if (cal.events.some((e) => e.id === id)) return gErr(409, 'duplicate');
@@ -252,6 +272,7 @@ export class MockGoogleProductivity {
         organizer: { email: cal.id, self: true },
         iCalUID: `${id}@google.com`,
       };
+      conference(ev);
       cal.events.push(ev);
       return json(200, ev);
     }
@@ -262,11 +283,25 @@ export class MockGoogleProductivity {
       if (ifMatch !== undefined && ifMatch !== ev.etag) return gErr(412, 'conditionNotMet');
       // Google patch semantics: nested objects are merged field by field, arrays are replaced
       // (https://developers.google.com/workspace/calendar/api/guides/performance#patch).
+      const hadConference = ev.conferenceData;
+      if (body.attendeesOmitted === true && Array.isArray(body.attendees)) {
+        // Only the given entries change (matched by email); the rest of the guest list stays.
+        const list = Array.isArray(ev.attendees) ? (ev.attendees as Array<Record<string, unknown>>) : [];
+        for (const a of body.attendees as Array<Record<string, unknown>>) {
+          const cur = list.find((x) => String(x.email).toLowerCase() === String(a.email).toLowerCase());
+          if (!cur) return gErr(403, 'forbiddenForNonOrganizer');
+          Object.assign(cur, a);
+        }
+        delete body.attendees;
+        delete body.attendeesOmitted;
+      }
       for (const [k, v] of Object.entries(body)) {
         const cur = (ev as Record<string, unknown>)[k];
         const isObj = (x: unknown) => !!x && typeof x === 'object' && !Array.isArray(x);
         (ev as Record<string, unknown>)[k] = isObj(v) && isObj(cur) ? { ...(cur as object), ...(v as object) } : v;
       }
+      if (body.conferenceData !== undefined) conference(ev);
+      else if (hadConference) ev.conferenceData = hadConference;
       Object.assign(ev, { etag: nextEtag(), updated: '2026-10-05T11:00:00.000Z' });
       return json(200, ev);
     }
