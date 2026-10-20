@@ -84,7 +84,11 @@ export function prepareDraftForSmtp(raw: Buffer, accountEmail: string): SmtpRead
   if (!to.length) throw bad('The draft has no recipients (To, Cc or Bcc)');
   if (to.length > MAX_RECIPIENTS) throw bad(`The draft has more than ${MAX_RECIPIENTS} recipients`);
 
-  // Remove Bcc fields (with their continuation lines) from the transmitted copy; everything else is untouched.
+  return { raw: stripFields(text, fields), envelope: { from: accountEmail, to } };
+}
+
+/** Removes Bcc fields (with their continuation lines) from the transmitted copy; everything else is untouched. */
+function stripFields(text: string, fields: HeaderField[]): Buffer {
   let stripped = '';
   let pos = 0;
   for (const f of fields) {
@@ -93,5 +97,15 @@ export function prepareDraftForSmtp(raw: Buffer, accountEmail: string): SmtpRead
     pos = f.end;
   }
   stripped += text.slice(pos);
-  return { raw: Buffer.from(stripped, 'latin1'), envelope: { from: accountEmail, to } };
+  return Buffer.from(stripped, 'latin1');
+}
+
+/**
+ * The same message without its Bcc/Resent-Bcc header fields, byte for byte otherwise. Used for SMTP submission of a
+ * message Perch composed with Bcc kept, so the copy filed in Sent (with Bcc, private to the sender) and the copy on
+ * the wire share one Message-ID.
+ */
+export function stripBcc(raw: Buffer): Buffer {
+  const text = raw.toString('latin1');
+  return stripFields(text, headerFields(text).fields);
 }

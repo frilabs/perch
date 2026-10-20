@@ -276,8 +276,14 @@ describe('ImapMailProvider drafts and send [MOCK ImapSession]', () => {
     expect(await rejection(provider.send(dummyImapAccount(), mail))).toMatchObject({ code: 'not_permitted' });
     expect(sent).toHaveLength(0);
     const acct = dummyImapAccount({ allowSend: true });
-    expect(await provider.send(acct, mail)).toEqual({ status: 'accepted', detail: 'MOCK' });
+    // The Sent copy cannot be filed (no IMAP session): still accepted, sentCopy false, and SMTP is never called again.
+    const r = await provider.send(acct, mail);
+    expect(r).toMatchObject({ status: 'accepted', sentCopy: false });
+    expect(r.detail).toMatch(/no copy could be filed in the Sent folder/);
     expect(sent).toEqual([[acct, raw, mail.envelope]]);
+    // Sent copy turned off: no IMAP connection is attempted at all.
+    expect(await provider.send({ ...acct, sentCopy: false }, mail)).toMatchObject({ status: 'accepted', sentCopy: false });
+    expect(sent).toHaveLength(2);
   });
 });
 

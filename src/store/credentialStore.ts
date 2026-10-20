@@ -86,6 +86,12 @@ const ImapAccountSchema = z.object({
    */
   allowModify: z.boolean().optional(),
   draftsMailbox: z.string().optional(),
+  /**
+   * File a copy of every accepted SMTP send in the IMAP Sent folder. Optional so older stores stay valid; absent
+   * means "on, unless the SMTP server files sent mail itself" (see imapSentCopyEnabled in src/mail/imap.ts).
+   * `perch imap add --no-sent-copy` stores false.
+   */
+  sentCopy: z.boolean().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

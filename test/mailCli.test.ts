@@ -212,6 +212,16 @@ describe('--allow-modify opt-in (organizing) [MOCK]', () => {
     expect(out.join('')).toContain('organize on');
   });
 
+  it('imap add --no-sent-copy stores sentCopy: false; without it the field is absent (automatic, on for GMX)', async () => {
+    expect(await runCli(['imap', 'add', '--label', 'GMX', '--email', 'dummy@gmx.at'], io())).toBe(0);
+    expect(await runCli(['imap', 'add', '--label', 'GMX2', '--email', 'dummy2@gmx.at', '--no-sent-copy'], io())).toBe(0);
+    const [auto, off] = (await (await openStore()).read()).imap;
+    expect(auto!.sentCopy).toBeUndefined();
+    expect(off!.sentCopy).toBe(false);
+    expect(out.join('')).toContain('sent copy on');
+    expect(out.join('')).toContain('sent copy off');
+  });
+
   it('gmail add --allow-modify requests gmail.modify; microsoft add --allow-modify requests Mail.ReadWrite', async () => {
     const readonly = 'https://www.googleapis.com/auth/gmail.readonly';
     const modify = 'https://www.googleapis.com/auth/gmail.modify';

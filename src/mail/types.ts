@@ -83,6 +83,8 @@ export interface OutgoingMime {
   /** SMTP envelope: account address and every To/Cc/Bcc recipient (bare addresses). */
   envelope: { from: string; to: string[] };
   threadId?: string;
+  /** SMTP only: the same message WITH its Bcc header, filed in the IMAP Sent folder after an accepted send. */
+  sentCopy?: Buffer;
 }
 
 export interface DraftResult {
@@ -101,6 +103,11 @@ export interface SendResult {
   status: 'accepted' | 'rejected' | 'indeterminate';
   providerMessageId?: string;
   detail: string;
+  /**
+   * IMAP only, after an accepted send: whether a copy was filed in the Sent folder. false when filing failed or is
+   * turned off for the account (the detail says which); the send outcome is never changed by it.
+   */
+  sentCopy?: boolean;
 }
 
 /**
