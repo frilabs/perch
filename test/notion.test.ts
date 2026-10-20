@@ -1,5 +1,6 @@
 // Notion operations against the MOCK Notion API (in-memory fake). No live Notion calls.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { READONLY_PRINCIPAL } from '../src/auth/grants.js';
 import { addNotionWorkspace, NotionService, removeNotionWorkspace } from '../src/notion/notion.js';
 import { CredentialStore, initStore } from '../src/store/credentialStore.js';
 import { Upstream } from '../src/upstream.js';
@@ -83,7 +84,7 @@ describe('Notion workspaces [mock Notion]', () => {
 
   it('disconnects locally; the workspace disappears from results', async () => {
     await removeNotionWorkspace(store, idB);
-    const res = await service.search({ query: 'project' });
+    const res = await service.search(READONLY_PRINCIPAL, { query: 'project' });
     expect(res.results.every((r) => r.workspaceId === idA)).toBe(true);
     await expect(removeNotionWorkspace(store, idB)).rejects.toThrow(/unknown/i);
   });
@@ -91,30 +92,30 @@ describe('Notion workspaces [mock Notion]', () => {
 
 describe('NotionService.search [mock Notion]', () => {
   it('title-searches all workspaces with provenance and composite cursor pagination', async () => {
-    const p1 = await service.search({ query: 'project', pageSize: 2 });
+    const p1 = await service.search(READONLY_PRINCIPAL, { query: 'project', pageSize: 2 });
     expect(p1.results.map((r) => [r.workspaceLabel, r.object, r.title])).toEqual([
       ['Personal', 'page', 'Project plan'],
       ['Personal', 'page', 'Project notes'],
       ['Company', 'page', 'Project budget'],
     ]);
     expect(p1.hasMore).toBe(true);
-    const p2 = await service.search({ query: 'project', pageSize: 2, cursor: p1.nextCursor! });
+    const p2 = await service.search(READONLY_PRINCIPAL, { query: 'project', pageSize: 2, cursor: p1.nextCursor! });
     expect(p2.results.map((r) => [r.workspaceId, r.object, r.title])).toEqual([[idA, 'data_source', 'Project tasks']]);
     expect(p2.hasMore).toBe(false);
   });
 
   it('filters by object type and by workspace', async () => {
-    const res = await service.search({ filter: 'data_source' });
+    const res = await service.search(READONLY_PRINCIPAL, { filter: 'data_source' });
     expect(res.results.map((r) => r.object)).toEqual(['data_source']);
     const body = JSON.parse(notion.calls.at(-1)!.body!);
     expect(body.filter).toEqual({ property: 'object', value: 'data_source' });
-    const one = await service.search({ workspaceId: idB });
+    const one = await service.search(READONLY_PRINCIPAL, { workspaceId: idB });
     expect(one.results.map((r) => r.title)).toEqual(['Project budget']);
   });
 
   it('reports partial results when a workspace fails', async () => {
     notion.failingTokens.add(wsB.token);
-    const res = await service.search({ query: 'project' });
+    const res = await service.search(READONLY_PRINCIPAL, { query: 'project' });
     expect(res.partial).toBe(true);
     expect(res.errors.map((e) => e.accountId)).toEqual([idB]);
     expect(JSON.stringify(res)).not.toContain(wsB.token);
@@ -124,14 +125,14 @@ describe('NotionService.search [mock Notion]', () => {
 describe('Notion rate limiting [mock Notion 429]', () => {
   it('retries 429 honouring a sanitised, bounded Retry-After', async () => {
     notion.rateLimitQueue.push('2', 'abc', '99999');
-    const res = await service.search({ workspaceId: idA, query: 'project' });
+    const res = await service.search(READONLY_PRINCIPAL, { workspaceId: idA, query: 'project' });
     expect(res.results.length).toBeGreaterThan(0);
     expect(sleeps).toEqual([2000, 1000, 10_000]);
   });
 
   it('gives up after the per-request retry limit with a rate-limit error', async () => {
     notion.rateLimitQueue.push(...Array(10).fill('0'));
-    await expect(service.getPage(idA, wsA.pages[0]!.id)).rejects.toThrow(/429/);
+    await expect(service.getPage(READONLY_PRINCIPAL, idA, wsA.pages[0]!.id)).rejects.toThrow(/429/);
     expect(sleeps).toHaveLength(3);
   });
 
@@ -140,7 +141,7 @@ describe('Notion rate limiting [mock Notion 429]', () => {
     const page = { id: mockId(), title: 'RL', blocks: parents };
     wsA.pages.push(page);
     notion.rateLimitEachRequest = 2;
-    const res = await service.getPageContent(idA, page.id, { maxDepth: 2 });
+    const res = await service.getPageContent(READONLY_PRINCIPAL, idA, page.id, { maxDepth: 2 });
     expect(sleeps.length).toBeLessThanOrEqual(6);
     expect(res.blocks.map((b) => b.text)).toEqual(['p0', 'p1', 'p2', 'p3']);
     expect(res.partial).toBe(true);
@@ -156,7 +157,7 @@ describe('NotionService content [mock Notion]', () => {
     const page = { id: mockId(), title: 'Partial', blocks: [failing, ok] };
     wsA.pages.push(page);
     notion.failingBlockIds.add(failing.id);
-    const res = await service.getPageContent(idA, page.id, {});
+    const res = await service.getPageContent(READONLY_PRINCIPAL, idA, page.id, {});
     expect(res.blocks.map((b) => b.text)).toEqual(['broken parent', 'ok parent']);
     expect(res.partial).toBe(true);
     expect(res.truncated).toBe(true);
@@ -183,14 +184,14 @@ describe('NotionService content [mock Notion]', () => {
 
   it('paginates top-level blocks and traverses nested children up to maxDepth', async () => {
     const page = seedPage();
-    const r1 = await service.getPageContent(idA, page.id, { pageSize: 2, maxDepth: 3 });
+    const r1 = await service.getPageContent(READONLY_PRINCIPAL, idA, page.id, { pageSize: 2, maxDepth: 3 });
     expect(r1.workspaceId).toBe(idA);
     expect(r1.blocks.map((b) => b.text)).toEqual(['top 0', 'top 1']);
     expect(r1.hasMore).toBe(true);
     const top0 = r1.blocks[0]!;
     expect(top0.children!.map((b) => b.text)).toEqual(['child 0', 'child 1', 'child 2', 'child 3', 'child 4']);
     expect(top0.children![0]!.children!.map((b) => b.text)).toEqual(['grandchild']);
-    const r2 = await service.getPageContent(idA, page.id, { pageSize: 2, maxDepth: 3, cursor: r1.nextCursor! });
+    const r2 = await service.getPageContent(READONLY_PRINCIPAL, idA, page.id, { pageSize: 2, maxDepth: 3, cursor: r1.nextCursor! });
     expect(r2.blocks.map((b) => b.text)).toEqual(['top 2']);
     expect(r2.hasMore).toBe(false);
     expect(r2.nextCursor).toBeNull();
@@ -198,12 +199,12 @@ describe('NotionService content [mock Notion]', () => {
 
   it('marks children not loaded when depth or block budget is exhausted', async () => {
     const page = seedPage();
-    const shallow = await service.getPageContent(idA, page.id, { maxDepth: 1 });
+    const shallow = await service.getPageContent(READONLY_PRINCIPAL, idA, page.id, { maxDepth: 1 });
     expect(shallow.blocks[0]!.children).toBeUndefined();
     expect(shallow.blocks[0]!.childrenNotLoaded).toBe(true);
     expect(shallow.truncated).toBe(true);
 
-    const budget = await service.getPageContent(idA, page.id, { maxDepth: 3, maxBlocks: 5 });
+    const budget = await service.getPageContent(READONLY_PRINCIPAL, idA, page.id, { maxDepth: 3, maxBlocks: 5 });
     expect(budget.blocksReturned).toBeLessThanOrEqual(5);
     expect(budget.truncated).toBe(true);
     const top0 = budget.blocks[0]!;
@@ -211,32 +212,32 @@ describe('NotionService content [mock Notion]', () => {
     expect(top0.childrenHasMore).toBe(true);
     expect(typeof top0.childrenNextCursor).toBe('string');
 
-    const rest = await service.getBlockChildren(idA, top0.id, { cursor: top0.childrenNextCursor! });
+    const rest = await service.getBlockChildren(READONLY_PRINCIPAL, idA, top0.id, { cursor: top0.childrenNextCursor! });
     expect(rest.blocks.length).toBeGreaterThan(0);
     expect(rest.blocks.at(-1)!.text).toBe('child 4');
   });
 
   it('retrieves pages, databases with data_sources, and queries data sources with pagination', async () => {
-    const page = await service.getPage(idA, wsA.pages[0]!.id);
+    const page = await service.getPage(READONLY_PRINCIPAL, idA, wsA.pages[0]!.id);
     expect(page).toMatchObject({ workspaceId: idA, workspaceLabel: 'Personal', id: wsA.pages[0]!.id });
-    const db = await service.getDatabase(idA, wsA.databases[0]!.id);
+    const db = await service.getDatabase(READONLY_PRINCIPAL, idA, wsA.databases[0]!.id);
     expect((db.data_sources as unknown[]).length).toBe(1);
     const dsId = wsA.dataSources[0]!.id;
-    expect(await service.getDataSource(idA, dsId)).toMatchObject({ object: 'data_source', id: dsId });
-    const q1 = await service.queryDataSource(idA, dsId, { pageSize: 2, filter: { property: 'Name', title: { contains: 'Task' } } });
+    expect(await service.getDataSource(READONLY_PRINCIPAL, idA, dsId)).toMatchObject({ object: 'data_source', id: dsId });
+    const q1 = await service.queryDataSource(READONLY_PRINCIPAL, idA, dsId, { pageSize: 2, filter: { property: 'Name', title: { contains: 'Task' } } });
     expect(q1.results).toHaveLength(2);
     expect(q1.hasMore).toBe(true);
     const sent = JSON.parse(notion.calls.at(-1)!.body!);
     expect(sent.filter).toEqual({ property: 'Name', title: { contains: 'Task' } });
-    const q2 = await service.queryDataSource(idA, dsId, { pageSize: 2, cursor: q1.nextCursor! });
+    const q2 = await service.queryDataSource(READONLY_PRINCIPAL, idA, dsId, { pageSize: 2, cursor: q1.nextCursor! });
     expect(q2.results).toHaveLength(1);
     expect(q2.hasMore).toBe(false);
   });
 
   it('validates Notion ids and accepts dashed UUIDs', async () => {
-    await expect(service.getPage(idA, '../users')).rejects.toThrow(/invalid notion id/i);
+    await expect(service.getPage(READONLY_PRINCIPAL, idA, '../users')).rejects.toThrow(/invalid notion id/i);
     const raw = wsA.pages[0]!.id;
     const dashed = `${raw.slice(0, 8)}-${raw.slice(8, 12)}-${raw.slice(12, 16)}-${raw.slice(16, 20)}-${raw.slice(20)}`;
-    await expect(service.getPage(idA, dashed)).resolves.toBeDefined();
+    await expect(service.getPage(READONLY_PRINCIPAL, idA, dashed)).resolves.toBeDefined();
   });
 });
