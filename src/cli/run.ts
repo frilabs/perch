@@ -46,6 +46,8 @@ import { generateHttpToken, startHttpServer, validateHttpToken } from '../mcp/ht
 import { createMcpServer } from '../mcp/server.js';
 import { registerMicrosoftAccount, removeMicrosoftAccount } from '../microsoft/accounts.js';
 import { runMicrosoftAuthorization, validateTenant } from '../microsoft/oauth.js';
+import { cmdMicrosoftClient, ensureMicrosoftClientId } from './microsoftClient.js';
+import { maybeShowSlackGuide } from './slackGuide.js';
 import { addNotionWorkspace, removeNotionWorkspace } from '../notion/notion.js';
 import { SLACK_APP_MANIFEST } from '../slack/manifest.js';
 import { addSlackWorkspace, removeSlackWorkspace } from '../slack/slack.js';
@@ -131,6 +133,8 @@ Usage:
   perch microsoft add --label NAME [--allow-drafts] [--allow-send] [--allow-modify] [--port N] [--timeout SECONDS]
                       [--redirect-host localhost|127.0.0.1] [--login-hint EMAIL]
   perch microsoft list | remove ID
+  perch microsoft client setup | show          guided Entra app registration; stores the client ID in
+                                               ~/.config/perch/microsoft-client-id (PERCH_MICROSOFT_CLIENT_ID wins)
   perch imap add --label NAME --email ADDRESS [--username USER] [--preset gmx|gmx-com]
                  [--imap-host H --imap-port N --smtp-host H --smtp-port N --smtp-security tls|starttls]
                  [--allow-drafts] [--allow-send] [--allow-modify] [--drafts-mailbox NAME] [--no-sent-copy]
@@ -141,7 +145,8 @@ Usage:
                                                Calendar/Contacts only, separate login (the usual way: perch google add)
   perch google-productivity list | remove ID [--revoke [--force]]
   perch slack manifest                         print the Slack app manifest (create one internal app per workspace)
-  perch slack add --label NAME                 user token (xoxp-…) is read via a masked terminal prompt
+  perch slack add --label NAME [--skip-guide]  shows the app setup steps first, then reads the user token (xoxp-…)
+                                               via a masked terminal prompt
   perch slack list | remove ID
   perch whatsapp install [--yes] [--dir PATH] [--port N]   download the pinned GOWA bridge (SHA-256 checked), run it as a
                                                systemd user service on 127.0.0.1 and store it in Perch (Linux; asks first);
@@ -651,6 +656,7 @@ async function cmdGmail(config: PerchConfig, io: CliIo, sub: string | undefined,
 }
 
 async function cmdMicrosoft(config: PerchConfig, io: CliIo, sub: string | undefined, rest: string[], values: Record<string, unknown>) {
+  if (sub === 'client') return cmdMicrosoftClient(config, io, rest[0]);
   const upstream = new Upstream(io.transport ?? createFetchTransport());
   const store = await openStore(config);
   if (sub === 'list') return io.stdout(formatAccounts(await store.read(), 'microsoft'));
@@ -664,17 +670,15 @@ async function cmdMicrosoft(config: PerchConfig, io: CliIo, sub: string | undefi
     );
     return;
   }
-  if (sub !== 'add') throw new UsageError('Usage: perch microsoft add|list|remove');
+  if (sub !== 'add') throw new UsageError('Usage: perch microsoft add|list|remove|client');
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
-  if (!config.microsoftClientId) {
-    throw new PerchError('Set PERCH_MICROSOFT_CLIENT_ID to the Application (client) ID of your Entra app registration', 'bad_config');
-  }
+  const clientId = await ensureMicrosoftClientId(config, io, Boolean(values['allow-send'] || values['allow-drafts'] || values['allow-modify']));
   const tenant = validateTenant(config.microsoftTenant);
   const redirectHost = values['redirect-host'] ?? 'localhost';
   if (redirectHost !== 'localhost' && redirectHost !== '127.0.0.1') throw new UsageError('--redirect-host must be localhost or 127.0.0.1');
   const { port, timeoutMs } = oauthTiming(values);
   const grant = await runMicrosoftAuthorization({
-    clientId: config.microsoftClientId,
+    clientId,
     tenant,
     upstream,
     send: Boolean(values['allow-send']),
@@ -688,7 +692,7 @@ async function cmdMicrosoft(config: PerchConfig, io: CliIo, sub: string | undefi
   });
   const account = await registerMicrosoftAccount(store, upstream, {
     label: values.label,
-    clientId: config.microsoftClientId,
+    clientId,
     tenant,
     grant,
   });
@@ -815,6 +819,7 @@ async function cmdSlack(config: PerchConfig, io: CliIo, sub: string | undefined,
   }
   if (sub !== 'add') throw new UsageError('Usage: perch slack manifest|add|list|remove');
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
+  await maybeShowSlackGuide(io, { skip: values['skip-guide'] === true, hasWorkspace: (await store.read()).slack.length > 0 });
   const token = await io.readSecret(`Slack user token (xoxp-…) for "${values.label}" (input hidden): `);
   const ws = await addSlackWorkspace(store, new Upstream(io.transport ?? createFetchTransport()), { label: values.label, token });
   const missing = ['search:read', 'chat:write', 'reactions:read', 'reactions:write', 'files:read', 'files:write', 'im:write', 'mpim:write'].filter((s) => !ws.scopes.includes(s));
@@ -1132,6 +1137,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         phone: { type: 'string' },
         'keep-device': { type: 'boolean' },
         'no-check': { type: 'boolean' },
+        'skip-guide': { type: 'boolean' },
         'read-all': { type: 'boolean' },
         'allow-write': { type: 'boolean' },
         'allow-modify': { type: 'boolean' },

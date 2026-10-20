@@ -138,7 +138,10 @@ const SERVICES: readonly SetupService[] = [
   {
     cmd: 'microsoft',
     title: 'Outlook / Microsoft 365',
-    needs: (c) => (c.microsoftClientId ? tunnel(8766) : 'Needs an Entra app registration and PERCH_MICROSOFT_CLIENT_ID in .env (docs/SETUP.md §4a.2).\n'),
+    needs: (c) =>
+      c.microsoftClientId
+        ? tunnel(8766)
+        : 'Needs your own Entra app registration (once per installation): Perch guides you through it step by step first.\n' + tunnel(8766),
     args: async () => ['--port', '8766'],
   },
   {
@@ -168,7 +171,7 @@ const SERVICES: readonly SetupService[] = [
     cmd: 'slack',
     title: 'Slack',
     needs: () =>
-      'Per workspace: create an app from the manifest (perch slack manifest) at api.slack.com/apps, install it, copy the "User OAuth Token" (xoxp-…). It is asked hidden.\n',
+      'Per workspace: Perch shows the app manifest and the steps to create and install the Slack app, then asks for the "User OAuth Token" (xoxp-…) hidden.\n',
     args: async () => [],
   },
   {

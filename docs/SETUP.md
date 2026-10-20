@@ -230,16 +230,32 @@ Fehlt nach dem Consent ein angefragter Scope, z. B. weil ein Häkchen entfernt w
 
 ### 4a.2 Outlook.com / Microsoft 365 (Microsoft Graph, delegiert)
 
-1. Im Entra Admin Center (<https://entra.microsoft.com>) eine **App-Registrierung** anlegen:
-   - unterstützte Kontotypen passend wählen (für Outlook.com: „persönliche Microsoft-Konten“ einschließen);
-   - Plattform **„Mobile and desktop applications“**, Redirect-URI `http://localhost`;
-   - kein Client-Secret (öffentlicher Client mit PKCE).
-2. Unter „API permissions“ die delegierten Rechte `User.Read` und `Mail.Read` eintragen, optional `Mail.ReadWrite` (Entwürfe) und `Mail.Send` (Senden).
-3. `PERCH_MICROSOFT_CLIENT_ID=<Application (client) ID>` setzen. Optional `PERCH_MICROSOFT_TENANT`:
-   - `common` (Default)
-   - `consumers` (nur persönliche Konten)
-   - `organizations`
-   - Tenant-GUID oder -Domain
+**Geführt (Standard):** `perch microsoft add` (oder Outlook in `perch setup`) erkennt, dass noch keine Client-ID da ist, und führt im Terminal durch die App-Registrierung, jeweils mit „Enter, wenn erledigt“:
+
+1. Direktlink auf die neue App-Registrierung im Entra Admin Center
+   (<https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/CreateApplicationBlade/quickStartType~/null/isMSAApp~/false>,
+   Liste: <https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade>):
+   Name „Perch“, Kontotypen **einschließlich persönlicher Microsoft-Konten**, Redirect-URI Plattform
+   „Public client/native (mobile & desktop)“ mit `http://localhost`.
+2. Authentication prüfen: Plattform **„Mobile and desktop applications“** mit `http://localhost`; **kein** Client-Secret (öffentlicher Client mit PKCE).
+3. API permissions → Microsoft Graph → delegiert: `User.Read`, `Mail.Read`; bei Lesen + Schreiben zusätzlich `Mail.ReadWrite` und `Mail.Send`. `offline_access` fordert Perch beim Login selbst an.
+4. **Application (client) ID einfügen.** Perch prüft das GUID-Format (drei Versuche) und speichert sie atomar mit `0600` in `~/.config/perch/microsoft-client-id` (bzw. `$XDG_CONFIG_HOME/perch/microsoft-client-id`). Danach läuft der Login wie gewohnt weiter.
+
+`PERCH_MICROSOFT_CLIENT_ID` in `.env` hat weiter **Vorrang**; die Datei ist nur der Fallback. Eine Datei mit unsicheren Rechten, Symlink oder ohne GUID wird nicht verwendet (`perch microsoft add` nennt den Grund). Ohne Terminal bricht `perch microsoft add` wie bisher mit einem klaren Fehler ab.
+
+```bash
+perch microsoft client setup     # nur die Registrierung (ersetzt eine vorhandene Datei nach Rückfrage)
+perch microsoft client show      # Quelle (Variable oder Datei), gekürzte Client-ID, Pfad, Tenant
+```
+
+**Manuell (Alternative):** die App-Registrierung wie oben anlegen und `PERCH_MICROSOFT_CLIENT_ID=<Application (client) ID>` in `.env` setzen.
+
+Optional `PERCH_MICROSOFT_TENANT`:
+
+- `common` (Default)
+- `consumers` (nur persönliche Konten)
+- `organizations`
+- Tenant-GUID oder -Domain
 
 ```bash
 perch microsoft add --label "Outlook"                                  # offline_access User.Read Mail.Read
@@ -420,6 +436,8 @@ Warum keine gemeinsame App für alle Workspaces: Slack drosselt seit 2025 vertei
 
 ### 4e.1 App anlegen (einmal pro Workspace, Nutzeraufgabe)
 
+`perch slack add` (und Slack in `perch setup`) zeigt vor der verdeckten Token-Abfrage das Manifest, den Link <https://api.slack.com/apps?new_app=1> und die Schritte unten und wartet auf Enter. `--skip-guide` überspringt die Anleitung; ist schon ein Workspace verbunden, fragt Perch „Show the steps …? [y/N]“. Ohne Terminal gibt es keine Anleitung, die Token-Abfrage scheitert wie bisher.
+
 1. Manifest ausgeben: `perch slack manifest`. Es ist identisch mit [`slack-app-manifest.json`](slack-app-manifest.json).
 2. <https://api.slack.com/apps> → **Create New App** → **From a manifest** → den Workspace wählen → Manifest einfügen → **Create**.
 3. **Install to Workspace** → Berechtigungen bestätigen.
@@ -447,7 +465,8 @@ Token-Rotation ist im Manifest aus, das Token läuft also nicht ab.
 ### 4e.2 In Perch verbinden
 
 ```bash
-perch slack add --label "Firma"     # Token verdeckt eingeben
+perch slack add --label "Firma"     # Anleitung, dann Token verdeckt eingeben
+perch slack add --label "Zweit" --skip-guide
 perch slack list
 ```
 
