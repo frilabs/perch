@@ -3,6 +3,7 @@ import { GoogleTokenProvider } from './google/accounts.js';
 import { CalendarService } from './google/calendar.js';
 import { ContactsService } from './google/contacts.js';
 import { DriveService } from './google/drive.js';
+import { DriveWriteService } from './google/driveWrite.js';
 import { createProductivityTokenProvider } from './google/productivity.js';
 import { createGmailTokenProvider } from './mail/gmailAccounts.js';
 import { createMailProviders } from './mail/providers.js';
@@ -24,6 +25,8 @@ export interface PerchContext {
   store: CredentialStore;
   upstream: Upstream;
   drive: DriveService;
+  /** Drive writes (client grants with drive_write; idempotent creates on the shared ledger). */
+  driveWrite: DriveWriteService;
   notion: NotionService;
   mail: MailService;
   calendar: CalendarService;
@@ -70,6 +73,7 @@ export function createPerchContext(
     store,
     upstream,
     drive: new DriveService(store, upstream, tokens),
+    driveWrite: new DriveWriteService(store, upstream, tokens, workflow, audit),
     notion: new NotionService(store, upstream),
     mail: new MailService(store, mailProviders ?? createMailProviders(store, upstream, { gmail: gmailTokens, microsoft: microsoftTokens }), ledger),
     calendar: new CalendarService(store, upstream, productivityTokens),

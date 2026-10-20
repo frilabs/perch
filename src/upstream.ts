@@ -124,6 +124,19 @@ const ROUTES: Record<Service, Route[]> = {
     ['GET', /^\/drive\/v3\/files$/],
     ['GET', new RegExp(`^/drive/v3/files/${DRIVE_ID}$`)],
     ['GET', new RegExp(`^/drive/v3/files/${DRIVE_ID}/export$`)],
+    ['GET', new RegExp(`^/drive/v3/files/${DRIVE_ID}/permissions$`)],
+    ['GET', new RegExp(`^/drive/v3/files/${DRIVE_ID}/comments$`)],
+    // Writes (client grants with drive_write only). Deliberately NOT allowlisted: DELETE /drive/v3/files/{id}
+    // (permanent delete), DELETE /drive/v3/files/trash (empty trash), PATCH .../permissions/{id} (role/owner
+    // changes) and anything that transfers ownership (see assertDriveRequestSafe).
+    ['POST', /^\/upload\/drive\/v3\/files$/, 'drive_write'],
+    ['PATCH', new RegExp(`^/upload/drive/v3/files/${DRIVE_ID}$`), 'drive_write'],
+    ['POST', /^\/drive\/v3\/files$/, 'drive_write'],
+    ['PATCH', new RegExp(`^/drive/v3/files/(?!trash$)${DRIVE_ID}$`), 'drive_write'],
+    ['POST', new RegExp(`^/drive/v3/files/${DRIVE_ID}/copy$`), 'drive_write'],
+    ['POST', new RegExp(`^/drive/v3/files/${DRIVE_ID}/permissions$`), 'drive_write'],
+    ['DELETE', new RegExp(`^/drive/v3/files/${DRIVE_ID}/permissions/${DRIVE_ID}$`), 'drive_write'],
+    ['POST', new RegExp(`^/drive/v3/files/${DRIVE_ID}/comments$`), 'drive_write'],
   ],
   oauth: [
     ['POST', /^\/token$/],
@@ -265,6 +278,19 @@ export function validateGowaOrigin(raw: string): string {
   if (ipv4 && ipv4.slice(1).some((o) => Number(o) > 255)) throw bad();
   if (!loopback && !tailnet4 && !tailnet6) throw bad();
   return url.origin;
+}
+
+/**
+ * Drive writes never transfer ownership or grant the owner role, whatever the caller built: the query flags
+ * transferOwnership/moveToNewOwnersRoot and an "owner" role in a JSON body are refused before any I/O.
+ */
+function assertDriveRequestSafe(opts: CallOptions): void {
+  const q = opts.query ?? {};
+  const bad =
+    q.transferOwnership !== undefined ||
+    q.moveToNewOwnersRoot !== undefined ||
+    (opts.json !== null && typeof opts.json === 'object' && ['owner', 'organizer'].includes(String((opts.json as Record<string, unknown>).role)));
+  if (bad) throw new PerchError('Blocked Google Drive ownership change', 'route_not_allowed');
 }
 
 /** True when (service, method, path) is allowlisted for exactly this capability. */
@@ -421,6 +447,7 @@ export class Upstream {
     if (!isAllowedRoute(service, opts.method, opts.path, opts.capability)) {
       throw new PerchError(`Blocked non-allowlisted ${SERVICE_NAMES[service]} call`, 'route_not_allowed');
     }
+    if (service === 'drive') assertDriveRequestSafe(opts);
     let origin = ORIGINS[service];
     if (DYNAMIC_ORIGIN.has(service)) {
       if (!opts.origin) throw new PerchError(`Blocked ${SERVICE_NAMES[service]} call without a configured origin`, 'route_not_allowed');
