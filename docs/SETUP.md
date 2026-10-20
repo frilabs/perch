@@ -108,6 +108,23 @@ perch google add --label "Arbeit" --port 8766
 
 Die Identität (E-Mail) liest Perch über die Drive-API aus. Ein zweiter Grant für dieselbe E-Mail wird abgelehnt.
 
+### 3.3 Schreiben (Drive)
+
+Standardmäßig ist Drive nur lesend verbunden (`drive.readonly`). Für Schreiben das Konto mit vollem Drive-Zugriff verbinden (Scope `drive`; im Consent-Screen der Google-Cloud-App muss dieser Scope eingetragen sein):
+
+```bash
+perch google remove google-1a2b3c4d          # bestehendes Konto, nur falls schon lesend verbunden
+perch google add --label "Privat" --allow-write --port 8766
+perch client add --label "Laptop" --allow drive_read,drive_write --account google-1a2b3c4d
+```
+
+- Schreiben dürfen **nur Client-Grants mit `drive_write`** für genau dieses Konto. Das globale Token und `serve --stdio` bleiben lesend.
+- Fehlt beim Anbieter der Scope `drive`, scheitert jeder Schreibaufruf mit `provider_scope_missing` (Hinweis: neu verbinden mit `--allow-write`), bevor etwas an Google geht.
+- Werkzeuge: hochladen (bis 10 MiB, Base64), Ordner, Google Doc/Sheet/Slides (leer oder aus Text/CSV), Inhalt ersetzen, umbenennen/verschieben, kopieren, teilen (Nutzer, Gruppe, Domain, „jeder mit dem Link“; Leser/Kommentator/Bearbeiter), Freigabe entfernen, kommentieren, Papierkorb und wiederherstellen.
+- Anlegen, Kopieren, Teilen und Kommentieren brauchen eine `requestId` (wie beim Senden, Abschnitt 4d): dieselbe ID läuft nie doppelt.
+- **Nie:** endgültig löschen, Papierkorb leeren, Eigentümer übertragen oder Rolle „owner“ vergeben. Diese Routen stehen nicht in der Allowlist.
+- Alle Schreibaufrufe stehen im Audit-Log (`perch audit list`), ohne Dateinamen, Inhalte oder E-Mail-Adressen.
+
 ## 4. Notion-Workspaces verbinden (PAT pro Workspace)
 
 1. In Notion pro Workspace ein **Personal Access Token** erstellen. Anleitung: <https://developers.notion.com/guides/get-started/personal-access-tokens>

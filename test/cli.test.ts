@@ -132,6 +132,33 @@ describe('perch CLI', () => {
     expect(google.revoked).toEqual([acct.refreshToken]);
   });
 
+  it('google add --allow-write requests and stores the full drive scope [mock Google]', async () => {
+    await runCli(['init'], io());
+    const google = new MockGoogle({ grantedScope: 'https://www.googleapis.com/auth/drive' });
+    const acct = google.addAccount('dummy.write@example.test');
+    const clientFile = `${dirs.root}/client_secret_dummy.json`;
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(clientFile, JSON.stringify({ installed: { client_id: dummySecret('CLIENT'), client_secret: dummySecret('CLIENT-SECRET') } }), { mode: 0o600 });
+    let requested = '';
+    const cliIo = io({
+      transport: google.transport,
+      env: { ...io().env, PERCH_GOOGLE_CLIENT_FILE: clientFile },
+      stderr: (s) => {
+        const m = /https:\/\/accounts\.google\.com\S+/.exec(s);
+        if (m && !requested) {
+          const url = new URL(m[0]);
+          requested = url.searchParams.get('scope') ?? '';
+          void fetch(`${url.searchParams.get('redirect_uri')}?code=${google.approve(url.toString(), acct)}&state=${url.searchParams.get('state')}`);
+        }
+      },
+    });
+    expect(await runCli(['google', 'add', '--label', 'Write', '--allow-write', '--timeout', '10'], cliIo)).toBe(0);
+    expect(requested).toBe('https://www.googleapis.com/auth/drive');
+    const store = await CredentialStore.open({ dataDir: dirs.dataDir, keyFile: dirs.keyFile });
+    expect((await store.read()).google[0]!.scopes).toEqual(['https://www.googleapis.com/auth/drive']);
+    expect(out.join('')).toMatch(/drive_write/);
+  });
+
   it('serve --http fails closed without a token', async () => {
     await runCli(['init'], io({ env: { ...io().env, PERCH_HTTP_TOKEN_FILE: `${dirs.root}/none/token` } }));
     const { rm } = await import('node:fs/promises');
