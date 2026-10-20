@@ -200,6 +200,30 @@ describe('OAuth onboarding via CLI [MOCK Google/Gmail and MOCK Microsoft identit
     expect(m).toMatchObject({ label: 'Outlook', email: 'dummy.outlook@example.test', tenant: 'consumers' });
     expect(err.join('') + out.join('')).not.toContain(acct.refreshToken);
   });
+
+  it('microsoft add also completes with the pasted browser address (no tunnel, no callback request)', async () => {
+    const graph = new MockGraph();
+    const acct = graph.addAccount('dummy.paste@example.test');
+    let authUrl = '';
+    const env = { ...io().env, PERCH_MICROSOFT_CLIENT_ID: '00000000-0000-0000-0000-00000000c11e', PERCH_MICROSOFT_TENANT: 'consumers' };
+    const cliIo = io({
+      env,
+      transport: graph.transport,
+      stderr: (s) => {
+        err.push(s);
+        authUrl = /https:\/\/login\.microsoftonline\.com\S+/.exec(s)?.[0] ?? authUrl;
+      },
+      readPastedUrl: async () => {
+        const u = new URL(authUrl);
+        // Entra redirects to http://localhost:PORT/?code=…&state=… (the address the browser cannot open).
+        return `${u.searchParams.get('redirect_uri')}?code=${graph.approve(authUrl, acct)}&state=${u.searchParams.get('state')}&session_state=x`;
+      },
+    });
+    expect(await runCli(['microsoft', 'add', '--label', 'Outlook', '--read-only', '--timeout', '10'], cliIo)).toBe(0);
+    expect(err.join('')).toMatch(/copy the complete address from its address bar/);
+    expect((await (await openStore()).read()).microsoft[0]).toMatchObject({ email: 'dummy.paste@example.test' });
+    expect(err.join('') + out.join('')).not.toContain(acct.refreshToken);
+  });
 });
 
 describe('--allow-modify opt-in (organizing) [MOCK]', () => {
