@@ -27,6 +27,15 @@ import { CONVERSATION_TYPES, MAX_SLACK_PAGE_SIZE, MAX_SLACK_SEARCH_PAGE_SIZE, MA
 import { MAX_SEARCH_CHATS, MAX_WA_PAGE_SIZE, MAX_WA_TEXT } from '../whatsapp/whatsapp.js';
 import { PERCH_VERSION } from '../version.js';
 import { GROUP_CAPABILITY, LUMA_TOOLS, perchToolName } from '../luma/policy.js';
+import { driveExtraTools } from './tools/driveExtra.js';
+import { mailExtraTools } from './tools/mailExtra.js';
+import { notionExtraTools } from './tools/notionExtra.js';
+import { slackExtraTools } from './tools/slackExtra.js';
+import { whatsappExtraTools } from './tools/whatsappExtra.js';
+import type { ToolModule } from './tools/kit.js';
+
+/** Tool modules (one per service extension); each registers its own tools after the built-in ones. */
+const TOOL_MODULES: readonly ToolModule[] = [driveExtraTools, notionExtraTools, mailExtraTools, slackExtraTools, whatsappExtraTools];
 
 export const TOOL_NAMES = [
   'perch_list_accounts',
@@ -58,7 +67,8 @@ export const TOOL_NAMES = [
   'whatsapp_list_chats',
   'whatsapp_get_messages',
   'whatsapp_search',
-] as const;
+  ...TOOL_MODULES.flatMap((m) => m.readTools),
+];
 
 /** Registered only for a client principal holding the matching grant (never for the global token). */
 export const WRITE_TOOL_NAMES = [
@@ -71,10 +81,11 @@ export const WRITE_TOOL_NAMES = [
   'slack_send_status',
   'whatsapp_send_message',
   'whatsapp_send_status',
-] as const;
+  ...TOOL_MODULES.flatMap((m) => m.writeTools),
+];
 
 /** Writes whose attempt is audited durably BEFORE the provider call (fail closed). */
-const AUDITED_WRITES = new Set<string>(['calendar_create_event', 'calendar_update_event']);
+const AUDITED_WRITES = new Set<string>(['calendar_create_event', 'calendar_update_event', ...TOOL_MODULES.flatMap((m) => m.auditedWrites)]);
 /**
  * Audited by MailService itself (src/mail/service.ts: draft attempt before the provider write, reads after,
  * the send workflow atomically with its ledger record), so direct service calls are audited too; the runner
@@ -94,6 +105,7 @@ const SELF_AUDITED = new Set<string>([
   ...Object.entries(LUMA_TOOLS)
     .filter(([, p]) => p.group !== 'read')
     .map(([n]) => perchToolName(n)),
+  ...TOOL_MODULES.flatMap((m) => m.selfAudited),
 ]);
 
 const MESSAGE_SEND_NOTE =
@@ -930,6 +942,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
   }
 
   registerLumaTools(server, ctx, principal, operator, tool);
+  for (const m of TOOL_MODULES) m.register(server, ctx, principal, operator, tool);
   return server;
 }
 

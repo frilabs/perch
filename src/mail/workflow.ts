@@ -18,6 +18,8 @@ export function sendTypeOf(provider: SendProvider): string {
   if (provider === 'slack') return 'slack_send_message';
   if (provider === 'whatsapp') return 'whatsapp_send_message';
   if (provider === 'luma') return 'luma_write';
+  if (provider === 'drive') return 'drive_write';
+  if (provider === 'notion') return 'notion_write';
   return 'mail_send';
 }
 

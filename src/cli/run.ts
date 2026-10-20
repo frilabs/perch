@@ -853,6 +853,8 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         'keep-device': { type: 'boolean' },
         'no-check': { type: 'boolean' },
         'read-all': { type: 'boolean' },
+        'allow-write': { type: 'boolean' },
+        'allow-modify': { type: 'boolean' },
         public: { type: 'boolean' },
         name: { type: 'string' },
         redirect: { type: 'string', multiple: true },
