@@ -7,7 +7,7 @@
 
 Perch is an MCP server. It puts **several Google Drive accounts**, **several Notion workspaces**, **several mail accounts** (Gmail, Outlook.com/Microsoft 365, GMX and other IMAP/SMTP), **several Google Calendar/Contacts accounts**, **several Slack workspaces** and **WhatsApp** (through a self-hosted GOWA bridge) behind **one** connector for Claude Code, Codex and other MCP clients.
 
-Everything is read-only by default. Writing (mail drafts, sending mail, Slack and WhatsApp messages, creating or changing private calendar events) is only possible through an explicit client grant (see [Read-only by default](#read-only-by-default-writes-through-client-grants)).
+Everything is read-only by default. Writing (mail drafts, replies, forwards and sending, Slack and WhatsApp messages, calendar events and invitations) is only possible through an explicit client grant (see [Read-only by default](#read-only-by-default-writes-through-client-grants)).
 
 - Runs on a home server.
 - Claude Code (or Codex) on the laptop connects once, through Tailscale Serve (HTTPS) or an SSH tunnel.
@@ -43,7 +43,7 @@ Capabilities, per account family:
 | Accounts | Capabilities |
 | --- | --- |
 | Mail (`gmail-…`, `microsoft-…`, `imap-…`) | `read`, `draft`, `send`, `modify` |
-| Google Calendar/Contacts (`gprod-…`) | `calendar_read`, `calendar_write`, `contacts_read` |
+| Google Calendar/Contacts (`gprod-…`) | `calendar_read`, `calendar_write`, `calendar_invite`, `contacts_read` |
 | Slack (`slack-…`) | `slack_read`, `slack_send` |
 | WhatsApp (`whatsapp-…`) | `whatsapp_read`, `whatsapp_send` |
 | Google Drive (`google-…`) | `drive_read`, `drive_write` |
@@ -79,14 +79,18 @@ Perch re-checks the grant before every tool call, so `perch client remove ID` ta
   - threading headers; outcome `accepted`/`rejected`/`indeterminate`, never a blind retry
   - organizing with the `modify` capability and the provider opt-in `--allow-modify` (`gmail.modify`, `Mail.ReadWrite`, IMAP opt-in): list folders and drafts, mark read/unread and starred, move, archive, trash and restore; deleting means trash only, never permanent deletion, emptying the trash, filters or forwarding rules
   - send an existing draft (`mail_send_draft`, idempotent per `requestId`; IMAP sends without the Bcc header and files the draft in Sent)
+  - reply, reply all and forward (`mail_reply`, `mail_forward`; recipients and threading derived from the original, forwards keep the original attachments up to 10 MiB): a draft by default (`draft`), sent directly with `send: true` (`send`, idempotent per `requestId`)
+  - IMAP files every sent message in the Sent folder (off per account with `--no-sent-copy`; not for Gmail/Outlook SMTP, which file it themselves)
 - **Google Calendar/Contacts** (`docs/GOOGLE_PRODUCTIVITY_MILESTONE.md`):
   - its own OAuth grant, services chosen explicitly with `--services calendar,contacts`, `calendar.readonly`/`contacts.readonly` by default, opt-in `calendar.events.owned`
-  - read calendars and events; create private events (idempotent per `requestId`) and change them (`If-Match`), without attendees, invitations or notifications
+  - read calendars and events; create events (idempotent per `requestId`) and change them (`If-Match`): private and silent by default
+  - with `calendar_invite`: guests and invitations (`sendUpdates`), answer invitations (`calendar_respond_event`); also recurring series (RRULE), Google Meet links, any visibility
+  - delete events or whole series permanently (`calendar_delete_event`); single occurrences of a series cannot be changed
   - read contacts page by page (no search)
 - **Slack** (`docs/SLACK_WHATSAPP_MILESTONE.md`; one internal app with a user token per workspace, manifest in `docs/slack-app-manifest.json`):
   - list channels, private channels, DMs and group DMs; read history and threads; Slack search across all workspaces
   - post as the connected user (also in threads), only with a `slack_send` grant, idempotent per `requestId`
-  - read file metadata and content (`slack_get_file`, size-bounded, never truncated); with `slack_send`: add/remove reactions, edit own messages, upload files up to 10 MiB (idempotent per `requestId`). Never deletes messages or files. Needs the current manifest (`reactions:*`, `files:*`): reinstall the app and run `perch slack add` again
+  - read file metadata and content (`slack_get_file`, size-bounded, never truncated); with `slack_send`: add/remove reactions, edit own messages, upload files up to 10 MiB (idempotent per `requestId`). Open DMs and group DMs (`slack_open_conversation`), schedule messages (`slack_schedule_message`, idempotent per `requestId`), list and cancel scheduled ones. Never deletes posted messages or files. Needs the current manifest (`reactions:*`, `files:*`, `im:write`, `mpim:write`): reinstall the app and run `perch slack add` again
 - **WhatsApp** through GOWA (unofficial, self-hosted, localhost only):
   - pair with a pairing code from the CLI; several accounts in separate device slots
   - list chats, read and search messages (search covers the most recent chats); download one message's media with `whatsapp_download_media` (base64, default limit 48 KiB, max 16 MiB, refused rather than truncated)
@@ -237,8 +241,8 @@ The detailed documents are in German.
 - Fewer provider steps: ship a frilabs Microsoft app id as default (no Entra registration per installation); optionally a Google-verified frilabs app
 - Docker/Compose, backup, migrations
 - Rollover for the send ledger (Mail, Slack and WhatsApp share 1000 send records per namespace)
-- Calendar invitations, recurring events, deleting; writing contacts
-- Live tests for Slack and WhatsApp; loading older WhatsApp history
+- Changing single occurrences of a recurring event
+- Live tests for all connectors
 - LinkedIn is out of scope
 
 ## License

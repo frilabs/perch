@@ -1,6 +1,6 @@
 # Spezifikation: Mail antworten/weiterleiten, Kalender-Einladungen und Serien, Slack DMs und geplante Nachrichten
 
-Stand 2026-10-20. **Von Fritz freigegeben** („implementiere mail, kalender ist dann halt löschen und nicht nur papierkorb, einzelne Termine einer serie ändern hat keine Prio. Kontakte braucht der MCP nicht anfassen. slack soll er können. wa ignorieren wir. Implementiere“). Ergänzt `FULL_ACCESS_SPEC.md` §3.3, §3.4 und §3.6. Das Rechtemodell bleibt: Lesen standardmäßig, Schreiben nur mit Client-Grant (`perch client add --full` deckt alles ab, auch die neue Fähigkeit).
+Stand 2026-10-20. **Umgesetzt (mock-getestet, nicht live)** auf `feat/mail-calendar-slack`. **Von Fritz freigegeben** („implementiere mail, kalender ist dann halt löschen und nicht nur papierkorb, einzelne Termine einer serie ändern hat keine Prio. Kontakte braucht der MCP nicht anfassen. slack soll er können. wa ignorieren wir. Implementiere“). Ergänzt `FULL_ACCESS_SPEC.md` §3.3, §3.4 und §3.6. Das Rechtemodell bleibt: Lesen standardmäßig, Schreiben nur mit Client-Grant (`perch client add --full` deckt alles ab, auch die neue Fähigkeit).
 
 ## Entscheidungen
 
