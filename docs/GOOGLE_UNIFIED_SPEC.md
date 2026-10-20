@@ -30,3 +30,12 @@ perch google add --label "Privat"
 - Bestehende einzeln verbundene Konten bleiben gültig und unverändert (keine automatische Migration); sie erscheinen im Status als eigene Einträge.
 - Store-Schema abwärtskompatibel (neue optionale Felder), Tests für Gruppe anlegen, Teil-Zustimmung, Refresh einmal pro Gruppe, Entfernen ganz/teilweise, Aktualisieren ohne Dubletten, alte Befehle weiterhin, Grants auf Gruppen-Konten.
 - Doku: README (Provider-Vorbereitung, Onboarding, Fähigkeiten), `SETUP.md` §3/§4.
+
+## Nachtrag 2026-10-21: ein Google-Eintrag im Status, Rechte über eigenen Befehl
+
+**Von Fritz freigegeben** („Warum ist bei perch status noch immer drive/calendar/gmail einzeln … Wenn man für verschiedene Sachen separat Write/Read festlegen soll, dann soll es dafür einen separaten Command geben“).
+
+- `perch status` (Terminal, `--plain`, `--json`-Felder unverändert): Google erscheint **als ein Dienst**. Nicht verbunden: eine Zeile „☐ Google (Drive, Gmail, Kalender, Kontakte)“ mit `perch google add --label NAME`. Verbunden: pro Google-Konto ein Block, darunter die Dienste mit ihren Rechten (☑/☐).
+- Neuer Befehl **`perch google access ID`** (Gruppen- oder Mitglieds-Id): zeigt pro Dienst die aktuellen Rechte und ändert sie, z. B. `perch google access ggroup-… --service gmail --write`, `--service drive --read-only`, `--service calendar --write`, oder interaktiv (Dienst wählen, r/w). Fehlt ein Scope, startet er den Login für dieselbe Gruppe mit den nötigen Scopes (gleiche Ids, keine Dubletten, Sub-Prüfung wie beim Re-Add); Entziehen braucht keinen Login (Perch schaltet die Fähigkeit lokal ab und nimmt die Scopes aus dem Mitglied). Ein Dienst hinzufügen: `perch google access ggroup-… --add gmail` (Login wie oben); entfernen: wie bisher `perch google remove ggroup-… --service gmail`.
+- `perch google add` fragt Dienste und r/w nur noch einmal für alle; die `--allow-*`-Feinflags bleiben als Option, die Hilfe verweist aber auf `perch google access`.
+- Alle ☐-Hinweise im Status für Google-Mitglieder verweisen auf `perch google access …` statt auf `add --services …`. Separat verbundene Altkonten (ohne Gruppe) bleiben eigene Einträge mit ihren bisherigen Hinweisen.
