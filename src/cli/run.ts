@@ -42,6 +42,7 @@ import { ensurePrivateDir, pathExists, readPrivateFile, writePrivateFileAtomic, 
 import { CredentialStore, initStore, type ImapAccount, type StoreData } from '../store/credentialStore.js';
 import { createFetchTransport, Upstream, type UpstreamTransport } from '../upstream.js';
 import { collectStatus, failedChecks, formatStatusText } from '../status/status.js';
+import { accountCapabilities, formatStatusTerminal } from '../status/terminal.js';
 import { startPublicAccess } from '../access/runtime.js';
 import { cmdOauth, cmdPublic } from './oauth.js';
 import { cmdLuma, lumaMcpFor } from './luma.js';
@@ -69,6 +70,10 @@ export interface CliIo {
   sleep?: (ms: number) => Promise<void>;
   /** Tests inject MOCK platform, download, systemctl and pins for `perch whatsapp install`; production uses the real ones. */
   whatsappInstall?: Partial<InstallDeps>;
+  /** stdout is a terminal (perch status: colour unless NO_COLOR); tests inject it, production passes process.stdout.isTTY. */
+  stdoutIsTTY?: boolean;
+  /** Terminal width for perch status; undefined when piped. */
+  stdoutColumns?: number;
 }
 
 const USAGE = `perch ${PERCH_VERSION} - Google Drive + Notion + mail + Calendar/Contacts + Slack + WhatsApp MCP server (read-only unless a client grant allows more)
@@ -90,8 +95,9 @@ Usage:
   perch luma list | remove ID [--revoke] | tools ID [--accept]   tools: approved vs live tool schemas
   perch oauth local-page enable | disable       local pairing page /local/pair with its own password
   perch accounts                               list all connected accounts
-  perch status [--no-check] [--json]           overview with a live check per account
-                                               (exit code 1 if a check failed); the same page: GET /status on serve --http
+  perch status [--no-check] [--json] [--plain] overview with a live check per account, capabilities and the commands
+                                               that enable missing ones (exit code 1 if a check failed); --plain: the
+                                               previous one-line-per-account text; the same page: GET /status on serve --http
   perch google add --label NAME [--allow-write] [--port N] [--timeout SECONDS] [--login-hint EMAIL]
   perch google list | remove ID [--revoke]
   perch notion add --label NAME                PAT is read via a masked terminal prompt
@@ -715,7 +721,12 @@ async function cmdStatus(config: PerchConfig, io: CliIo, values: Record<string, 
   const store = await openStore(config);
   const ctx = createPerchContext(store, io.transport ?? createFetchTransport(), undefined, lumaMcpFor(io));
   const report = await collectStatus(ctx, { live: values['no-check'] !== true, ...(io.imapVerify ? { imapVerify: io.imapVerify } : {}) });
-  io.stdout(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : formatStatusText(report));
+  if (values.json === true) io.stdout(`${JSON.stringify(report, null, 2)}\n`);
+  else if (values.plain === true) io.stdout(formatStatusText(report));
+  else {
+    const capabilities = accountCapabilities(await store.read());
+    io.stdout(formatStatusTerminal(report, capabilities, { tty: io.stdoutIsTTY === true, ...(io.stdoutColumns ? { columns: io.stdoutColumns } : {}), env: io.env }));
+  }
   return failedChecks(report) ? 1 : 0;
 }
 
@@ -931,6 +942,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         all: { type: 'boolean' },
         accept: { type: 'boolean' },
         json: { type: 'boolean' },
+        plain: { type: 'boolean' },
         yes: { type: 'boolean' },
         dir: { type: 'string' },
         help: { type: 'boolean', short: 'h' },

@@ -276,7 +276,7 @@ describe('tools and rights', () => {
 
   it('status shows Luma accounts with a live check', async () => {
     const x = io();
-    await runCli(['status'], x);
+    await runCli(['status', '--plain'], x);
     expect(x.out()).toMatch(/Luma\n {2}✓ luma-[a-f0-9]{8} {2}"frilabs" {2}operator@example\.test/);
   });
 });
@@ -365,7 +365,7 @@ describe('regressions from the independent review', () => {
   it('perch status reports changed tools as an error', async () => {
     luma.tools = luma.tools.map((t) => (t.name === 'get_event' ? { ...t, inputSchema: { ...t.inputSchema, required: [] } } : t));
     const x = io();
-    await runCli(['status'], x);
+    await runCli(['status', '--plain'], x);
     expect(x.out()).toMatch(/Luma changed 1 approved tool\(s\) \(get_event\)/);
   });
 

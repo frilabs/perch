@@ -645,7 +645,11 @@ Perch löscht nie endgültig: Drive, Notion und Mail verschieben nur in den Papi
 perch status              # alle Konten mit Live-Check, Clients, Sende-Speicher, Audit
 perch status --no-check   # ohne Anfragen an die Anbieter
 perch status --json       # maschinenlesbar
+perch status --plain      # bisherige schlichte Ausgabe (eine Zeile pro Konto)
 ```
+
+- **Darstellung:** Abschnitte pro Dienst mit Checkboxen. Verbundene Konten stehen als `☑` (oder `✗` bei fehlgeschlagenem Check) mit Label, Adresse und Ergebnis da. Darunter die **Fähigkeiten** des Kontos: aktivierte als `☑` (z. B. lesen, Entwürfe, senden), mögliche, aber nicht aktivierte als `☐` mit dem genauen Befehl, der sie freischaltet (Mail/Drive/Kalender: Konto entfernen und mit der zusätzlichen Option neu verbinden, bestehende Optionen bleiben im Befehl; Slack: App mit aktuellem Manifest neu installieren). Neu verbinden vergibt eine neue Konto-ID; Clients mit Kontoliste bekommen sie nicht automatisch (Hinweis in der Ausgabe). Nicht verbundene Dienste stehen als `☐` mit `perch … add`-Befehl. Danach Zugänge (Clients, öffentlicher Zugang, WhatsApp-Bridge), Sende-Speicher als Balken, Audit-Zähler, die Onboarding-Checkliste (`Onboarding N/4`) und das Gesamtergebnis.
+- **Farbe** nur für Status (grün ok, rot Fehler, gelb Hinweis) und nur im Terminal; mit `NO_COLOR=1` oder umgeleiteter Ausgabe ohne Farbe, die Checkboxen bleiben. Die Breite folgt dem Terminal (mindestens 60 Zeichen), lange Werte werden gekürzt, Befehle nie.
 
 - Pro Konto prüft Perch **nur lesend**, ob der Zugang noch funktioniert: Drive `about`, Gmail-Profil, Graph `/me`, Google `userinfo`, Notion `users/me`, Slack `auth.test`, IMAP-/SMTP-Login, GOWA-Gerätestatus.
 - Der Exit-Code ist 1, sobald ein Check fehlschlägt. Damit eignet sich der Befehl auch für Monitoring, z. B. per Cron.
