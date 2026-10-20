@@ -10,6 +10,8 @@ runCli(process.argv.slice(2), {
   stderr: (s) => process.stderr.write(s),
   readSecret: readSecretFromTty,
   readLine: readLineFromTty,
+  stdoutIsTTY: process.stdout.isTTY === true,
+  ...(process.stdout.columns ? { stdoutColumns: process.stdout.columns } : {}),
 }).then(
   (code) => process.exit(code),
   () => {

@@ -154,9 +154,9 @@ describe('perch status (CLI) [MOCK upstreams]', () => {
     };
   }
 
-  it('prints the overview and exits 1 when a check failed', async () => {
+  it('prints the plain overview with --plain and exits 1 when a check failed', async () => {
     const { io: cio, out } = cli();
-    expect(await runCli(['status'], cio)).toBe(1);
+    expect(await runCli(['status', '--plain'], cio)).toBe(1);
     const text = out.join('');
     expect(text).toMatch(/✓ notion-0000000a/);
     expect(text).toMatch(/✗ slack-[a-f0-9]{8}  "Old workspace".*ERROR: Slack refused the token \(invalid_auth\)/);
@@ -164,9 +164,36 @@ describe('perch status (CLI) [MOCK upstreams]', () => {
     expect(text).toMatch(/1 check\(s\) failed/);
   });
 
+  it('renders the terminal overview by default: Unicode checkboxes, no ANSI when piped, colour on a TTY', async () => {
+    const piped = cli();
+    expect(await runCli(['status'], piped.io)).toBe(1);
+    const text = piped.out.join('');
+    expect(text).not.toMatch(/\u001b\[/);
+    expect(text).toMatch(/── Notion ─+\n☑ /);
+    expect(text).toMatch(/✗ Old workspace .*FAILED\n {2}slack-[a-f0-9]{8} · slack · since \d{4}-\d{2}-\d{2}\n {2}Slack refused the token \(invalid_auth\)/);
+    expect(text).toMatch(/── Not connected ─+\n☐ Luma +events and guests/);
+    expect(text).toMatch(/── Onboarding \d\/4/);
+    expect(text.trimEnd().split('\n').pop()).toBe('✗ 1 check(s) failed');
+    for (const secret of await secretsOf(rootStore)) expect(text).not.toContain(secret);
+
+    const tty = cli();
+    tty.io.stdoutIsTTY = true;
+    tty.io.stdoutColumns = 100;
+    expect(await runCli(['status', '--no-check'], tty.io)).toBe(0);
+    expect(tty.out.join('')).toContain('\u001b[32m☑\u001b[0m');
+    expect(tty.out.join('').split('\n')[1]).toBe('═'.repeat(100));
+
+    const noColor = cli();
+    noColor.io.stdoutIsTTY = true;
+    noColor.io.env.NO_COLOR = '1';
+    await runCli(['status', '--no-check'], noColor.io);
+    expect(noColor.out.join('')).not.toMatch(/\u001b\[/);
+    expect(noColor.out.join('')).toContain('☑');
+  });
+
   it('--no-check exits 0 and --json is machine-readable', async () => {
     const a = cli();
-    expect(await runCli(['status', '--no-check'], a.io)).toBe(0);
+    expect(await runCli(['status', '--no-check', '--plain'], a.io)).toBe(0);
     expect(a.out.join('')).toMatch(/live checks skipped/);
     const b = cli();
     await runCli(['status', '--json', '--no-check'], b.io);
