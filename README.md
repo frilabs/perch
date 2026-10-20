@@ -104,95 +104,88 @@ Perch re-checks the grant before every tool call, so `perch client remove ID` ta
   - allowlist of upstream endpoints; write endpoints only for the matching grant
   - fixed upstream origins, sanitised error messages
 
-## Quick start
+## Onboarding
+
+### Who does what
+
+- **The operator** (whoever runs the server) sets Perch up **once per installation**: registers Perch at the providers where they require it (below), connects the accounts and starts the server.
+- **Every further Claude or Codex account** then needs only one command on the server and works with all connected accounts, also ones added later.
+
+### 1. Prepare the providers (once per installation, only for the services you want)
+
+Perch is self-hosted, so there is no central Perch app that Google or Microsoft already know. Where a provider only lets registered apps sign in, you register your own "Perch" there once.
+
+| Service | What to do once | Time |
+| --- | --- | --- |
+| **GMX / IMAP** | GMX webmail → settings: allow POP3/IMAP; with two-factor sign-in create an app password | 2 min |
+| **Luma** | nothing (sign-in in the browser; Perch's client document is served at `https://frilabs.dev/perch/luma-client.json`) | – |
+| **Notion** (per workspace) | [notion.so/my-integrations](https://www.notion.so/my-integrations): new internal integration "Perch" with *Read/Update/Insert content* and *Read/Insert comments*; copy the token; in Notion share the pages with it (••• → Connections → Perch) | 5 min |
+| **Slack** (per workspace) | `perch slack manifest` → [api.slack.com/apps](https://api.slack.com/apps) → *Create New App* → *From a manifest* → paste → *Install to Workspace* (some workspaces need an admin's approval) → copy the **User OAuth Token** (`xoxp-…`) | 5 min |
+| **Google** (Drive, Gmail, Calendar, Contacts; once for all Google accounts) | [Google Cloud Console](https://console.cloud.google.com): new project → enable **Drive, Gmail, Calendar and People API** → OAuth consent screen *External*, status *Testing*, add yourself as **test user** → Credentials → OAuth client ID type **Desktop app** → download the JSON → on the server `install -m 600 client.json ~/.config/perch/google-client.json` and in `.env` `PERCH_GOOGLE_CLIENT_FILE=/home/USER/.config/perch/google-client.json` | 15 min |
+| **Outlook / Microsoft 365** | [Entra admin center](https://entra.microsoft.com) → App registrations → New: "Perch", include personal Microsoft accounts, platform *Mobile and desktop applications* with redirect `http://localhost`, no secret → API permissions (delegated): `User.Read`, `Mail.Read`, `Mail.ReadWrite`, `Mail.Send` → copy the *Application (client) ID* into `.env` as `PERCH_MICROSOFT_CLIENT_ID` | 10 min |
+| **WhatsApp** (unofficial) | install the GOWA bridge on the server as in `docs/SETUP.md` §4f (localhost only, basic auth), then once `perch whatsapp instance set --url http://127.0.0.1:3000` | 15 min |
+
+Notes: Google sign-ins of a project in *Testing* expire after 7 days (reconnect then). WhatsApp via GOWA is an unofficial linked-device integration and can get the account restricted, more likely when sending.
+
+### 2. Install and connect the accounts (server)
 
 ```bash
-git clone https://github.com/frilabs/perch.git perch && cd perch
-npm ci && npm run build
-node dist/cli.js setup        # guided: init, connect each service (read only or read + write), one full-access client
-node dist/cli.js serve --http # 127.0.0.1:8765
-```
-
-`perch setup` ends with the ready-to-paste `claude mcp add` command for the laptop. Every further Claude/Codex account needs one command on the server: `perch client add --label NAME --full` (Tailnet) or `perch oauth pair` and `f` (claude.ai over the internet).
-
-The full guide is [`docs/SETUP.md`](docs/SETUP.md) (German): Google Cloud setup, Slack and GOWA, Tailscale or SSH, Claude Code and Codex configuration, revocation and limits.
-
-## Live test, step by step
-
-Perch has only been tested against mocks. This is the first live run on the home server. Work top to bottom; after every connector run `perch status`, and note anything that fails (it ends up in `docs/PHASE1_REMAINING.md` §1). Details for every step: [`docs/SETUP.md`](docs/SETUP.md).
-
-**You need:** a Linux server with Node.js ≥ 22.12 and Git, Tailscale on server and laptop, SSH from the laptop to the server (below called `homeserver`), Claude Code on the laptop.
-
-### 1. Install on the server
-
-```bash
-gh auth login                                   # or a read-only deploy key: the repository is private
+gh auth login                                   # the repository is private
 git clone https://github.com/frilabs/perch.git ~/perch && cd ~/perch
-npm ci && npm run build && npm run check        # must be green before you connect real accounts
-cp .env.example .env && chmod 600 .env          # replace USER with your user name
+npm ci && npm run build
+cp .env.example .env && chmod 600 .env          # replace USER; add the values from step 1
 echo "alias perch='node --env-file=$HOME/perch/.env $HOME/perch/dist/cli.js'" >> ~/.bashrc && source ~/.bashrc
-perch init
-perch status --no-check                         # empty overview, no errors
+perch setup
 ```
 
-Back up `~/.config/perch/store.key` **now**, separately from the data directory. Without it nothing can be decrypted.
+`perch setup` creates the key, store and token, then asks service by service:
 
-### 2. Connect accounts (one at a time)
+- *Connect …?* → a label (e.g. Private, Work) → the login: Google, Outlook and Luma open a browser page; Notion and Slack tokens and the IMAP password are asked hidden; WhatsApp shows a pairing code for the phone (WhatsApp → Linked devices → Link with phone number).
+- *Access: read only, or read + write?* (Google, Gmail, Calendar, Outlook, IMAP) → choose `w` where Claude should be able to change things.
+- At the end: *create a client with full access?* → it prints the ready-to-paste `claude mcp add` command.
 
-Easiest: `perch setup` asks service by service and runs the commands below for you. Each `add` asks *"read only or read + write?"*; choose `w` where Claude should be able to change things.
+If the browser runs on your laptop, open a tunnel there before a browser login and keep it open: `ssh -N -L 8766:127.0.0.1:8766 <server>` (Luma: port 8768).
 
-Browser logins redirect to `127.0.0.1` on the server. If the browser runs on the laptop, open a tunnel first and keep it open during the login: `ssh -N -L 8766:127.0.0.1:8766 homeserver` (Luma: port 8768).
-
-| # | Connector | Prepare | Command on the server |
-| --- | --- | --- | --- |
-| a | Notion | create a personal access token per workspace and share the pages with it | `perch notion add --label "Personal"` |
-| b | Google Drive | Google Cloud project: enable Drive, Gmail, Calendar and People APIs; consent screen "Testing" with yourself as test user and the scopes from SETUP §3–4b; OAuth client **Desktop app** → `~/.config/perch/google-client.json` (`chmod 600`) | `perch google add --label "Private" --port 8766` |
-| c | Gmail | same Google client | `perch gmail add --label "Gmail" --port 8766` (later `--allow-send` for the send test) |
-| d | Calendar/Contacts | same Google client | `perch google-productivity add --label "Private" --services calendar,contacts --port 8766` |
-| e | Outlook | Entra app registration, public client, redirect `http://localhost`, `User.Read` + `Mail.Read`; set `PERCH_MICROSOFT_CLIENT_ID` in `.env` | `perch microsoft add --label "Outlook" --port 8766` |
-| f | GMX | GMX webmail: allow IMAP; app password if 2FA is on | `perch imap add --label "GMX" --email you@gmx.at` |
-| g | Slack | `perch slack manifest`, create the app per workspace at api.slack.com/apps, install, copy the **User OAuth Token** | `perch slack add --label "Workspace"` |
-| h | WhatsApp | install GOWA as in SETUP §4f (localhost only, basic auth) | `perch whatsapp instance set --url http://127.0.0.1:3000`, then `perch whatsapp add --label "Private" --phone +43…` and enter the pairing code on the phone |
-| i | Luma | check `curl -s https://frilabs.dev/perch/luma-client.json` returns the document | `perch luma add --label "Luma" --port 8768`, then `perch luma tools <id>` |
-
-Google refresh tokens expire after 7 days while the consent screen is in "Testing"; reconnect then.
+**Back up `~/.config/perch/store.key` now**, separately from the data directory. Without it nothing can be decrypted.
 
 ### 3. Run the server
 
 ```bash
-loginctl enable-linger "$USER"                  # keep user services running after logout
-# ~/.config/systemd/user/perch.service as in SETUP §6, ExecStart: node --env-file=%h/perch/.env %h/perch/dist/cli.js serve --http
+loginctl enable-linger "$USER"
+# ~/.config/systemd/user/perch.service as in docs/SETUP.md §6, ExecStart: node --env-file=%h/perch/.env %h/perch/dist/cli.js serve --http
 systemctl --user daemon-reload && systemctl --user enable --now perch
 sudo tailscale serve --bg http://127.0.0.1:8765
-# add the MagicDNS name to .env: PERCH_ALLOWED_HOSTS=homeserver.<tailnet>.ts.net, then restart the service
-perch status                                    # every account "ok"
+# in .env: PERCH_ALLOWED_HOSTS=<server>.<tailnet>.ts.net, then: systemctl --user restart perch
+perch status                                    # every account with a live check
 ```
 
-Open `https://homeserver.<tailnet>.ts.net/status` in the browser (password: the content of `~/.config/perch/http-token`).
+### 4. Connect Claude Code or Codex (laptop)
 
-### 4. Connect Claude Code on the laptop
+Paste the command `perch setup` printed (it reads the token over SSH, never shows it). Claude can then read and write in every connected account. Codex: see `docs/SETUP.md` §6.
 
-With the full-access client from `perch setup` (or `perch client add --label "Claude Code" --full`), use the command it printed. Read-only instead, with the global token:
+### 5. Every further Claude or Codex account
 
-```bash
-TOKEN="$(ssh homeserver 'cat ~/.config/perch/http-token')"
-claude mcp add --scope user --transport http perch https://homeserver.<tailnet>.ts.net/mcp --header "Authorization: Bearer ${TOKEN}"
-unset TOKEN; chmod 600 ~/.claude.json
-```
+- **In the Tailnet:** on the server `perch client add --label "Claude account 2" --full`, then paste the printed command on that device.
+- **claude.ai over the internet** (web and phone): once set up public access (`docs/SETUP.md` §6a: Funnel, `perch public setup`); then per account `perch oauth pair` on the server, add the connector in claude.ai, enter pairing code, Google sign-in and Perch code in the browser, confirm with `y` in the terminal and choose `f` (full).
 
-Try in Claude Code: "list my Perch accounts", "search Drive for X", "latest mails about Y", "what was said about Z in Slack and WhatsApp", "my events next week", "my Luma events".
+### 6. Later
 
-### 5. Test writing (only to yourself)
+- Another account: `perch <service> add --label …` or `perch setup` again. Full-access clients see it at once.
+- Overview: `perch status` or `https://<server>.<tailnet>.ts.net/status` (browser password: content of `~/.config/perch/http-token`).
+- Take access away: `perch client remove <client-…>`, `perch oauth revoke <oc-…>`, everything public at once: `perch public off`.
+- A client that may only read or only some accounts: `perch client add --allow … --account …`, or use the global token (read-only).
 
-With the full-access client from step 4: send one mail to yourself, post one Slack message in a private test channel, and repeat the same request with the same `requestId`: it must answer `replayed: true` and send nothing. Check `perch audit list`.
+Full details in [`docs/SETUP.md`](docs/SETUP.md) (German).
 
-### 6. Optional: public access (claude.ai on web and phone)
+## Live test, step by step
 
-Only after steps 1–5 work, and read the known gaps in `docs/PHASE1_REMAINING.md` §3 first. Steps: SETUP §6a.2 (Funnel, Google **Web application** client, `perch public setup`), restart with `serve --http --public`, then `perch oauth pair` and add `https://homeserver.<tailnet>.ts.net/mcp` as a custom connector in claude.ai. Kill switch: `perch public off`.
+Perch has only been tested against mocks; the first real run follows the onboarding above. Before connecting real accounts run `npm run check` (must be green). After every connector run `perch status` and note what fails (it ends up in `docs/PHASE1_REMAINING.md` §1).
 
-### 7. Report back
-
-For each connector: works / fails with the message from `perch status`. Plus the live questions in `docs/PHASE1_REMAINING.md` §1 (Luma registration type, WhatsApp stability, claude.ai pairing, Funnel client IP).
+1. **Onboarding steps 1–4** with one account per service you use.
+2. **Read** in Claude Code: "list my Perch accounts", "search Drive for X", "latest mails about Y", "what was said about Z in Slack and WhatsApp", "my events next week", "my Luma events".
+3. **Write, only to yourself:** send one mail to yourself, post in a private Slack test channel, create a test Notion page and a test Drive file, move the test mail to the trash. Repeat one send with the same `requestId`: it must answer `replayed: true` and send nothing. Check `perch audit list`.
+4. **Optional, public access:** only after 1–3 work; read the known gaps in `docs/PHASE1_REMAINING.md` §3 first. Kill switch: `perch public off`.
+5. **Report back:** per connector "works" or the message from `perch status`, plus the live questions in `docs/PHASE1_REMAINING.md` §1.
 
 ## Development
 
@@ -241,6 +234,7 @@ The detailed documents are in German.
 
 ## Roadmap
 
+- Fewer provider steps: ship a frilabs Microsoft app id as default (no Entra registration per installation); optionally a Google-verified frilabs app
 - Docker/Compose, backup, migrations
 - Rollover for the send ledger (Mail, Slack and WhatsApp share 1000 send records per namespace)
 - Calendar invitations, recurring events, deleting; writing contacts
