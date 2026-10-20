@@ -21,7 +21,10 @@ export interface PerchConfig {
   httpPort: number;
   allowedHosts: string[];
   allowedOrigins: string[];
+  /** PERCH_GOOGLE_CLIENT_FILE, if set. */
   googleClientFile?: string;
+  /** Where `perch google client setup` stores the client without PERCH_GOOGLE_CLIENT_FILE (also read from there). */
+  googleClientDefaultFile: string;
   /** Application (client) ID of the Entra app registration (public client; not a secret). */
   microsoftClientId?: string;
   /** Entra tenant for sign-in: common (default), consumers, organizations, a tenant GUID or domain. */
@@ -87,6 +90,8 @@ export function resolveConfig(env: Record<string, string | undefined>): PerchCon
     allowedHosts: list(env.PERCH_ALLOWED_HOSTS),
     allowedOrigins: list(env.PERCH_ALLOWED_ORIGINS),
     ...(env.PERCH_GOOGLE_CLIENT_FILE ? { googleClientFile: path.resolve(env.PERCH_GOOGLE_CLIENT_FILE) } : {}),
+    // HOME from the given environment (not only the process's) so tests never touch the operator's real file.
+    googleClientDefaultFile: path.resolve(env.XDG_CONFIG_HOME || path.join(env.HOME || home, '.config'), 'perch', 'google-client.json'),
     ...(env.PERCH_MICROSOFT_CLIENT_ID ? { microsoftClientId: env.PERCH_MICROSOFT_CLIENT_ID.trim() } : {}),
     microsoftTenant: env.PERCH_MICROSOFT_TENANT?.trim() || 'common',
     ...(env.PERCH_CLIENT_TOKEN_FILE ? { clientTokenFile: path.resolve(env.PERCH_CLIENT_TOKEN_FILE) } : {}),

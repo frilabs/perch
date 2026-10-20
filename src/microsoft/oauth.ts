@@ -1,5 +1,5 @@
 import { PerchError } from '../errors.js';
-import { runPkceLoopback } from '../oauth/loopback.js';
+import { runPkceLoopback, type PasteRedirect } from '../oauth/loopback.js';
 import type { TokenGrantResponse } from '../oauth/tokenProvider.js';
 import type { MicrosoftAccount } from '../store/credentialStore.js';
 import type { Upstream } from '../upstream.js';
@@ -96,6 +96,8 @@ export interface MicrosoftAuthorizationOptions {
   redirectHost?: 'localhost' | '127.0.0.1';
   loginHint?: string;
   onAuthUrl: (url: string) => void;
+  /** Paste-the-redirect-address input racing the callback (login without a tunnel). */
+  paste?: PasteRedirect;
 }
 
 export async function runMicrosoftAuthorization(opts: MicrosoftAuthorizationOptions): Promise<MicrosoftAuthorizationResult> {
@@ -117,6 +119,7 @@ export async function runMicrosoftAuthorization(opts: MicrosoftAuthorizationOpti
     ...(opts.port !== undefined ? { port: opts.port } : {}),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     onAuthUrl: opts.onAuthUrl,
+    ...(opts.paste ? { paste: opts.paste } : {}),
     exchange: async (code, verifier, redirectUri) => {
       const tok = await opts.upstream.json<TokenGrantResponse>('msauth', {
         method: 'POST',

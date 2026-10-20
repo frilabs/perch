@@ -7,6 +7,21 @@ export const DEFAULT_AUTH_TIMEOUT_MS = 300_000;
 /** Upper bound (also keeps setTimeout far below its 2^31 ms overflow). */
 export const MAX_AUTH_TIMEOUT_MS = 3_600_000;
 
+/**
+ * Login without a tunnel (docs/GUIDED_PROVIDER_SETUP_SPEC.md §2): next to the loopback callback, the operator may
+ * paste the address the browser could not open (the redirect to 127.0.0.1 on the server). Whichever arrives
+ * first wins; the other is cancelled through `signal`.
+ */
+export interface PasteRedirect {
+  /**
+   * Reads one pasted address. Resolves undefined when no input is possible (no terminal, end of input): the flow
+   * then only waits for the callback. Must stop reading (and release stdin) as soon as `signal` aborts.
+   */
+  read: (signal: AbortSignal) => Promise<string | undefined>;
+  /** A pasted address was refused (wrong host, port, path or state); the flow keeps waiting. */
+  onRejected?: (reason: string) => void;
+}
+
 export interface PkceLoopbackOptions<T> {
   /** Name used in messages, e.g. "Google" or "Microsoft". */
   provider: string;
@@ -26,6 +41,8 @@ export interface PkceLoopbackOptions<T> {
    * (e.g. a client id registered for exactly this redirect URI).
    */
   prepare?: (redirectUri: string) => Promise<Record<string, string>>;
+  /** Optional paste-the-redirect-address input that races the callback. */
+  paste?: PasteRedirect;
   /** Exchanges the code (with the PKCE verifier) at the fixed token endpoint. */
   exchange: (code: string, verifier: string, redirectUri: string) => Promise<T>;
 }
@@ -36,6 +53,45 @@ export function safeEqual(a: string, b: string): boolean {
   const ha = createHash('sha256').update(a).digest();
   const hb = createHash('sha256').update(b).digest();
   return timingSafeEqual(ha, hb) && a.length === b.length;
+}
+
+export const LOOPBACK_HOSTS: readonly string[] = ['127.0.0.1', 'localhost', '[::1]'];
+/** Upper bound for a pasted address (an authorization response is far below). */
+export const MAX_PASTED_URL_LENGTH = 8192;
+
+const providerError = (provider: string, error: string) =>
+  new PerchError(`${provider} authorization failed: ${/^[a-z_]{1,64}$/.test(error) ? error : 'unknown_error'}`, 'oauth_denied');
+
+/**
+ * Checks a pasted redirect address as strictly as the callback: http on a loopback host with the expected port and
+ * path, matching state (constant time). Returns the code; `error=` (with the right state) is a denial. Messages
+ * never repeat the address (it carries the authorization code).
+ */
+export function parsePastedRedirect(raw: string, expected: { port: number; callbackPath: string; state: string; provider: string }): string {
+  const bad = (why: string) => new PerchError(`That address was not accepted: ${why}`, 'paste_rejected');
+  let text = raw.trim();
+  if (!text) throw bad('it is empty');
+  if (text.length > MAX_PASTED_URL_LENGTH) throw bad('it is too long');
+  // Some browsers hide the scheme in the address bar; copying usually keeps it, but tolerate its absence.
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) text = `http://${text}`;
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    throw bad('it is not a web address');
+  }
+  if (url.protocol !== 'http:') throw bad('it must start with http://');
+  if (!LOOPBACK_HOSTS.includes(url.hostname)) throw bad('it must point to 127.0.0.1 or localhost');
+  if (url.username || url.password) throw bad('it must not contain a user name');
+  if (url.port !== String(expected.port)) throw bad(`it must use port ${expected.port}`);
+  if (url.pathname !== expected.callbackPath) throw bad(`its path must be ${expected.callbackPath}`);
+  const gotState = url.searchParams.get('state');
+  if (!gotState || !safeEqual(gotState, expected.state)) throw bad('it belongs to a different or older login attempt (state does not match)');
+  const error = url.searchParams.get('error');
+  if (error) throw providerError(expected.provider, error);
+  const code = url.searchParams.get('code');
+  if (!code) throw bad('it contains no authorization code');
+  return code;
 }
 
 /**
@@ -71,8 +127,7 @@ export async function runPkceLoopback<T>(opts: PkceLoopbackOptions<T>): Promise<
     if (error) {
       done = true;
       reply(400, 'Authorization was not granted. You can close this window.');
-      const code = /^[a-z_]{1,64}$/.test(error) ? error : 'unknown_error';
-      return settle.reject(new PerchError(`${opts.provider} authorization failed: ${code}`, 'oauth_denied'));
+      return settle.reject(providerError(opts.provider, error));
     }
     const code = url.searchParams.get('code');
     if (!code) return reply(400, 'Missing code.');
@@ -85,7 +140,42 @@ export async function runPkceLoopback<T>(opts: PkceLoopbackOptions<T>): Promise<
     server.once('error', () => reject(new PerchError('Could not open the OAuth callback port', 'oauth_port')));
     server.listen(opts.port ?? 0, '127.0.0.1', resolve);
   });
-  const redirectUri = `http://${opts.redirectHost}:${(server.address() as AddressInfo).port}${opts.callbackPath}`;
+  const port = (server.address() as AddressInfo).port;
+  const redirectUri = `http://${opts.redirectHost}:${port}${opts.callbackPath}`;
+  const pasteAbort = new AbortController();
+  // As soon as one input decided (code, denial or timeout), stop reading the terminal.
+  codePromise.then(
+    () => pasteAbort.abort(),
+    () => pasteAbort.abort(),
+  );
+  async function readPasted(paste: PasteRedirect): Promise<void> {
+    try {
+      while (!done) {
+        const raw = await paste.read(pasteAbort.signal);
+        if (raw === undefined || done) return;
+        try {
+          const code = parsePastedRedirect(raw, { port, callbackPath: opts.callbackPath, state, provider: opts.provider });
+          done = true;
+          settle.resolve(code);
+          return;
+        } catch (err) {
+          if (err instanceof PerchError && err.code === 'paste_rejected') {
+            paste.onRejected?.(err.message);
+            continue;
+          }
+          done = true;
+          settle.reject(err as Error);
+          return;
+        }
+      }
+    } catch (err) {
+      // The operator aborted the prompt (Ctrl+C) or it failed: end the whole flow, unless it already finished.
+      if (done) return;
+      done = true;
+      settle.reject(err instanceof PerchError ? err : new PerchError('Reading the pasted address failed', 'aborted'));
+    }
+  }
+
   const timer = setTimeout(() => {
     done = true;
     settle.reject(new PerchError(`Timed out waiting for the ${opts.provider} authorization`, 'oauth_timeout'));
@@ -104,9 +194,13 @@ export async function runPkceLoopback<T>(opts: PkceLoopbackOptions<T>): Promise<
       code_challenge_method: 'S256',
     }).toString();
     opts.onAuthUrl(auth.toString());
+    if (opts.paste) void readPasted(opts.paste);
     const code = await codePromise;
     return await opts.exchange(code, verifier, redirectUri);
   } finally {
+    // Whichever input won, the other one stops: no more reading from the terminal, the server closes.
+    done = true;
+    pasteAbort.abort();
     clearTimeout(timer);
     server.closeAllConnections();
     await new Promise((r) => server.close(r));

@@ -10,6 +10,7 @@ import { PerchError, safeMessage } from '../errors.js';
 import { removeGoogleAccount } from '../google/accounts.js';
 import {
   GOOGLE_SERVICE_TITLES,
+  googleGroupScopes,
   parseGoogleServices,
   registerGoogleGroup,
   removeGoogleGroup,
@@ -18,7 +19,7 @@ import {
   type GoogleService,
 } from '../google/group.js';
 import { findGroup, grantStillValidHint, groupMembers, type SharedGrantHolder } from '../google/groupStore.js';
-import { DEFAULT_AUTH_TIMEOUT_MS, DRIVE_SCOPE, MAX_AUTH_TIMEOUT_MS, parseClientFile, runLoopbackAuthorization } from '../google/oauth.js';
+import { DEFAULT_AUTH_TIMEOUT_MS, DRIVE_SCOPE, MAX_AUTH_TIMEOUT_MS, runLoopbackAuthorization } from '../google/oauth.js';
 import { CALENDAR_EVENTS_OWNED_SCOPE } from '../google/productivity.js';
 import {
   parseServices,
@@ -58,6 +59,8 @@ import { accountCapabilities, formatStatusTerminal } from '../status/terminal.js
 import { startPublicAccess } from '../access/runtime.js';
 import { cmdOauth, cmdPublic } from './oauth.js';
 import { cmdLuma, lumaMcpFor } from './luma.js';
+import { cmdGoogleClient, googleRequestFromFlags, loadGoogleClient } from './googleClient.js';
+import { loginPrompts } from './loginPrompt.js';
 import type { FetchLike } from '../luma/client.js';
 import { PERCH_VERSION } from '../version.js';
 import { shellQuote } from '../status/terminal.js';
@@ -73,6 +76,10 @@ export interface CliIo {
   readSecret: (prompt: string) => Promise<string>;
   /** Visible one-line input (confirmations, one-time codes); TTY only in production. */
   readLine?: (prompt: string) => Promise<string>;
+  /** Hidden, multi-line tolerant paste of a secret JSON document (Google client file); TTY only in production. */
+  readSecretJson?: (prompt: string, maxBytes: number) => Promise<string>;
+  /** Hidden, cancellable paste of the OAuth redirect address (login without a tunnel); undefined without a TTY. */
+  readPastedUrl?: (prompt: string, signal: AbortSignal) => Promise<string | undefined>;
   /** Tests inject a fetch serving a MOCK Luma MCP server; production uses fetch behind guardedLumaFetch. */
   lumaFetch?: FetchLike;
   /** Tests inject a MOCK upstream transport; production always uses fetch to fixed origins. */
@@ -118,6 +125,9 @@ Usage:
                                                the services, default all; then read only or read + write). Re-adding
                                                the same Google account updates its group (same ids; asks, without a
                                                terminal only with --yes)
+  perch google client setup | show            guided Google Cloud preparation: project, APIs, consent screen and the
+                                               "Desktop app" OAuth client (JSON pasted hidden, stored 0600); show: path
+                                               and shortened client id. Every Google add starts it when the client is missing
   perch google list | remove ggroup-ID [--revoke [--force]] | remove ID --service drive|gmail|calendar|contacts
                                                remove a whole group (--revoke: once at Google, all its services) or
                                                one service of it (never revoked: the login is shared). --revoke ends
@@ -393,13 +403,6 @@ async function cmdServe(config: PerchConfig, io: CliIo, values: Record<string, u
   return 0;
 }
 
-function googleClient(config: PerchConfig) {
-  if (!config.googleClientFile) {
-    throw new PerchError('Set PERCH_GOOGLE_CLIENT_FILE to the JSON of your Google "Desktop app" OAuth client', 'bad_config');
-  }
-  return readPrivateFile(config.googleClientFile).then((b) => parseClientFile(b.toString('utf8')));
-}
-
 function describeGoogleRequest(r: GoogleGroupRequest): string {
   return r.services
     .map((s) => {
@@ -420,6 +423,7 @@ function googleAddCommand(label: string, email: string, services: readonly Googl
 }
 
 async function cmdGoogle(config: PerchConfig, io: CliIo, sub: string | undefined, rest: string[], values: Record<string, unknown>) {
+  if (sub === 'client') return cmdGoogleClient(config, io, rest[0], values);
   const upstream = new Upstream(io.transport ?? createFetchTransport());
   const store = await openStore(config);
   if (sub === 'list') return io.stdout(formatAccounts(await store.read(), 'google'));
@@ -468,18 +472,13 @@ async function cmdGoogle(config: PerchConfig, io: CliIo, sub: string | undefined
   if (sub !== 'add') throw new UsageError('Usage: perch google add|list|remove');
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
   const { port, timeoutMs } = oauthTiming(values);
-  const client = await googleClient(config);
   const services = await chooseGoogleServices(values, io.readLine, io.stderr);
   if (await chooseAccess('google', values, io.readLine, io.stderr)) {
     io.stdout('Requesting read and write permissions from Google. Clients still need a grant to write: perch client add --label NAME --full\n');
   }
-  const on = (s: GoogleService, flag: string) => services.includes(s) && values[flag] === true;
-  const request: GoogleGroupRequest = {
-    services,
-    driveWrite: on('drive', 'allow-write'),
-    gmail: { drafts: on('gmail', 'allow-drafts'), send: on('gmail', 'allow-send'), modify: on('gmail', 'allow-modify') },
-    calendarWrite: on('calendar', 'allow-calendar-write'),
-  };
+  const request: GoogleGroupRequest = googleRequestFromFlags(services, values);
+  // After the choice: a missing client starts the guide, which lists exactly these APIs and scopes.
+  const client = await loadGoogleClient(config, io, { services, scopes: googleGroupScopes(request) });
   const what = describeGoogleRequest(request);
   const grant = await runGoogleGroupAuthorization({
     client,
@@ -488,7 +487,7 @@ async function cmdGoogle(config: PerchConfig, io: CliIo, sub: string | undefined
     port,
     timeoutMs,
     ...(typeof values['login-hint'] === 'string' ? { loginHint: values['login-hint'] } : {}),
-    onAuthUrl: (url) => printAuthUrl(io, `Google access for ${what} (one login)`, url, timeoutMs),
+    ...loginPrompts(io, `approve Google access for ${what} (one login) for the account you want to add`, timeoutMs),
   });
   const reg = await registerGoogleGroup(store, upstream, {
     label: values.label,
@@ -576,15 +575,7 @@ function oauthTiming(values: Record<string, unknown>) {
   return { port, timeoutMs: timeoutS * 1000 };
 }
 
-function printAuthUrl(io: CliIo, what: string, url: string, timeoutMs: number) {
-  const p = new URL(new URL(url).searchParams.get('redirect_uri')!).port;
-  io.stderr(
-    `Open this URL in a browser and approve ${what} for the account you want to add:\n\n${url}\n\n` +
-      `The browser must reach port ${p} on this machine (loopback). If the browser runs elsewhere, ` +
-      `forward the port first: ssh -L ${p}:127.0.0.1:${p} <this-server>\n` +
-      `Waiting up to ${Math.round(timeoutMs / 1000)}s...\n`,
-  );
-}
+const approve = (what: string) => `approve ${what} for the account you want to add`;
 
 function groupMemberRemoved(id: string, groupId: string, groupRemoved: boolean): string {
   return (
@@ -631,11 +622,8 @@ async function cmdGmail(config: PerchConfig, io: CliIo, sub: string | undefined,
   if (sub !== 'add') throw new UsageError('Usage: perch gmail add|list|remove');
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
   const { port, timeoutMs } = oauthTiming(values);
-  if (!config.googleClientFile) {
-    throw new PerchError('Set PERCH_GOOGLE_CLIENT_FILE to the JSON of your Google "Desktop app" OAuth client', 'bad_config');
-  }
-  const client = parseClientFile((await readPrivateFile(config.googleClientFile)).toString('utf8'));
   const scopes = gmailScopesFor({ send: Boolean(values['allow-send']), drafts: Boolean(values['allow-drafts']), modify: Boolean(values['allow-modify']) });
+  const client = await loadGoogleClient(config, io, { services: ['gmail'], scopes });
   const grant = await runLoopbackAuthorization({
     client,
     upstream,
@@ -643,7 +631,7 @@ async function cmdGmail(config: PerchConfig, io: CliIo, sub: string | undefined,
     timeoutMs,
     scopes,
     ...(typeof values['login-hint'] === 'string' ? { loginHint: values['login-hint'] } : {}),
-    onAuthUrl: (url) => printAuthUrl(io, `Gmail access (${describeOptIns(values)})`, url, timeoutMs),
+    ...loginPrompts(io, approve(`Gmail access (${describeOptIns(values)})`), timeoutMs),
   });
   const account = await registerGmailAccount(store, upstream, { label: values.label, client, grant });
   io.stdout(`Connected Gmail account ${account.id} (${account.email}) as "${account.label}" (${describeOptIns(values)}).\n`);
@@ -684,7 +672,7 @@ async function cmdMicrosoft(config: PerchConfig, io: CliIo, sub: string | undefi
     timeoutMs,
     redirectHost,
     ...(typeof values['login-hint'] === 'string' ? { loginHint: values['login-hint'] } : {}),
-    onAuthUrl: (url) => printAuthUrl(io, `Outlook mail access (${describeOptIns(values)})`, url, timeoutMs),
+    ...loginPrompts(io, approve(`Outlook mail access (${describeOptIns(values)})`), timeoutMs),
   });
   const account = await registerMicrosoftAccount(store, upstream, {
     label: values.label,
@@ -713,12 +701,9 @@ async function cmdProductivity(config: PerchConfig, io: CliIo, sub: string | und
   if (typeof values.services !== 'string') throw new UsageError('--services is required: calendar, contacts or calendar,contacts');
   const services = parseServices(values.services.split(','));
   const allowCalendarWrite = Boolean(values['allow-calendar-write']);
-  productivityScopesFor({ services, allowCalendarWrite });
+  const scopes = productivityScopesFor({ services, allowCalendarWrite });
   const { port, timeoutMs } = oauthTiming(values);
-  if (!config.googleClientFile) {
-    throw new PerchError('Set PERCH_GOOGLE_CLIENT_FILE to the JSON of your Google "Desktop app" OAuth client', 'bad_config');
-  }
-  const client = parseClientFile((await readPrivateFile(config.googleClientFile)).toString('utf8'));
+  const client = await loadGoogleClient(config, io, { services, scopes });
   const what = services.map((s) => (s === 'calendar' && allowCalendarWrite ? 'calendar (read + write own events)' : `${s} (read-only)`)).join(', ');
   const grant = await runProductivityAuthorization({
     client,
@@ -728,7 +713,7 @@ async function cmdProductivity(config: PerchConfig, io: CliIo, sub: string | und
     port,
     timeoutMs,
     ...(typeof values['login-hint'] === 'string' ? { loginHint: values['login-hint'] } : {}),
-    onAuthUrl: (url) => printAuthUrl(io, `Google ${what} access`, url, timeoutMs),
+    ...loginPrompts(io, approve(`Google ${what} access`), timeoutMs),
   });
   const account = await registerProductivityAccount(store, upstream, { label: values.label, client, grant, services, allowCalendarWrite });
   io.stdout(`Connected Google account ${account.id} (${account.email}) as "${account.label}" for ${what}.\n`);

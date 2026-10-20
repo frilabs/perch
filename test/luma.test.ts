@@ -94,6 +94,26 @@ async function grant(caps: string[], accounts: string[]) {
 }
 
 describe('onboarding', () => {
+  it('also connects with the pasted browser address instead of the callback (login without a tunnel)', async () => {
+    const x = io();
+    let authUrl = '';
+    let shown = '';
+    const code = await runCli(['luma', 'add', '--label', 'pasted', '--timeout', '10'], {
+      ...x,
+      stderr: (s) => {
+        shown += s;
+        authUrl = /(https:\/\/auth\.luma\.com\/oauth\/authorize\?\S+)/.exec(s)?.[1] ?? authUrl;
+      },
+      readPastedUrl: async () => {
+        const u = new URL(authUrl);
+        return `${u.searchParams.get('redirect_uri')}?code=luma-code-123&state=${encodeURIComponent(u.searchParams.get('state')!)}`;
+      },
+    });
+    expect(code, shown).toBe(0);
+    expect(shown).toMatch(/This site can't be reached/);
+    expect(x.out()).toMatch(/Connected Luma account luma-[a-f0-9]{8} "pasted"/);
+  });
+
   it('connects via CIMD (no DCR offered), pins the allowlisted tool schemas and never offers delete/host tools', async () => {
     auth.dcr = false;
     const { out, id } = await addAccount();

@@ -119,7 +119,7 @@ Perch re-checks the grant before every tool call, so `perch client remove ID` ta
 
 ### 1. Prepare the providers (once per installation, only for the services you want)
 
-Perch is self-hosted, so there is no central Perch app that Google or Microsoft already know. Where a provider only lets registered apps sign in, you register your own "Perch" there once.
+Perch is self-hosted, so there is no central Perch app that Google or Microsoft already know. Where a provider only lets registered apps sign in, you register your own "Perch" there once. `perch setup` walks you through this in the terminal, step by step with direct links, when it is missing; the table is the overview.
 
 | Service | What to do once | Time |
 | --- | --- | --- |
@@ -127,7 +127,7 @@ Perch is self-hosted, so there is no central Perch app that Google or Microsoft 
 | **Luma** | nothing (sign-in in the browser; Perch's client document is served at `https://frilabs.dev/perch/luma-client.json`) | – |
 | **Notion** (per workspace) | [notion.so/my-integrations](https://www.notion.so/my-integrations): new internal integration "Perch" with *Read/Update/Insert content* and *Read/Insert comments*; copy the token; in Notion share the pages with it (••• → Connections → Perch) | 5 min |
 | **Slack** (per workspace) | `perch slack manifest` → [api.slack.com/apps](https://api.slack.com/apps) → *Create New App* → *From a manifest* → paste → *Install to Workspace* (some workspaces need an admin's approval) → copy the **User OAuth Token** (`xoxp-…`) | 5 min |
-| **Google** (Drive, Gmail, Calendar, Contacts; once for all Google accounts) | [Google Cloud Console](https://console.cloud.google.com): new project → enable **Drive, Gmail, Calendar and People API** → OAuth consent screen *External*, status *Testing*, add yourself as **test user** → Credentials → OAuth client ID type **Desktop app** → download the JSON → on the server `install -m 600 client.json ~/.config/perch/google-client.json` and in `.env` `PERCH_GOOGLE_CLIENT_FILE=/home/USER/.config/perch/google-client.json` | 15 min |
+| **Google** (Drive, Gmail, Calendar, Contacts; once for all Google accounts) | guided in the terminal (`perch setup`, any Google `add`, or `perch google client setup`): own Google Cloud project → enable the APIs of the chosen services → Google Auth Platform *External*, *Testing*, yourself as **test user**, the printed scope list → OAuth client type **Desktop app** → paste the downloaded JSON (hidden); Perch checks it and stores it `0600` at `~/.config/perch/google-client.json` | 10 min |
 | **Outlook / Microsoft 365** | [Entra admin center](https://entra.microsoft.com) → App registrations → New: "Perch", include personal Microsoft accounts, platform *Mobile and desktop applications* with redirect `http://localhost`, no secret → API permissions (delegated): `User.Read`, `Mail.Read`, `Mail.ReadWrite`, `Mail.Send` → copy the *Application (client) ID* into `.env` as `PERCH_MICROSOFT_CLIENT_ID` | 10 min |
 | **WhatsApp** (unofficial) | nothing beforehand: `perch whatsapp install` (or choosing WhatsApp in `perch setup`) downloads the pinned GOWA bridge from GitHub, checks its SHA-256, runs it as a systemd user service on 127.0.0.1 and stores it in Perch (Linux, asks first; manual way in `docs/SETUP.md` §4f.1a) | 2 min |
 
@@ -150,7 +150,7 @@ perch setup
 - *Access: read only, or read + write?* (Google, Outlook, IMAP) → choose `w` where Claude should be able to change things.
 - At the end: *create a client with full access?* → it prints the ready-to-paste `claude mcp add` command.
 
-If the browser runs on your laptop, open a tunnel there before a browser login and keep it open: `ssh -N -L 8766:127.0.0.1:8766 <server>` (Luma: port 8768).
+Browser logins need no tunnel: if the browser runs on your laptop, it shows "This site can't be reached" after you approved; copy the complete address from the address bar and paste it into the terminal (hidden). Alternatively open a tunnel on the laptop before the login: `ssh -N -L 8766:127.0.0.1:8766 <server>` (Luma: port 8768).
 
 **Back up `~/.config/perch/store.key` now**, separately from the data directory. Without it nothing can be decrypted.
 

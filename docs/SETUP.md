@@ -24,7 +24,7 @@ CLI-Aufruf: `node dist/cli.js …`. Optional global per `npm link`, dann heißt 
 perch setup
 ```
 
-Der Assistent legt Schlüssel, Speicher und Token an (wie `perch init`), fragt dann Dienst für Dienst „verbinden?“ (Google ist **ein** Schritt für Drive, Gmail, Kalender und Kontakte, siehe Abschnitt 3), zeigt die nötigen Vorbereitungen und Links und ruft die normalen `perch <dienst> add`-Befehle auf. Jedes `add` fragt **„nur lesen oder lesen + schreiben?“** und fordert die passenden Rechte beim Anbieter an (`--read-only` / `--write` überspringen die Frage; die `--allow-…`-Flags gehen weiter). Zum Schluss legt er auf Wunsch einen Client mit **vollem Zugriff** an (`perch client add --full`: alle Fähigkeiten, alle Konten, auch später verbundene) und zeigt den fertigen `claude mcp add`-Befehl für den Laptop.
+Der Assistent legt Schlüssel, Speicher und Token an (wie `perch init`), fragt dann Dienst für Dienst „verbinden?“ (Google ist **ein** Schritt für Drive, Gmail, Kalender und Kontakte, siehe Abschnitt 3), zeigt die nötigen Vorbereitungen und Links und ruft die normalen `perch <dienst> add`-Befehle auf. Fehlt der Google-OAuth-Client, führt Perch **im Terminal** Schritt für Schritt durch die Google-Cloud-Vorbereitung (Abschnitt 3.1); kein `scp`/`install` nötig. Browser-Logins (Google, Outlook, Luma) brauchen **keinen Tunnel** mehr: nach der Zustimmung zeigt der Browser „Seite nicht erreichbar“, die komplette Adresse aus der Adresszeile wird ins Terminal eingefügt (Abschnitt 3.2). Jedes `add` fragt **„nur lesen oder lesen + schreiben?“** und fordert die passenden Rechte beim Anbieter an (`--read-only` / `--write` überspringen die Frage; die `--allow-…`-Flags gehen weiter). Zum Schluss legt er auf Wunsch einen Client mit **vollem Zugriff** an (`perch client add --full`: alle Fähigkeiten, alle Konten, auch später verbundene) und zeigt den fertigen `claude mcp add`-Befehl für den Laptop.
 
 Jeder weitere Claude- oder Codex-Account braucht nur noch einen Befehl auf dem Server: `perch client add --label NAME --full` (im Tailnet) oder `perch oauth pair` und bei der Frage „lesen oder voll“ `f` (claude.ai übers Internet).
 
@@ -74,7 +74,17 @@ Ein Google-Konto wird mit **einem** Befehl und **einem** Browser-Login für Driv
 
 ### 3.1 Google Cloud einmalig einrichten
 
-Diese Einrichtung macht Fritz selbst. Perch kann sie nicht übernehmen.
+**Geführt im Terminal (Standard):** `perch google client setup` – oder einfach `perch google add` / `perch gmail add` / `perch google-productivity add` / `perch setup`: Fehlt die Client-Datei, ist sie leer oder ungültig, fragt Perch „Set it up now, guided step by step? [Y/n]“ und führt durch:
+
+1. Projekt anlegen (Direktlink `console.cloud.google.com/projectcreate`), optional die Projekt-ID eingeben: dann enthalten alle folgenden Links `?project=ID`.
+2. APIs aktivieren: Direktlinks nur auf die Library-Seiten der gewählten Dienste (Drive, Gmail, Calendar, People).
+3. Google Auth Platform: Branding, Audience („External“, „Testing“, Testnutzer = die eigenen Konten), Data Access mit der **fertig ausgegebenen Scope-Liste** (genau die gewählten Dienste und Lesen bzw. Lesen + Schreiben).
+4. Client anlegen: Typ **„Desktop app“**, JSON herunterladen.
+5. Den **Inhalt** der JSON-Datei einfügen (verdeckt; mehrzeilig geht auch, bis zur schließenden Klammer, höchstens 16 KiB). Perch prüft: gültiges JSON, Schlüssel `installed` (ein „Web application“-Client wird mit Hinweis abgelehnt), `client_id` endet auf `.apps.googleusercontent.com`, `client_secret` vorhanden, `redirect_uris` enthält `http://localhost`. Drei Versuche.
+
+Gespeichert wird atomar mit `0600` unter `PERCH_GOOGLE_CLIENT_FILE`, ohne die Variable unter `~/.config/perch/google-client.json` (Perch liest diesen Standardpfad von selbst; `.env` wird nie geändert). `perch google client setup` ersetzt einen vorhandenen Client nur nach Rückfrage; `perch google client show` zeigt Pfad und gekürzte Client-ID (nie das Secret). Ohne Terminal endet jedes Google-`add` ohne Client mit einer Fehlermeldung, die auf `perch google client setup` verweist. Eine Datei mit unsicheren Rechten bleibt ein Fehler (`chmod 600`), der Assistent überschreibt sie nicht.
+
+**Von Hand (Alternative):**
 
 1. In der Google Cloud Console ein Projekt anlegen und die APIs der gewünschten Dienste aktivieren: **Google Drive API**, **Gmail API**, **Google Calendar API**, **People API**.
 2. Auth-Plattform bzw. OAuth-Zustimmungsbildschirm einrichten:
@@ -84,7 +94,7 @@ Diese Einrichtung macht Fritz selbst. Perch kann sie nicht übernehmen.
 
 ```bash
 install -m 600 ~/Downloads/client_secret_XXXX.json ~/.config/perch/google-client.json
-export PERCH_GOOGLE_CLIENT_FILE=~/.config/perch/google-client.json
+# PERCH_GOOGLE_CLIENT_FILE nur nötig für einen anderen Pfad als diesen Standardpfad
 ```
 
 **Hinweise zu Google** (Stand der Google-Dokumentation, bitte dort prüfen):
@@ -101,7 +111,9 @@ perch google add --label "Privat" --port 8766
 
 1. Perch fragt, welche Dienste verbunden werden (Standard: alle; ohne Terminal alle) und dann einmal **„[r]ead only, or read + [w]rite?“**. Ohne Fragen: `--services drive,gmail,calendar,contacts` und `--read-only` bzw. `--write`. Die bisherigen Feinschalter gelten weiter: `--allow-write` (Drive), `--allow-drafts`, `--allow-send`, `--allow-modify` (Gmail), `--allow-calendar-write`.
 2. Perch gibt **eine** Google-Auth-URL mit allen Scopes der gewählten Dienste aus (`include_granted_scopes=true`). Die URL im Browser öffnen und das gewünschte Konto wählen.
-3. Google leitet auf `http://127.0.0.1:8766/oauth2/callback` um. Läuft der Browser auf dem Laptop und nicht auf dem Server, vorher auf dem Laptop den Port weiterleiten:
+3. Google leitet auf `http://127.0.0.1:8766/oauth2/callback` um. **Ohne Tunnel:** Läuft der Browser auf dem Laptop, zeigt er danach „Seite nicht erreichbar“. Die komplette Adresse aus der Adresszeile kopieren und ins Terminal einfügen (verdeckte Eingabe). Perch wartet gleichzeitig auf den Callback und auf die eingefügte Adresse; was zuerst kommt, gewinnt, das andere wird beendet. Die Adresse wird so streng geprüft wie der Callback: Host `127.0.0.1`/`localhost`/`[::1]`, genau der erwartete Port und Pfad, `state` (konstante Zeit), dann wird `code` übernommen; `error=` bricht ab. Eine abgelehnte Adresse (z. B. alter Login-Versuch) wird gemeldet, Perch wartet weiter. PKCE, `state` und Redirect-URI bleiben unverändert. Das gilt für alle Browser-Logins (Google, Gmail, Calendar/Contacts, Outlook, Luma).
+
+   **Oder mit Tunnel** (Login schließt sich dann von selbst ab), vorher auf dem Laptop:
 
 ```bash
 ssh -N -L 8766:127.0.0.1:8766 homeserver
@@ -216,7 +228,7 @@ Der bisherige Befehl `perch gmail add` funktioniert weiter und legt ein Gmail-Ko
    - `gmail.readonly` (restricted);
    - optional `gmail.send` (sensitive) und/oder `gmail.compose` (restricted: Entwürfe + Senden).
 3. Testnutzer eintragen. Restricted Scopes verlangen für den Produktionsstatus eine Google-Verifizierung. Im Testing-Status laufen Refresh-Tokens nach 7 Tagen ab.
-4. Konto verbinden. Der Desktop-Client aus `PERCH_GOOGLE_CLIENT_FILE` wird wiederverwendet.
+4. Konto verbinden. Der Desktop-Client aus `PERCH_GOOGLE_CLIENT_FILE` (bzw. dem Standardpfad) wird wiederverwendet; fehlt er, startet die geführte Einrichtung (Abschnitt 3.1).
 
 ```bash
 perch gmail add --label "Privat-Gmail"                    # nur gmail.readonly
@@ -248,7 +260,7 @@ perch microsoft list
 perch microsoft remove microsoft-1a2b3c4d
 ```
 
-- Der Browser muss `http://localhost:<port>` auf dem Server erreichen, sonst per `ssh -L <port>:127.0.0.1:<port>` weiterleiten (wie bei Google). Der Listener bindet nur `127.0.0.1`. Löst der Browser `localhost` nur auf `::1` auf, hilft `--redirect-host 127.0.0.1`. Dann muss `http://127.0.0.1` als Redirect-URI im Manifest der App-Registrierung stehen.
+- Ohne Tunnel: nach der Zustimmung die Adresse `http://localhost:<port>/?code=…` aus der Adresszeile ins Terminal einfügen (wie bei Google, Abschnitt 3.2). Oder der Browser erreicht `http://localhost:<port>` auf dem Server per `ssh -N -L <port>:127.0.0.1:<port>`. Der Listener bindet nur `127.0.0.1`. Löst der Browser `localhost` nur auf `::1` auf, hilft `--redirect-host 127.0.0.1`. Dann muss `http://127.0.0.1` als Redirect-URI im Manifest der App-Registrierung stehen.
 - **Firmen-Tenants** können User-Consent für `Mail.*` verbieten oder Admin-Consent verlangen. `add` scheitert dann mit einem klaren Fehler.
 - Microsoft rotiert Refresh-Tokens. Perch speichert sie unter Lock. Lässt sich ein neuer Token nicht speichern, oder wurde das Konto währenddessen entfernt bzw. geändert, schlägt der Aufruf fehl (fail closed).
 - **Widerruf:** <https://account.live.com/consent/Manage> (persönlich) bzw. <https://myapplications.microsoft.com> (Firma). `remove` löscht nur lokal.
@@ -655,7 +667,7 @@ Bietet Luma Dynamic Client Registration an, registriert sich Perch dort selbst (
 perch luma add --label "frilabs" [--port 8768]
 ```
 
-- Der Befehl zeigt eine Login-URL. Läuft der Browser nicht auf dem Server, vorher den Port weiterleiten (`ssh -L 8768:127.0.0.1:8768 homeserver`, dann `--port 8768`).
+- Der Befehl zeigt eine Login-URL. Läuft der Browser nicht auf dem Server, nach dem Login die Adresse aus der Adresszeile ins Terminal einfügen (Abschnitt 3.2), oder vorher den Port weiterleiten (`ssh -N -L 8768:127.0.0.1:8768 homeserver`, dann `--port 8768`).
 - Nach dem Login merkt sich Perch die **Schemas der erlaubten Luma-Tools** (Trust on first use). Die Ausgabe nennt, wie viele Tools freigegeben sind, welche Luma nicht anbietet und welche wegen unbekannter Felder gesperrt bleiben.
 - Mehrere Luma-Konten sind möglich; jedes Ergebnis trägt `accountId` und `accountLabel`.
 

@@ -1,5 +1,6 @@
 import { PerchError } from '../errors.js';
 import { newAccountId, validateLabel } from '../ids.js';
+import type { PasteRedirect } from '../oauth/loopback.js';
 import { RefreshingTokenProvider, type SharedTokenSource } from '../oauth/tokenProvider.js';
 import { detachGroupMember, revokeSeparateGrant, sharedGoogleLogin, sharedRevokeRefused, type SharedGrantHolder } from './groupStore.js';
 import type { CredentialStore, GoogleProductivityAccount } from '../store/credentialStore.js';
@@ -96,6 +97,7 @@ export interface ProductivityAuthOptions extends ProductivityRequest {
   timeoutMs?: number;
   loginHint?: string;
   onAuthUrl: (url: string) => void;
+  paste?: PasteRedirect;
 }
 
 /** Desktop-app OAuth through the shared loopback (127.0.0.1, state, PKCE S256), separate grant. */
@@ -107,6 +109,7 @@ export function runProductivityAuthorization(opts: ProductivityAuthOptions): Pro
     scopes: productivityScopesFor(req),
     verify: (tok) => assertProductivityGrant(tok, req),
     onAuthUrl: opts.onAuthUrl,
+    ...(opts.paste ? { paste: opts.paste } : {}),
     ...(opts.port !== undefined ? { port: opts.port } : {}),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     ...(opts.loginHint ? { loginHint: opts.loginHint } : {}),
