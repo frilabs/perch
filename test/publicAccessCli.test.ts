@@ -150,17 +150,18 @@ describe('perch oauth pair (end to end over the control socket)', () => {
   }
 
   it('pairs one device after the terminal confirmation and reports its first request', async () => {
-    let confirmPrompt = '';
+    const prompts: string[] = [];
     const io = cliIo((prompt) => {
-      confirmPrompt = prompt;
-      return 'y';
+      prompts.push(prompt);
+      return /Access for this device/.test(prompt) ? 'f' : 'y';
     });
     const run = runCli(['oauth', 'pair'], io);
     await waitFor(() => /Pairing code: {2}([A-Z2-7]{8})/.test(io.out()));
     const code = /Pairing code: {2}([A-Z2-7]{8})/.exec(io.out())![1]!;
     const { cookie, verifier } = await browser(code);
     await waitFor(() => io.out().includes('Paired device'));
-    expect(confirmPrompt).toMatch(/Pair this device\?/);
+    expect(prompts[0]).toMatch(/Pair this device\?/);
+    expect(prompts[1]).toMatch(/\[r\]ead only, or \[f\]ull/);
     expect(io.out()).toContain(`Google account:  ${OPERATOR.email}`);
     expect(io.out()).toContain('Returns to:      claude.ai');
     const port = access.publicServer.port;
@@ -181,6 +182,10 @@ describe('perch oauth pair (end to end over the control socket)', () => {
     const list = cliIo(() => '');
     await runCli(['oauth', 'devices'], list);
     const id = /(oc-[a-f0-9]{16}) {2}active/.exec(list.out())![1]!;
+    // "f" at pairing gave the device a full-access grant (every capability, every account).
+    expect(list.out()).toMatch(/grant client-[a-f0-9]{8}/);
+    const grantId = /grant (client-[a-f0-9]{8})/.exec(list.out())![1]!;
+    expect((await store.read()).clients.find((c) => c.id === grantId)).toMatchObject({ full: true });
     // Removing a grant would widen a device to reading every account: only with an explicit --read-all.
     const narrow = cliIo(() => '');
     expect(await runCli(['oauth', 'ungrant', id], narrow)).toBe(1);

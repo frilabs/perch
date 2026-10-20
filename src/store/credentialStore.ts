@@ -215,9 +215,14 @@ const ClientGrantSchema = z.object({
   label: z.string().min(1).max(100),
   tokenSha256: z.string().regex(/^[a-f0-9]{64}$/),
   capabilities: z.array(z.enum(CAPABILITIES)).min(1),
-  accountIds: z.array(z.string()).min(1),
+  accountIds: z.array(z.string()),
+  /**
+   * Full access: every capability on every account, including accounts and capabilities added later
+   * (perch client add --full). `capabilities`/`accountIds` are then only a snapshot for display.
+   */
+  full: z.literal(true).optional(),
   createdAt: z.string(),
-});
+}).refine((g) => g.full === true || g.accountIds.length > 0, 'a client grant needs at least one account id');
 
 /** Upper bound on registry entries (active and removed: ids are never reused, entries never deleted). */
 export const MAX_USERS = 100;
