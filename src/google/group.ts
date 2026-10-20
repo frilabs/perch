@@ -9,7 +9,16 @@ import {
 } from '../mail/gmailAccounts.js';
 import type { CredentialStore, GoogleAccountGroup, StoreData } from '../store/credentialStore.js';
 import { UpstreamError, type Upstream } from '../upstream.js';
-import { detachGroupMember, findGroup, groupMembers, groupServices, type GoogleMemberSection } from './groupStore.js';
+import {
+  detachGroupMember,
+  findGroup,
+  groupMembers,
+  groupServices,
+  revokeWouldAffectOthers,
+  sharedGrantHolders,
+  type GoogleMemberSection,
+  type SharedGrantHolder,
+} from './groupStore.js';
 import {
   DRIVE_READONLY_SCOPE,
   DRIVE_SCOPE,
@@ -173,17 +182,25 @@ const FAMILY_SCOPES: Record<GoogleMemberSection, readonly string[]> = {
   googleProductivity: [CALENDAR_READONLY_SCOPE, CONTACTS_READONLY_SCOPE, CALENDAR_EVENTS_OWNED_SCOPE],
 };
 const IDENTITY_SCOPES = [OPENID_SCOPE, EMAIL_SCOPE, USERINFO_EMAIL_SCOPE];
+const SERVICE_SCOPES: Record<GoogleService, readonly string[]> = {
+  drive: [DRIVE_READONLY_SCOPE, DRIVE_SCOPE],
+  gmail: [GMAIL_READONLY_SCOPE, GMAIL_SEND_SCOPE, GMAIL_COMPOSE_SCOPE, GMAIL_MODIFY_SCOPE],
+  calendar: [CALENDAR_READONLY_SCOPE, CALENDAR_EVENTS_OWNED_SCOPE],
+  contacts: [CONTACTS_READONLY_SCOPE],
+};
+const SECTION_SERVICES: Record<GoogleMemberSection, readonly GoogleService[]> = { google: ['drive'], gmail: ['gmail'], googleProductivity: ['calendar', 'contacts'] };
 
 /**
- * The scopes a member records: granted AND (requested now or recorded before) AND of its family. With
- * include_granted_scopes Google may report more than was asked for this time (earlier grants of the same OAuth
- * client); a member never takes over permissions the operator did not choose for it.
+ * The scopes a member records: granted AND chosen AND of its family. Chosen means: for a service in this request
+ * exactly what was requested now (so a re-add with --read-only really drops the write scopes of those services);
+ * for a service not in this request what the member recorded before. With include_granted_scopes Google may
+ * report more than was asked for this time (earlier grants of the same OAuth client); a member never takes over
+ * permissions the operator did not choose for it.
  */
 function memberScopes(section: GoogleMemberSection, req: GoogleGroupRequest, granted: readonly string[], previous: readonly string[] = []): string[] {
-  const requested = req.services
-    .filter((s) => (section === 'google' ? s === 'drive' : section === 'gmail' ? s === 'gmail' : s === 'calendar' || s === 'contacts'))
-    .flatMap((s) => serviceScopes(req, s));
-  const wanted = new Set([...requested, ...previous]);
+  const wanted = new Set(
+    SECTION_SERVICES[section].flatMap((s) => (req.services.includes(s) ? serviceScopes(req, s) : previous.filter((p) => SERVICE_SCOPES[s].includes(p)))),
+  );
   const own = granted.filter((s) => FAMILY_SCOPES[section].includes(s) && wanted.has(s));
   return section === 'googleProductivity' ? [...granted.filter((s) => IDENTITY_SCOPES.includes(s)), ...own] : own;
 }
@@ -201,11 +218,19 @@ export interface GroupRegistration {
   separate: Array<{ service: GoogleService; id: string }>;
 }
 
-const sameAccount = (g: { sub: string; email: string }, id: { sub: string; email: string }) => g.sub === id.sub || g.email.toLowerCase() === id.email.toLowerCase();
+/** Groups are matched on the stable OpenID subject only; an e-mail address can move to another Google account. */
+const sameAccount = (g: { sub: string }, id: { sub: string }) => g.sub === id.sub;
 
-/** The group of the Google account `email` (case-insensitive), if any. */
-export function groupForEmail(data: StoreData, email: string): GoogleAccountGroup | undefined {
-  return data.googleGroups.find((g) => g.email.toLowerCase() === email.toLowerCase());
+/** A group with the same e-mail but another Google account (sub): never overwritten, the old group goes first. */
+function identityConflict(data: StoreData, identity: { sub: string; email: string }): PerchError | undefined {
+  const other = data.googleGroups.find((g) => g.sub !== identity.sub && g.email.toLowerCase() === identity.email.toLowerCase());
+  if (!other) return undefined;
+  return new PerchError(
+    `${identity.email} is already connected as Google account group ${other.id} "${other.label}", but for a different Google account ` +
+      '(the address now belongs to another account). Nothing was stored. Remove the old group first: ' +
+      `perch google remove ${other.id}, then add the account again.`,
+    'account_conflict',
+  );
 }
 
 /**
@@ -229,6 +254,8 @@ export async function registerGoogleGroup(
   const identity = await fetchVerifiedIdentity(upstream, input.grant.accessToken);
   const outcome = grantOutcome(req, input.grant.scopes);
   const before = await store.read();
+  const conflict = identityConflict(before, identity);
+  if (conflict) throw conflict;
   const existing = before.googleGroups.find((g) => sameAccount(g, identity));
   if (existing && input.confirmUpdate) {
     if (!(await input.confirmUpdate(existing, groupServices(before, existing.id)))) {
@@ -244,15 +271,17 @@ export async function registerGoogleGroup(
   }
   return store.update((data) => {
     const now = new Date().toISOString();
+    const raced = identityConflict(data, identity);
+    if (raced) throw raced;
     let group = data.googleGroups.find((g) => sameAccount(g, identity));
     if (existing && group?.id !== existing.id) {
       throw new PerchError(`Google account group ${existing.id} was removed or changed meanwhile; retry`, 'account_changed');
     }
     const updated = Boolean(group);
+    // `sub` is set only on a new group: an existing group matched on it, so it never changes.
     const fields = {
       label,
       email: identity.email,
-      sub: identity.sub,
       clientId: input.client.clientId,
       clientSecret: input.client.clientSecret,
       refreshToken: input.grant.refreshToken,
@@ -260,7 +289,7 @@ export async function registerGoogleGroup(
       updatedAt: now,
     };
     if (group) Object.assign(group, fields);
-    else group = { id: newAccountId('ggroup', data.googleGroups.map((g) => g.id)), ...fields, createdAt: now };
+    else group = { id: newAccountId('ggroup', data.googleGroups.map((g) => g.id)), ...fields, sub: identity.sub, createdAt: now };
     const gid = group.id;
     const granted = input.grant.scopes;
     const has = (s: GoogleService) => outcome.connected.includes(s);
@@ -308,9 +337,9 @@ export async function registerGoogleGroup(
       added.push(...services.filter((s) => !prod.services.includes(s)));
       Object.assign(prod, {
         email: identity.email,
-        sub: identity.sub,
         services,
-        allowCalendarWrite: prod.allowCalendarWrite || calendarWrite,
+        // A request that includes Calendar decides its write permission; otherwise the earlier choice stays.
+        allowCalendarWrite: req.services.includes('calendar') ? calendarWrite : prod.allowCalendarWrite,
         scopes: memberScopes('googleProductivity', req, granted, prod.scopes),
         updatedAt: now,
       });
@@ -353,18 +382,30 @@ export async function registerGoogleGroup(
 
 /**
  * `perch google remove`: without `service` the whole group (every member and the stored login; with `revoke` the
- * login is revoked at Google once first). With `service` only that service leaves the group; never revoked, because
- * the login is shared. A group whose last service is removed is removed with it.
+ * login is revoked at Google once first). The whole group is selected by its ggroup-… id only, never by a member
+ * id. With `service` (group or member id) only that service leaves the group; never revoked, because the login is
+ * shared. A group whose last service is removed is removed with it.
+ *
+ * Google's revoke ends the whole grant of the OAuth client for the Google account, so `revoke` is refused while
+ * another stored login (another group or a separately connected account) of the same Google account uses the same
+ * OAuth client, unless `force` is set; `alsoRevoked` then names those records.
  */
 export async function removeGoogleGroup(
   store: CredentialStore,
   upstream: Upstream,
   id: string,
-  opts: { revoke?: boolean; service?: GoogleService },
-): Promise<{ group: GoogleAccountGroup; removed: string[]; groupRemoved: boolean; revoked: boolean }> {
+  opts: { revoke?: boolean; force?: boolean; service?: GoogleService },
+): Promise<{ group: GoogleAccountGroup; removed: string[]; groupRemoved: boolean; revoked: boolean; alsoRevoked: SharedGrantHolder[] }> {
   const data = await store.read();
   const group = findGroup(data, id);
   if (!group) throw new PerchError(`Unknown Google account group: ${id}`, 'unknown_account');
+  if (!opts.service && id !== group.id) {
+    throw new PerchError(
+      `${id} is one service of Google account group ${group.id}. Remove the whole group with: perch google remove ${group.id}; ` +
+        `only this service with: perch google remove ${group.id} --service SERVICE`,
+      'bad_argument',
+    );
+  }
   if (opts.service) {
     if (opts.revoke) {
       throw new PerchError(
@@ -380,11 +421,14 @@ export async function removeGoogleGroup(
       const member = service === 'drive' ? m.drive : service === 'gmail' ? m.gmail : m.productivity?.services.includes(service) ? m.productivity : undefined;
       if (!member) throw new PerchError(`${group.id} does not connect ${GOOGLE_SERVICE_TITLES[service]}`, 'unknown_account');
       const r = detachGroupMember(d, section, member.id, service === 'calendar' || service === 'contacts' ? service : undefined);
-      return { group, removed: r.removedAccount ? [member.id] : [], groupRemoved: r.groupRemoved, revoked: false };
+      return { group, removed: r.removedAccount ? [member.id] : [], groupRemoved: r.groupRemoved, revoked: false, alsoRevoked: [] };
     });
   }
   let revoked = false;
+  let alsoRevoked: SharedGrantHolder[] = [];
   if (opts.revoke) {
+    alsoRevoked = sharedGrantHolders(data, group, group.clientId, { id: group.id });
+    if (alsoRevoked.length && !opts.force) throw revokeWouldAffectOthers(group.id, alsoRevoked);
     try {
       await revokeToken(upstream, group.refreshToken);
       revoked = true;
@@ -400,6 +444,6 @@ export async function removeGoogleGroup(
     d.gmail = d.gmail.filter((a) => a.groupId !== group.id);
     d.googleProductivity = d.googleProductivity.filter((a) => a.groupId !== group.id);
     d.googleGroups = d.googleGroups.filter((g) => g.id !== group.id);
-    return { group, removed, groupRemoved: true, revoked };
+    return { group, removed, groupRemoved: true, revoked, alsoRevoked };
   });
 }

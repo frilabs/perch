@@ -17,7 +17,7 @@ import {
   type GoogleGroupRequest,
   type GoogleService,
 } from '../google/group.js';
-import { findGroup, groupMembers } from '../google/groupStore.js';
+import { findGroup, grantStillValidHint, groupMembers, type SharedGrantHolder } from '../google/groupStore.js';
 import { DEFAULT_AUTH_TIMEOUT_MS, DRIVE_SCOPE, MAX_AUTH_TIMEOUT_MS, parseClientFile, runLoopbackAuthorization } from '../google/oauth.js';
 import { CALENDAR_EVENTS_OWNED_SCOPE } from '../google/productivity.js';
 import {
@@ -116,15 +116,18 @@ Usage:
                    [--yes] [--port N] [--timeout SECONDS] [--login-hint EMAIL]
                                                ONE Google login for Drive, Gmail, Calendar and Contacts (asks for
                                                the services, default all; then read only or read + write). Re-adding
-                                               the same Google account updates its group (same ids; --yes: no question)
-  perch google list | remove ID [--revoke] | remove ID --service drive|gmail|calendar|contacts
+                                               the same Google account updates its group (same ids; asks, without a
+                                               terminal only with --yes)
+  perch google list | remove ggroup-ID [--revoke [--force]] | remove ID --service drive|gmail|calendar|contacts
                                                remove a whole group (--revoke: once at Google, all its services) or
-                                               one service of it (never revoked: the login is shared)
+                                               one service of it (never revoked: the login is shared). --revoke ends
+                                               Google's grant for that account and OAuth client; refused while another
+                                               stored login of the same account uses it, unless --force
   perch notion add --label NAME                PAT is read via a masked terminal prompt
   perch notion list | remove ID
   perch gmail add --label NAME [--allow-drafts] [--allow-send] [--allow-modify] [--port N] [--timeout SECONDS] [--login-hint EMAIL]
                                                Gmail only, separate login (the usual way: perch google add --services gmail)
-  perch gmail list | remove ID [--revoke]
+  perch gmail list | remove ID [--revoke [--force]]
   perch microsoft add --label NAME [--allow-drafts] [--allow-send] [--allow-modify] [--port N] [--timeout SECONDS]
                       [--redirect-host localhost|127.0.0.1] [--login-hint EMAIL]
   perch microsoft list | remove ID
@@ -136,7 +139,7 @@ Usage:
   perch google-productivity add --label NAME --services calendar,contacts [--allow-calendar-write]
                       [--port N] [--timeout SECONDS] [--login-hint EMAIL]
                                                Calendar/Contacts only, separate login (the usual way: perch google add)
-  perch google-productivity list | remove ID [--revoke]
+  perch google-productivity list | remove ID [--revoke [--force]]
   perch slack manifest                         print the Slack app manifest (create one internal app per workspace)
   perch slack add --label NAME                 user token (xoxp-…) is read via a masked terminal prompt
   perch slack list | remove ID
@@ -422,32 +425,44 @@ async function cmdGoogle(config: PerchConfig, io: CliIo, sub: string | undefined
   if (sub === 'list') return io.stdout(formatAccounts(await store.read(), 'google'));
   if (sub === 'remove') {
     const id = rest[0];
-    if (!id) throw new UsageError('Usage: perch google remove ID [--revoke] | remove ID --service drive|gmail|calendar|contacts');
+    if (!id) throw new UsageError('Usage: perch google remove ggroup-ID [--revoke [--force]] | remove ID --service drive|gmail|calendar|contacts');
     const service = typeof values.service === 'string' ? parseGoogleServices([values.service])[0]! : undefined;
     if (service && values.service !== service) throw new UsageError('--service takes one of drive, gmail, calendar, contacts');
-    if (!findGroup(await store.read(), id)) {
+    const current = await store.read();
+    const group = findGroup(current, id);
+    if (!group) {
       // A Drive account connected separately (before account groups, or with an old Perch).
       if (service) throw new UsageError(`--service needs a Google account group or one of its accounts; ${id} is not part of one`);
-      const r = await removeGoogleAccount(store, upstream, id, { revoke: Boolean(values.revoke) });
-      io.stdout(`Removed ${id} locally.${r.revoked ? ' The grant was revoked at Google.' : ''}\n`);
+      const r = await removeGoogleAccount(store, upstream, id, revokeOpts(values));
+      io.stdout(`Removed ${id} locally.${r.revoked ? ' The grant was revoked at Google.' : ''}\n${alsoRevokedNote(r.alsoRevoked)}`);
       if (!values.revoke) io.stdout('The Google grant is still valid; revoke it at https://myaccount.google.com/permissions or rerun with --revoke.\n');
       return;
     }
-    const r = await removeGoogleGroup(store, upstream, id, { revoke: Boolean(values.revoke), ...(service ? { service } : {}) });
+    if (!service && id !== group.id) {
+      // Never remove a whole group through one member's id: that would silently take the other services too.
+      const m = groupMembers(current, group.id);
+      const services = m.drive?.id === id ? ['drive'] : m.gmail?.id === id ? ['gmail'] : (m.productivity?.services ?? []);
+      throw new UsageError(
+        `${id} is one service of Google account group ${group.id}; a whole group is removed only by its id.\n` +
+          `  Only this service: ${services.map((s) => `perch google remove ${group.id} --service ${s}`).join(' ; ')}\n` +
+          `  The whole group:   perch google remove ${group.id} [--revoke]`,
+      );
+    }
+    const r = await removeGoogleGroup(store, upstream, id, { ...revokeOpts(values), ...(service ? { service } : {}) });
     if (service) {
       io.stdout(
         `Removed ${GOOGLE_SERVICE_TITLES[service]} from Google account group ${r.group.id}${r.removed.length ? ` (deleted ${r.removed.join(', ')})` : ''}.` +
           `${r.groupRemoved ? ' It was its last service, so the group and its stored login were removed too.' : ''}\n` +
           'The Google login was not revoked: it is shared by the whole group, so revoking it would disconnect every service of the account. ' +
-          (r.groupRemoved ? 'Revoke it at https://myaccount.google.com/permissions if Perch no longer needs it.\n' : `Revoke everything with: perch google remove ${r.group.id} --revoke\n`),
+          (r.groupRemoved ? grantStillValidHint(r.group.id) : `Revoke everything with: perch google remove ${r.group.id} --revoke\n`),
       );
       return;
     }
     io.stdout(
       `Removed Google account group ${r.group.id} (${r.group.email}) and its accounts ${r.removed.join(', ') || '(none)'} locally.` +
-        `${r.revoked ? ' The login was revoked at Google once (for all of its services).' : ''}\n`,
+        `${r.revoked ? ' The login was revoked at Google once (for all of its services).' : ''}\n${alsoRevokedNote(r.alsoRevoked)}`,
     );
-    if (!values.revoke) io.stdout('The Google grant is still valid; revoke it at https://myaccount.google.com/permissions or rerun with --revoke.\n');
+    if (!values.revoke) io.stdout(grantStillValidHint(r.group.id));
     return;
   }
   if (sub !== 'add') throw new UsageError('Usage: perch google add|list|remove');
@@ -482,16 +497,19 @@ async function cmdGoogle(config: PerchConfig, io: CliIo, sub: string | undefined
     request,
     confirmUpdate: async (g, current) => {
       if (values.yes === true) return true;
-      const q =
-        `${g.email} is already connected as Google account group ${g.id} "${g.label}" (${current.map((s) => GOOGLE_SERVICE_TITLES[s]).join(', ') || 'no services'}). ` +
-        'Update it with the new login and permissions (same account ids, client grants stay valid)? [Y/n] ';
+      const what = `${g.email} is already connected as Google account group ${g.id} "${g.label}" (${current.map((s) => GOOGLE_SERVICE_TITLES[s]).join(', ') || 'no services'})`;
+      const noTerminal = () =>
+        new PerchError(`${what}. No interactive terminal to confirm the update; nothing was changed. Rerun with --yes to update it (same account ids).`, 'confirmation_required');
+      if (!io.readLine) throw noTerminal();
+      let answer: string;
       try {
-        if (!io.readLine) throw new PerchError('no terminal', 'no_tty');
-        return yes(await io.readLine(q), true);
-      } catch {
-        io.stderr(`No interactive terminal: updating the existing group ${g.id} (no duplicate is created).\n`);
-        return true;
+        answer = await io.readLine(`${what}. Update it with the new login and permissions (same account ids, client grants stay valid)? [Y/n] `);
+      } catch (e) {
+        if (e instanceof PerchError && e.code === 'no_tty') throw noTerminal();
+        throw e;
       }
+      // Default yes only here, with a terminal: the operator saw the question.
+      return yes(answer, true);
     },
   });
   const data = await store.read();
@@ -572,8 +590,23 @@ function groupMemberRemoved(id: string, groupId: string, groupRemoved: boolean):
   return (
     `Removed ${id} from Google account group ${groupId} locally.` +
     (groupRemoved
-      ? ' It was its last service, so the group and its stored login were removed too; revoke the login at https://myaccount.google.com/permissions if Perch no longer needs it.\n'
+      ? ` It was its last service, so the group and its stored login were removed too.\n${grantStillValidHint(groupId)}`
       : ` The shared login stays for the group's other services (perch google list).\n`)
+  );
+}
+
+/** --revoke and --force of the Google remove commands. */
+function revokeOpts(values: Record<string, unknown>): { revoke: boolean; force: boolean } {
+  if (values.force === true && values.revoke !== true) throw new UsageError('--force only applies to --revoke');
+  return { revoke: values.revoke === true, force: values.force === true };
+}
+
+/** What a forced revoke ended as well (Google revokes the whole grant of the OAuth client for the account). */
+function alsoRevokedNote(holders: readonly SharedGrantHolder[] | undefined): string {
+  if (!holders?.length) return '';
+  return (
+    `--force: Google revoked the whole grant of this OAuth client for the account, so these lost access too: ${holders.map((h) => `${h.id} ("${h.label}")`).join(', ')}. ` +
+    'Connect them again (perch google add) or remove them.\n'
   );
 }
 
@@ -589,9 +622,9 @@ async function cmdGmail(config: PerchConfig, io: CliIo, sub: string | undefined,
   if (sub === 'remove') {
     const id = rest[0];
     if (!id) throw new UsageError('Usage: perch gmail remove ID [--revoke]');
-    const r = await removeGmailAccount(store, upstream, id, { revoke: Boolean(values.revoke) });
+    const r = await removeGmailAccount(store, upstream, id, revokeOpts(values));
     if (r.groupId) return io.stdout(groupMemberRemoved(id, r.groupId, Boolean(r.groupRemoved)));
-    io.stdout(`Removed ${id} locally.${r.revoked ? ' The grant was revoked at Google.' : ''}\n`);
+    io.stdout(`Removed ${id} locally.${r.revoked ? ' The grant was revoked at Google.' : ''}\n${alsoRevokedNote(r.alsoRevoked)}`);
     if (!values.revoke) io.stdout('The Gmail grant is still valid; revoke it at https://myaccount.google.com/permissions or rerun with --revoke.\n');
     return;
   }
@@ -669,9 +702,9 @@ async function cmdProductivity(config: PerchConfig, io: CliIo, sub: string | und
   if (sub === 'remove') {
     const id = rest[0];
     if (!id) throw new UsageError('Usage: perch google-productivity remove ID [--revoke]');
-    const r = await removeProductivityAccount(store, upstream, id, { revoke: Boolean(values.revoke) });
+    const r = await removeProductivityAccount(store, upstream, id, revokeOpts(values));
     if (r.groupId) return io.stdout(groupMemberRemoved(id, r.groupId, Boolean(r.groupRemoved)));
-    io.stdout(`Removed ${id} locally.${r.revoked ? ' The grant was revoked at Google.' : ''}\n`);
+    io.stdout(`Removed ${id} locally.${r.revoked ? ' The grant was revoked at Google.' : ''}\n${alsoRevokedNote(r.alsoRevoked)}`);
     if (!values.revoke) io.stdout('The Google grant is still valid; revoke it at https://myaccount.google.com/permissions or rerun with --revoke.\n');
     return;
   }
@@ -1071,6 +1104,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         timeout: { type: 'string' },
         'login-hint': { type: 'string' },
         revoke: { type: 'boolean' },
+        force: { type: 'boolean' },
         'allow-send': { type: 'boolean' },
         'allow-drafts': { type: 'boolean' },
         'allow-calendar-write': { type: 'boolean' },

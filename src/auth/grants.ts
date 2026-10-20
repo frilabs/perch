@@ -360,6 +360,16 @@ const UNKNOWN_ACCOUNT: Record<AccountFamily, string> = {
 
 function validateGrantShape(data: StoreData, capabilities: Capability[], accountIds: string[]): void {
   for (const id of accountIds) {
+    if (id.startsWith('ggroup-')) {
+      // A Google account group is not an account: grants stay per member (google-…, gmail-…, gprod-…).
+      const group = data.googleGroups.find((g) => g.id === id);
+      if (!group) throw new PerchError(`Unknown Google account group: ${id}`, 'unknown_account');
+      const members = [...data.google, ...data.gmail, ...data.googleProductivity].filter((a) => a.groupId === id).map((a) => a.id);
+      throw new PerchError(
+        `${id} is a Google account group; grant its member ids: ${members.join(', ') || '(none)'} (e.g. --account ${members[0] ?? 'ID'})`,
+        'bad_argument',
+      );
+    }
     const family = familyOf(id);
     if (!accountIdsOf(data, family).includes(id)) throw new PerchError(`${UNKNOWN_ACCOUNT[family]}: ${id}`, 'unknown_account');
   }

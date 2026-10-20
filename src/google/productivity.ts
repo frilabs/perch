@@ -1,7 +1,7 @@
 import { PerchError } from '../errors.js';
 import { newAccountId, validateLabel } from '../ids.js';
 import { RefreshingTokenProvider, type SharedTokenSource } from '../oauth/tokenProvider.js';
-import { detachGroupMember, sharedGoogleLogin, sharedRevokeRefused } from './groupStore.js';
+import { detachGroupMember, revokeSeparateGrant, sharedGoogleLogin, sharedRevokeRefused, type SharedGrantHolder } from './groupStore.js';
 import type { CredentialStore, GoogleProductivityAccount } from '../store/credentialStore.js';
 import { UpstreamError, type Upstream } from '../upstream.js';
 import {
@@ -175,36 +175,30 @@ export async function registerProductivityAccount(
 }
 
 /**
- * Removes the account locally. With `revoke`, also revokes the grant at Google first. A member of a Google account
- * group only leaves its group (the shared login stays for the other services; revoking it is refused).
+ * Removes the account locally. With `revoke`, also revokes the grant at Google first; refused while another stored
+ * login of the same Google account uses the same OAuth client (Google revokes the whole grant), unless `force`.
+ * A member of a Google account group only leaves its group (the shared login stays for the other services;
+ * revoking it is refused).
  */
 export async function removeProductivityAccount(
   store: CredentialStore,
   upstream: Upstream,
   id: string,
-  opts: { revoke?: boolean },
-): Promise<{ revoked: boolean; groupId?: string; groupRemoved?: boolean }> {
-  const account = (await store.read()).googleProductivity.find((a) => a.id === id);
+  opts: { revoke?: boolean; force?: boolean },
+): Promise<{ revoked: boolean; alsoRevoked?: SharedGrantHolder[]; groupId?: string; groupRemoved?: boolean }> {
+  const data = await store.read();
+  const account = data.googleProductivity.find((a) => a.id === id);
   if (!account) throw new PerchError(`Unknown Google productivity account: ${id}`, 'unknown_account');
   if (account.groupId) {
     if (opts.revoke) throw sharedRevokeRefused(id, account.groupId);
     const r = await store.update((data) => detachGroupMember(data, 'googleProductivity', id));
     return { revoked: false, groupId: r.groupId, groupRemoved: r.groupRemoved };
   }
-  let revoked = false;
-  if (opts.revoke && account.refreshToken) {
-    try {
-      await revokeToken(upstream, account.refreshToken);
-      revoked = true;
-    } catch (err) {
-      // A token that is already invalid cannot be revoked; removal still proceeds.
-      if (!(err instanceof UpstreamError && err.status === 400)) throw err;
-    }
-  }
+  const { revoked, alsoRevoked } = await revokeSeparateGrant(upstream, data, account, opts);
   await store.update((data) => {
     data.googleProductivity = data.googleProductivity.filter((a) => a.id !== id);
   });
-  return { revoked };
+  return { revoked, ...(alsoRevoked.length ? { alsoRevoked } : {}) };
 }
 
 export interface ProductivityCapabilities {

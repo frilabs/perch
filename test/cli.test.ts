@@ -131,7 +131,7 @@ describe('perch CLI', () => {
     const token = person.refreshToken;
 
     out = [];
-    expect(await runCli(['google', 'remove', g!.id, '--revoke'], io({ transport }))).toBe(0);
+    expect(await runCli(['google', 'remove', data.googleGroups[0]!.id, '--revoke'], io({ transport }))).toBe(0);
     expect(google.revoked).toEqual([token]);
   });
 

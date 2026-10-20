@@ -9,7 +9,9 @@ import { runCli, type CliIo } from '../src/cli/run.js';
 import type { PerchConfig } from '../src/config.js';
 import { createPerchContext } from '../src/context.js';
 import { GoogleTokenProvider } from '../src/google/accounts.js';
+import { PerchError } from '../src/errors.js';
 import { grantOutcome, googleGroupScopes } from '../src/google/group.js';
+import { sharedGrantHolders } from '../src/google/groupStore.js';
 import { createProductivityTokenProvider } from '../src/google/productivity.js';
 import { createGmailTokenProvider } from '../src/mail/gmailAccounts.js';
 import { CredentialStore, type StoreData } from '../src/store/credentialStore.js';
@@ -326,8 +328,7 @@ describe('perch google remove', () => {
     const token = p.refreshToken;
     const d = await read();
     out = '';
-    // A member id selects its whole group.
-    expect(await runCli(['google', 'remove', d.gmail[0]!.id, '--revoke'], io()), err).toBe(0);
+    expect(await runCli(['google', 'remove', d.googleGroups[0]!.id, '--revoke'], io()), err).toBe(0);
     expect(google.revoked).toEqual([token]);
     const after = await read();
     expect([after.googleGroups, after.google, after.gmail, after.googleProductivity]).toEqual([[], [], [], []]);
@@ -507,5 +508,155 @@ describe('store schema', () => {
     await expect(store.update((d) => void (d.gmail[0]!.groupId = 'ggroup-00000000'))).rejects.toThrow(/schema/);
     await expect(store.update((d) => void delete d.gmail[0]!.groupId)).rejects.toThrow(/schema/);
     expect((await store.read()).gmail[0]!.groupId).toBe((await store.read()).googleGroups[0]!.id);
+  });
+});
+
+describe('review fixes', () => {
+  // M1: Google's revoke ends the whole grant of the OAuth client for the Google account.
+  it('M1: --revoke of a group is refused while a separate login of the same account and client exists; --force revokes and says so', async () => {
+    const p = google.addPerson('dummy.shared.revoke@example.test');
+    expect(await runCli(['gmail', 'add', '--label', 'Old', '--read-only', '--timeout', '10'], io({ stderr: approving(p) })), err).toBe(0);
+    expect(await add(p, ['--label', 'New', '--services', 'drive'])).toBe(0);
+    const before = await read();
+    const gid = before.googleGroups[0]!.id;
+    const legacy = before.gmail[0]!.id;
+    expect(await runCli(['google', 'remove', gid, '--revoke'], io())).toBe(1);
+    expect(err).toContain(`Revoking the Google login of ${gid} would also end access for ${legacy} ("Old", dummy.shared.revoke@example.test)`);
+    expect(err).toMatch(/add --force to revoke anyway/);
+    expect(google.revoked).toEqual([]);
+    expect(await read()).toEqual(before);
+    // --force without --revoke is a usage error.
+    expect(await runCli(['google', 'remove', gid, '--force'], io())).toBe(2);
+    out = '';
+    expect(await runCli(['google', 'remove', gid, '--revoke', '--force'], io()), err).toBe(0);
+    expect(google.revoked).toHaveLength(1);
+    expect(out).toContain(`--force: Google revoked the whole grant of this OAuth client for the account, so these lost access too: ${legacy} ("Old")`);
+    const after = await read();
+    expect(after.googleGroups).toEqual([]);
+    expect(after.gmail.map((a) => a.id)).toEqual([legacy]);
+  });
+
+  it('M1: legacy remove --revoke of a separate account is refused while a group of the same account and client exists', async () => {
+    const p = google.addPerson('dummy.legacy.revoke@example.test');
+    expect(await runCli(['google-productivity', 'add', '--label', 'Cal', '--services', 'calendar', '--read-only', '--timeout', '10'], io({ stderr: approving(p) })), err).toBe(0);
+    expect(await add(p, ['--label', 'Grp', '--services', 'gmail'])).toBe(0);
+    const d = await read();
+    const prod = d.googleProductivity[0]!;
+    const gid = d.googleGroups[0]!.id;
+    expect(await runCli(['google-productivity', 'remove', prod.id, '--revoke'], io())).toBe(1);
+    expect(err).toContain(`Revoking the Google login of ${prod.id} would also end access for ${gid} ("Grp"`);
+    expect(google.revoked).toEqual([]);
+    out = '';
+    expect(await runCli(['google-productivity', 'remove', prod.id, '--revoke', '--force'], io()), err).toBe(0);
+    expect(google.revoked).toHaveLength(1);
+    expect(out).toContain(`these lost access too: ${gid} ("Grp")`);
+  });
+
+  it('M1: other OAuth clients and other Google accounts do not block a revoke (unit)', () => {
+    const base = { label: 'L', scopes: [], createdAt: 'x', updatedAt: 'x' };
+    const data = {
+      googleGroups: [
+        { ...base, id: 'ggroup-00000001', email: 'a@example.test', sub: 'S1', clientId: 'C1', clientSecret: 's', refreshToken: 'r' },
+        { ...base, id: 'ggroup-00000002', email: 'a@example.test', sub: 'S1', clientId: 'C2', clientSecret: 's', refreshToken: 'r' },
+        { ...base, id: 'ggroup-00000003', email: 'b@example.test', sub: 'S2', clientId: 'C1', clientSecret: 's', refreshToken: 'r' },
+      ],
+      google: [{ ...base, id: 'google-00000001', email: 'A@example.test', clientId: 'C1', clientSecret: 's', refreshToken: 'r' }],
+      gmail: [{ ...base, id: 'gmail-00000001', email: 'a@example.test', clientId: 'C2', clientSecret: 's', refreshToken: 'r' }],
+      googleProductivity: [
+        { ...base, id: 'gprod-00000001', email: 'a@example.test', sub: 'OTHER', clientId: 'C1', clientSecret: 's', refreshToken: 'r', services: ['calendar'], allowCalendarWrite: false },
+      ],
+    } as unknown as StoreData;
+    // Same sub + client: none besides the e-mail-matched Drive record (no sub) of client C1.
+    expect(sharedGrantHolders(data, data.googleGroups[0]!, 'C1', { id: 'ggroup-00000001' }).map((h) => h.id)).toEqual(['google-00000001']);
+    expect(sharedGrantHolders(data, data.googleGroups[1]!, 'C2', { id: 'ggroup-00000002' }).map((h) => h.id)).toEqual(['gmail-00000001']);
+  });
+
+  // M2: groups are matched on sub only.
+  it('M2: same e-mail but another Google account (sub) is refused; the old group and its sub stay', async () => {
+    const p = google.addPerson('dummy.moved@example.test');
+    expect(await add(p, ['--label', 'Old', '--services', 'drive'])).toBe(0);
+    const before = await read();
+    p.prod.sub = '999999999999999999999';
+    expect(await add(p, ['--label', 'New', '--services', 'drive', '--yes'])).toBe(1);
+    expect(err).toContain(`already connected as Google account group ${before.googleGroups[0]!.id} "Old", but for a different Google account`);
+    expect(err).toContain(`perch google remove ${before.googleGroups[0]!.id}`);
+    expect(await read()).toEqual(before);
+  });
+
+  it('M2: without a terminal, updating an existing group needs --yes; nothing changes otherwise', async () => {
+    const p = google.addPerson('dummy.notty@example.test');
+    expect(await add(p, ['--label', 'Private', '--services', 'drive'])).toBe(0);
+    const before = await read();
+    expect(await add(p, ['--label', 'Private', '--services', 'drive,gmail'])).toBe(1);
+    expect(err).toMatch(/No interactive terminal to confirm the update; nothing was changed\. Rerun with --yes/);
+    expect(await read()).toEqual(before);
+    // A readLine that has no TTY behind it (production prompt) is treated alike.
+    const noTty = async () => {
+      throw new PerchError('no tty', 'no_tty');
+    };
+    err = '';
+    expect(await add(p, ['--label', 'Private', '--services', 'drive,gmail', '--read-only'], { readLine: noTty })).toBe(1);
+    expect(err).toMatch(/Rerun with --yes/);
+    expect(await read()).toEqual(before);
+  });
+
+  // L3: a re-add with --read-only really narrows the requested services.
+  it('L3: re-add narrows the requested services to the new request; other services keep their scopes', async () => {
+    const p = google.addPerson('dummy.narrow@example.test');
+    expect(await add(p, ['--label', 'N', '--services', 'drive,gmail,calendar', '--write'])).toBe(0);
+    let d = await read();
+    expect(d.gmail[0]!.scopes).toEqual([GMAIL_RO, GMAIL_COMPOSE, GMAIL_MODIFY]);
+    expect(d.googleProductivity[0]!.allowCalendarWrite).toBe(true);
+    expect(await add(p, ['--label', 'N', '--services', 'gmail,calendar', '--read-only', '--yes']), err).toBe(0);
+    d = await read();
+    expect(d.gmail[0]!.scopes).toEqual([GMAIL_RO]);
+    expect(d.googleProductivity[0]).toMatchObject({ allowCalendarWrite: false, services: ['calendar'] });
+    expect(d.googleProductivity[0]!.scopes).not.toContain(SCOPE.calendarOwned);
+    expect(d.googleProductivity[0]!.scopes).toContain(SCOPE.calendarRead);
+    // Drive was not part of this request: unchanged, write stays.
+    expect(d.google[0]!.scopes).toEqual([DRIVE_RO, DRIVE]);
+  });
+
+  // L4: a member id never removes the whole group.
+  it('L4: remove with a member id and no --service is a usage error naming the group and --service', async () => {
+    const p = google.addPerson('dummy.member@example.test');
+    expect(await add(p, ['--label', 'M', '--services', 'gmail,calendar,contacts'])).toBe(0);
+    const before = await read();
+    const gid = before.googleGroups[0]!.id;
+    expect(await runCli(['google', 'remove', before.gmail[0]!.id], io())).toBe(2);
+    expect(err).toContain(`${before.gmail[0]!.id} is one service of Google account group ${gid}`);
+    expect(err).toContain(`perch google remove ${gid} --service gmail`);
+    err = '';
+    expect(await runCli(['google', 'remove', before.googleProductivity[0]!.id, '--revoke'], io())).toBe(2);
+    expect(err).toContain(`perch google remove ${gid} --service calendar ; perch google remove ${gid} --service contacts`);
+    expect(await read()).toEqual(before);
+    expect(google.revoked).toEqual([]);
+    // With --service a member id still works.
+    expect(await runCli(['google', 'remove', before.googleProductivity[0]!.id, '--service', 'contacts'], io()), err).toBe(0);
+    expect((await read()).googleProductivity[0]!.services).toEqual(['calendar']);
+  });
+
+  // L5: detaching the last member leaves the grant valid at Google; say so.
+  it('L5: legacy remove of the last group member prints that the grant is still valid and how to revoke', async () => {
+    const p = google.addPerson('dummy.last@example.test');
+    expect(await add(p, ['--label', 'Last', '--services', 'gmail'])).toBe(0);
+    const d = await read();
+    const gid = d.googleGroups[0]!.id;
+    out = '';
+    expect(await runCli(['gmail', 'remove', d.gmail[0]!.id], io()), err).toBe(0);
+    expect(out).toContain(`The Google grant of ${gid} is still valid at Google; revoke it at https://myaccount.google.com/permissions`);
+    expect(out).toContain(`perch google remove ${gid} --revoke`);
+    expect(google.revoked).toEqual([]);
+    expect((await read()).googleGroups).toEqual([]);
+  });
+
+  // L8: a group id in client add names its member ids.
+  it('L8: client add --account ggroup-… explains that grants take the member ids', async () => {
+    const p = google.addPerson('dummy.l8@example.test');
+    expect(await add(p, ['--label', 'L8', '--services', 'drive,gmail'])).toBe(0);
+    const d = await read();
+    const gid = d.googleGroups[0]!.id;
+    expect(await runCli(['client', 'add', '--label', 'X', '--allow', 'read', '--account', gid, '--token-file', `${dirs.root}/config/clients/x.token`], io())).toBe(1);
+    expect(err).toContain(`${gid} is a Google account group; grant its member ids: ${d.google[0]!.id}, ${d.gmail[0]!.id}`);
   });
 });

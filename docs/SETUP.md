@@ -107,7 +107,7 @@ perch google add --label "Privat" --port 8766
 ssh -N -L 8766:127.0.0.1:8766 homeserver
 ```
 
-**Ergebnis:** eine **Google-Konto-Gruppe** (`ggroup-…`) mit den gewohnten Konten darunter: `google-…` (Drive), `gmail-…` (Gmail), `gprod-…` (Kalender und Kontakte). Grants, Tools und `perch client add --account` arbeiten wie bisher mit diesen IDs. Die Gruppe hält **ein** Refresh-Token (einmal gespeichert); Token-Refresh und Fehler wie ein widerrufener Grant (`invalid_grant`) gelten für alle Dienste der Gruppe gleich, ein Refresh läuft nie doppelt.
+**Ergebnis:** eine **Google-Konto-Gruppe** (`ggroup-…`) mit den gewohnten Konten darunter: `google-…` (Drive), `gmail-…` (Gmail), `gprod-…` (Kalender und Kontakte). Grants, Tools und `perch client add --account` arbeiten wie bisher mit diesen IDs (eine `ggroup-…`-ID bei `--account` wird abgelehnt; die Meldung nennt die Mitglieds-IDs). Die Gruppe hält **ein** Refresh-Token (einmal gespeichert); Token-Refresh und Fehler wie ein widerrufener Grant (`invalid_grant`) gelten für alle Dienste der Gruppe gleich, ein Refresh läuft nie doppelt.
 
 **Granulare Zustimmung:** Google lässt einzelne Häkchen abwählen. Perch verbindet nur, was Google tatsächlich gewährt hat, und sagt, was fehlt und mit welchem Befehl es sich nachholen lässt. Fehlt ein Lese-Scope, wird der Dienst nicht verbunden; fehlt ein Schreib-Scope, ist der Dienst nur lesend verbunden. Ohne einen einzigen gewährten Dienst wird nichts gespeichert.
 
@@ -117,7 +117,9 @@ ssh -N -L 8766:127.0.0.1:8766 homeserver
 - Identität über `https://openidconnect.googleapis.com/v1/userinfo` (`sub`, `email_verified: true`)
 - Welche Scopes gewährt wurden (pro Dienst)
 
-**Neu verbinden / Rechte erweitern:** Derselbe Befehl für ein schon verbundenes Konto fragt, ob die bestehende Gruppe aktualisiert werden soll (`--yes` ohne Frage). Dann ersetzt Perch das Refresh-Token, ergänzt neue Dienste und Rechte und behält alle Konto-IDs, Client-Grants bleiben gültig. Es entstehen keine Dubletten.
+**Neu verbinden / Rechte ändern:** Derselbe Befehl für ein schon verbundenes Konto fragt, ob die bestehende Gruppe aktualisiert werden soll (`--yes` ohne Frage; ohne Terminal ist `--yes` Pflicht, sonst ändert sich nichts). Dann ersetzt Perch das Refresh-Token, ergänzt neue Dienste und behält alle Konto-IDs, Client-Grants bleiben gültig. Es entstehen keine Dubletten. Für die Dienste im Befehl gelten genau die jetzt angefragten Rechte: `--read-only` nimmt diesen Diensten Schreibrechte (Gmail Entwürfe/Senden/Organisieren, Kalender-Schreiben); nicht genannte Dienste behalten ihre Rechte. Das alte Refresh-Token wird nicht widerrufen (es gehört zum selben Grant wie das neue).
+
+Wiedererkannt wird das Konto an seiner Google-ID (`sub`), nicht an der E-Mail. Gehört dieselbe Adresse inzwischen zu einem anderen Google-Konto, lehnt Perch ab; erst die alte Gruppe entfernen (`perch google remove ggroup-…`), dann neu hinzufügen.
 
 ```bash
 perch google add --label "Privat" --services gmail --allow-send --port 8766   # Gmail senden nachrüsten
@@ -133,13 +135,15 @@ perch google list
 **Entfernen:**
 
 ```bash
-perch google remove ggroup-1a2b3c4d                    # ganze Gruppe lokal löschen (auch per Konto-ID eines Mitglieds)
+perch google remove ggroup-1a2b3c4d                    # ganze Gruppe lokal löschen (nur mit der ggroup-ID)
 perch google remove ggroup-1a2b3c4d --revoke           # zusätzlich EINMAL bei Google widerrufen: trifft alle Dienste
-perch google remove ggroup-1a2b3c4d --service gmail    # nur einen Dienst entfernen, ohne Widerruf
+perch google remove ggroup-1a2b3c4d --service gmail    # nur einen Dienst entfernen, ohne Widerruf (auch per Konto-ID)
 ```
 
+- Die ganze Gruppe wird nur über ihre `ggroup-…`-ID entfernt. Eine Konto-ID eines Mitglieds ohne `--service` wird abgelehnt; die Meldung nennt die Gruppen-ID und den passenden `--service`-Befehl.
 - Ein Widerruf trifft immer alle Dienste der Gruppe, weil sie sich die Anmeldung teilen. `--service` mit `--revoke` wird deshalb abgelehnt; `perch gmail remove gmail-… --revoke` für ein Gruppenmitglied ebenso.
-- Wird der letzte Dienst einer Gruppe entfernt, verschwindet die Gruppe samt gespeicherter Anmeldung.
+- Google widerruft dabei den **ganzen Grant des OAuth-Clients für dieses Google-Konto**. Gibt es dafür noch einen anderen gespeicherten Eintrag (eine weitere Gruppe oder ein einzeln verbundenes Konto mit derselben Google-ID bzw. E-Mail und derselben Client-ID), lehnt Perch `--revoke` ab und nennt die Konten, die sonst mit den Zugriff verlören. `--force` widerruft trotzdem und nennt sie danach. Das gilt auch für `perch gmail remove … --revoke` und `perch google-productivity remove … --revoke`.
+- Wird der letzte Dienst einer Gruppe entfernt (auch über `perch gmail remove` / `perch google-productivity remove`), verschwindet die Gruppe samt gespeicherter Anmeldung. Der Grant bleibt bei Google gültig; Perch weist darauf hin (Widerruf unter <https://myaccount.google.com/permissions>; in einem Schritt geht es mit `perch google remove ggroup-… --revoke`).
 
 **Einzeln verbundene Konten** (vor diesem Stand oder mit `perch gmail add` / `perch google-productivity add`) bleiben gültig und unverändert; es gibt keine automatische Migration. Sie erscheinen in `perch status` als eigene Einträge. Für dieselbe E-Mail lässt `perch google add` einen schon einzeln verbundenen Dienst unverändert und meldet ihn; zum Zusammenführen das einzelne Konto entfernen und `perch google add … --services <dienst>` ausführen. `--services drive` ergibt das frühere `perch google add` (nur Drive).
 
@@ -349,7 +353,7 @@ perch client add --label "Kontakte" --allow contacts_read --account gprod-1a2b3c
   - **Löschen** (`calendar_delete_event`) ist **endgültig** (kein Papierkorb), bei Serien-ID die ganze Serie. Mit Gästen braucht es `calendar_invite` und Google verschickt Absagen (`sendUpdates` Standard `all`). Perch sendet immer das aktuelle `etag` als If-Match; ein übergebenes `etag` muss passen. Ein bereits abgesagter Termin (`status: "cancelled"`) ergibt `not_found`.
   - **Antworten** (`calendar_respond_event`): `accepted`/`declined`/`tentative` für den eigenen Teilnehmer-Eintrag, PATCH nur mit diesem Eintrag und `attendeesOmitted: true`, `sendUpdates` Standard `all`. Eigene Termine (man ist Organisator) werden abgelehnt; die ändert man mit `calendar_update_event`. Ob `calendar.events.owned` das Antworten auf fremde Einladungen erlaubt, ist noch live zu prüfen.
 - **Wiederholen:** `calendar_create_event` braucht eine stabile `requestId`. Bei `indeterminate` (Ausgang unbekannt) dieselbe `requestId` und dieselbe `calendarId` erneut senden: Der Termin entsteht dann höchstens einmal, sonst kommt `conflict`. Perch wiederholt nie selbst.
-- **Widerruf:** <https://myaccount.google.com/permissions> oder `remove --revoke`.
+- **Widerruf:** <https://myaccount.google.com/permissions> oder `remove --revoke` (abgelehnt, solange ein anderer Eintrag desselben Google-Kontos denselben OAuth-Client nutzt; `--force` erzwingt, Abschnitt 3.2).
 
 ## 4c. Nutzer-Isolation (entfernt)
 
