@@ -201,3 +201,57 @@ describe('OAuth onboarding via CLI [MOCK Google/Gmail and MOCK Microsoft identit
     expect(err.join('') + out.join('')).not.toContain(acct.refreshToken);
   });
 });
+
+describe('--allow-modify opt-in (organizing) [MOCK]', () => {
+  it('imap add stores allowModify only with --allow-modify (false by default)', async () => {
+    expect(await runCli(['imap', 'add', '--label', 'GMX', '--email', 'dummy@gmx.at'], io())).toBe(0);
+    expect(await runCli(['imap', 'add', '--label', 'GMX2', '--email', 'dummy2@gmx.at', '--allow-modify'], io())).toBe(0);
+    const [plain, organize] = (await (await openStore()).read()).imap;
+    expect(plain).toMatchObject({ allowModify: false, allowSend: false, allowDrafts: false });
+    expect(organize).toMatchObject({ allowModify: true, allowSend: false, allowDrafts: false });
+    expect(out.join('')).toContain('organize on');
+  });
+
+  it('gmail add --allow-modify requests gmail.modify; microsoft add --allow-modify requests Mail.ReadWrite', async () => {
+    const readonly = 'https://www.googleapis.com/auth/gmail.readonly';
+    const modify = 'https://www.googleapis.com/auth/gmail.modify';
+    const google = new MockGoogle({ grantedScope: `${readonly} ${modify}` });
+    const gAcct = google.addAccount('dummy.gmail@example.test');
+    const transport: UpstreamTransport = async (req) => {
+      if (req.url.origin === 'https://gmail.googleapis.com' && req.url.pathname === '/gmail/v1/users/me/profile') {
+        const a = google.accessTokens.get((req.headers.authorization ?? '').replace(/^Bearer /, ''));
+        return a ? { status: 200, headers: {}, body: Buffer.from(JSON.stringify({ emailAddress: a.email })) } : { status: 401, headers: {}, body: Buffer.from('{}') };
+      }
+      return google.transport(req);
+    };
+    const clientFile = `${dirs.root}/client.json`;
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(clientFile, JSON.stringify({ installed: { client_id: dummySecret('C'), client_secret: dummySecret('S') } }), { mode: 0o600 });
+    let gScope = '';
+    const gIo = io({
+      transport,
+      env: { ...io().env, PERCH_GOOGLE_CLIENT_FILE: clientFile },
+      stderr: autoApprove(/https:\/\/accounts\.google\.com\S+/, (url) => {
+        gScope = new URL(url).searchParams.get('scope')!;
+        return google.approve(url, gAcct);
+      }),
+    });
+    expect(await runCli(['gmail', 'add', '--label', 'Private', '--allow-modify', '--timeout', '10'], gIo)).toBe(0);
+    expect(gScope.split(' ').sort()).toEqual([modify, readonly].sort());
+
+    const graph = new MockGraph({ grantedScope: 'https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite' });
+    const mAcct = graph.addAccount('dummy.outlook@example.test');
+    let mScope = '';
+    const mIo = io({
+      env: { ...io().env, PERCH_MICROSOFT_CLIENT_ID: '00000000-0000-0000-0000-00000000c11e', PERCH_MICROSOFT_TENANT: 'consumers' },
+      transport: graph.transport,
+      stderr: autoApprove(/https:\/\/login\.microsoftonline\.com\S+/, (url) => {
+        mScope = new URL(url).searchParams.get('scope')!;
+        return graph.approve(url, mAcct);
+      }),
+    });
+    expect(await runCli(['microsoft', 'add', '--label', 'Outlook', '--allow-modify', '--timeout', '10'], mIo)).toBe(0);
+    expect(mScope.split(' ').sort()).toEqual(['Mail.Read', 'Mail.ReadWrite', 'User.Read', 'offline_access']);
+    expect((await (await openStore()).read()).microsoft[0]!.scopes).toContain('Mail.ReadWrite');
+  });
+});

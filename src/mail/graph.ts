@@ -9,6 +9,13 @@ import {
   INDETERMINATE_NOTE,
   MAX_MAIL_PAGE_SIZE,
   type DraftResult,
+  type MailDraftSummary,
+  type MailFolder,
+  type MailFolderRole,
+  type MarkChange,
+  type MoveTarget,
+  type OrganizeResult,
+  type ProviderCapabilities,
   type MailAttachmentContent,
   type MailAttachmentMeta,
   type MailMessage,
@@ -43,6 +50,21 @@ const WELL_KNOWN_FOLDERS = ['inbox', 'sentitems', 'drafts', 'archive', 'deletedi
 /** Graph ids are (URL-unsafe) base64; anything else is not a folder id. */
 const FOLDER_ID_RE = /^[A-Za-z0-9+/=_-]{1,512}$/;
 const MAX_QUERY_LENGTH = 1000;
+const FOLDER_SELECT = 'id,displayName,childFolderCount,totalItemCount,unreadItemCount';
+const DRAFT_SELECT = 'id,subject,toRecipients,lastModifiedDateTime,internetMessageId';
+const DRAFTS_LIST_PATH = '/v1.0/me/mailFolders/drafts/messages';
+const MAX_FOLDERS = 500;
+const MAX_FOLDER_DEPTH = 3;
+const MAX_FOLDER_REQUESTS = 25;
+const MOVE_WELL_KNOWN = ['inbox', 'archive', 'junkemail'];
+const ROLE_FOLDERS: Array<[string, MailFolderRole]> = [
+  ['inbox', 'inbox'],
+  ['sentitems', 'sent'],
+  ['drafts', 'drafts'],
+  ['deleteditems', 'trash'],
+  ['archive', 'archive'],
+  ['junkemail', 'junk'],
+];
 /**
  * Graph documents MIME payloads as "currently limited to 4 MB" (HTTP 413 above it; see
  * https://learn.microsoft.com/en-us/graph/api/user-post-messages). Perch bounds the base64 request
@@ -115,6 +137,7 @@ interface GraphMessage {
   replyTo?: GraphRecipient[];
   internetMessageHeaders?: Array<{ name?: string; value?: string }> | null;
   body?: { contentType?: string; content?: string } | null;
+  lastModifiedDateTime?: string;
 }
 
 interface GraphAttachmentMeta {
@@ -204,8 +227,14 @@ export class GraphMailProvider implements MailProvider<MicrosoftAccount> {
     private readonly tokens: GraphTokens,
   ) {}
 
-  providerCapabilities(account: MicrosoftAccount): { draft: boolean; send: boolean } {
-    return { draft: account.scopes.includes('Mail.ReadWrite'), send: account.scopes.includes('Mail.Send') };
+  providerCapabilities(account: MicrosoftAccount): ProviderCapabilities {
+    const readWrite = account.scopes.includes('Mail.ReadWrite');
+    return { draft: readWrite, send: account.scopes.includes('Mail.Send'), modify: readWrite };
+  }
+
+  /** POST /me/messages/{id}/send needs Mail.Send. */
+  canSendDraft(account: MicrosoftAccount): boolean {
+    return account.scopes.includes('Mail.Send');
   }
 
   /** Authorised Graph call; a 401 drops the cached access token so the next call refreshes. */
@@ -337,10 +366,10 @@ export class GraphMailProvider implements MailProvider<MicrosoftAccount> {
     };
   }
 
-  private requireScope(account: MicrosoftAccount, cap: 'draft' | 'send'): void {
+  private requireScope(account: MicrosoftAccount, cap: 'draft' | 'send' | 'modify'): void {
     if (this.providerCapabilities(account)[cap]) return;
-    const scope = cap === 'draft' ? 'Mail.ReadWrite' : 'Mail.Send';
-    const flag = cap === 'draft' ? '--allow-drafts' : '--allow-send';
+    const scope = cap === 'send' ? 'Mail.Send' : 'Mail.ReadWrite';
+    const flag = cap === 'draft' ? '--allow-drafts' : cap === 'send' ? '--allow-send' : '--allow-modify';
     throw new PerchError(
       `Microsoft account ${account.id} was not authorised with ${scope}. Reconnect it with ${flag}: ` +
         `\`perch microsoft remove ${account.id}\`, then \`perch microsoft add ${flag} --label <label>\`.`,
@@ -387,13 +416,18 @@ export class GraphMailProvider implements MailProvider<MicrosoftAccount> {
   async send(account: MicrosoftAccount, mail: OutgoingMime): Promise<SendResult> {
     this.requireScope(account, 'send');
     const data = this.mimeBody(mail, 'send'); // refused locally: nothing was sent
+    return this.submit(account, '/v1.0/me/sendMail', { contentType: 'text/plain', data });
+  }
+
+  /** One POST to a send route, never retried; same outcome classes as send. */
+  private async submit(account: MicrosoftAccount, path: string, text?: { contentType: string; data: string }): Promise<SendResult> {
     const token = await this.tokens.getAccessToken(account.id); // failures here throw: nothing was sent
     try {
       await this.upstream.raw('graph', {
         method: 'POST',
-        path: '/v1.0/me/sendMail',
+        path,
         headers: { authorization: `Bearer ${token}` },
-        text: { contentType: 'text/plain', data },
+        ...(text ? { text } : {}),
         capability: 'send',
       });
       return { status: 'accepted', detail: ACCEPTED_NOTE };
@@ -408,4 +442,154 @@ export class GraphMailProvider implements MailProvider<MicrosoftAccount> {
       return { status: 'indeterminate', detail: INDETERMINATE_NOTE };
     }
   }
+
+  // ---- organizing (Mail.ReadWrite) and sending existing drafts (Mail.Send) ------------------------------
+
+  async listFolders(account: MicrosoftAccount): Promise<MailFolder[]> {
+    const out: MailFolder[] = [];
+    const page = async (path: string) => {
+      const res = await this.call<{ value?: GraphFolder[] }>(account, { method: 'GET', path, query: { $top: '100', $select: FOLDER_SELECT } });
+      return (res.value ?? []).filter((f): f is GraphFolder & { id: string } => typeof f.id === 'string' && FOLDER_ID_RE.test(f.id));
+    };
+    // Breadth-first over child folders, bounded in requests and folders (deep trees are cut, never followed forever).
+    let level = await page('/v1.0/me/mailFolders');
+    let requests = 1;
+    for (let depth = 0; level.length && out.length < MAX_FOLDERS; depth++) {
+      const next: Array<GraphFolder & { id: string }> = [];
+      for (const f of level) {
+        if (out.length >= MAX_FOLDERS) break;
+        out.push({
+          folderId: f.id,
+          name: typeof f.displayName === 'string' ? f.displayName : f.id,
+          role: 'other',
+          ...(typeof f.totalItemCount === 'number' ? { total: f.totalItemCount } : {}),
+          ...(typeof f.unreadItemCount === 'number' ? { unread: f.unreadItemCount } : {}),
+        });
+        if (depth < MAX_FOLDER_DEPTH && (f.childFolderCount ?? 0) > 0 && requests < MAX_FOLDER_REQUESTS) {
+          requests++;
+          next.push(...(await page(`/v1.0/me/mailFolders/${encodeURIComponent(f.id)}/childFolders`)));
+        }
+      }
+      level = next;
+    }
+    // Roles come from the well-known names (folder display names are localised).
+    const roles = await Promise.all(
+      ROLE_FOLDERS.map(async ([name, role]) => {
+        try {
+          const f = await this.call<GraphFolder>(account, { method: 'GET', path: `/v1.0/me/mailFolders/${name}`, query: { $select: 'id' } });
+          return typeof f.id === 'string' ? ([f.id, role] as const) : undefined;
+        } catch {
+          return undefined; // e.g. no archive folder yet
+        }
+      }),
+    );
+    const byId = new Map(roles.filter((r): r is readonly [string, MailFolderRole] => !!r));
+    return out.map((f) => ({ ...f, role: byId.get(f.folderId) ?? 'other' }));
+  }
+
+  async listDrafts(account: MicrosoftAccount, opts: { pageSize: number }, cursor: string | undefined): Promise<SourcePage<MailDraftSummary>> {
+    let path = DRAFTS_LIST_PATH;
+    let query: Record<string, string>;
+    if (cursor !== undefined) {
+      ({ path, query } = decodeGraphCursor(cursor));
+      if (path !== DRAFTS_LIST_PATH) throw new PerchError('Invalid or tampered cursor', 'bad_cursor');
+    } else {
+      const top = Math.max(1, Math.min(MAX_MAIL_PAGE_SIZE, Math.floor(opts.pageSize) || 1));
+      query = { $top: String(top), $select: DRAFT_SELECT, $orderby: 'lastModifiedDateTime desc' };
+    }
+    const res = await this.call<{ value?: GraphMessage[]; '@odata.nextLink'?: string }>(account, { method: 'GET', path, query });
+    const items: MailDraftSummary[] = (res.value ?? [])
+      .filter((m) => typeof m.id === 'string' && m.id)
+      .map((m) => {
+        const to = recipients(m.toRecipients);
+        return {
+          draftId: m.id!,
+          ...(m.internetMessageId ? { messageId: m.internetMessageId } : {}),
+          ...(m.subject != null ? { subject: m.subject } : {}),
+          ...(to?.length ? { to } : {}),
+          ...(m.lastModifiedDateTime ? { date: m.lastModifiedDateTime } : {}),
+        };
+      });
+    const nextLink = res['@odata.nextLink'];
+    if (nextLink === undefined || nextLink === null) return { items, next: null };
+    if (!parseNextLink(nextLink)) return { items, next: null, incomplete: true };
+    return { items, next: encodeGraphCursor(nextLink) };
+  }
+
+  async markMessage(account: MicrosoftAccount, messageId: string, change: MarkChange): Promise<OrganizeResult> {
+    this.requireScope(account, 'modify');
+    const body: Record<string, unknown> = {};
+    if (change.read !== undefined) body.isRead = change.read;
+    if (change.starred !== undefined) body.flag = { flagStatus: change.starred ? 'flagged' : 'notFlagged' };
+    await this.call<unknown>(account, { method: 'PATCH', path: `/v1.0/me/messages/${idSegment(messageId)}`, json: body, capability: 'mail_modify' });
+    return { messageId };
+  }
+
+  /** POST /me/messages/{id}/move: Graph creates the message in the destination with a NEW id, returned here. */
+  private async move(account: MicrosoftAccount, messageId: string, destinationId: string): Promise<OrganizeResult> {
+    this.requireScope(account, 'modify');
+    const m = await this.call<GraphMessage>(account, {
+      method: 'POST',
+      path: `/v1.0/me/messages/${idSegment(messageId)}/move`,
+      json: { destinationId },
+      capability: 'mail_modify',
+    });
+    if (typeof m.id !== 'string' || !m.id) throw new PerchError('Microsoft Graph did not return the moved message id', 'upstream_bad_response');
+    return { messageId: m.id, folderId: destinationId };
+  }
+
+  async moveMessage(account: MicrosoftAccount, messageId: string, target: MoveTarget): Promise<OrganizeResult> {
+    if (target.archive) {
+      if (target.folderId !== undefined) throw new PerchError('Microsoft archive takes no folderId (it moves to the Archive folder)', 'bad_argument');
+      return this.move(account, messageId, 'archive');
+    }
+    return this.move(account, messageId, moveDestination(target.folderId));
+  }
+
+  /** Deleted Items is the recoverable trash. Never permanentDelete, never a DELETE request. */
+  trashMessage(account: MicrosoftAccount, messageId: string): Promise<OrganizeResult> {
+    return this.move(account, messageId, 'deleteditems');
+  }
+
+  /** Only a message that is in Deleted Items is moved back, to the inbox. */
+  async restoreMessage(account: MicrosoftAccount, messageId: string): Promise<OrganizeResult> {
+    this.requireScope(account, 'modify');
+    const [m, trash] = await Promise.all([
+      this.call<{ parentFolderId?: string }>(account, { method: 'GET', path: `/v1.0/me/messages/${idSegment(messageId)}`, query: { $select: 'parentFolderId' } }),
+      this.call<GraphFolder>(account, { method: 'GET', path: '/v1.0/me/mailFolders/deleteditems', query: { $select: 'id' } }),
+    ]);
+    if (!m.parentFolderId || m.parentFolderId !== trash.id) throw new PerchError('This message is not in Deleted Items', 'not_in_trash');
+    return this.move(account, messageId, 'inbox');
+  }
+
+  /** POST /me/messages/{id}/send: Exchange sends the stored draft (Bcc handled by Exchange). Exactly one attempt. */
+  async sendDraft(account: MicrosoftAccount, draftId: string): Promise<SendResult> {
+    this.requireScope(account, 'send');
+    return this.submit(account, `/v1.0/me/messages/${idSegment(draftId, 'draft')}/send`);
+  }
 }
+
+interface GraphFolder {
+  id?: string;
+  displayName?: string;
+  childFolderCount?: number;
+  totalItemCount?: number;
+  unreadItemCount?: number;
+}
+
+/**
+ * Destinations a caller may name: a few well-known folders or a folder id. Deleted Items goes through trashMessage
+ * only; the Recoverable Items folders (one step before purging) are never a destination.
+ */
+function moveDestination(folderId: string | undefined): string {
+  if (typeof folderId !== 'string') throw new PerchError('folderId is required (or archive: true)', 'bad_argument');
+  const lower = folderId.toLowerCase();
+  if (lower === 'deleteditems') throw new PerchError('Use mail_trash_message to move a message to Deleted Items', 'bad_argument');
+  if (lower.startsWith('recoverableitems') || lower === 'searchfolders' || lower === 'msgfolderroot') {
+    throw new PerchError('This folder cannot be a destination', 'bad_folder');
+  }
+  if (MOVE_WELL_KNOWN.includes(lower)) return lower;
+  if (FOLDER_ID_RE.test(folderId) && folderId.length > 40) return folderId;
+  throw new PerchError(`Unsupported Microsoft folder. Use one of ${MOVE_WELL_KNOWN.join(', ')} or a folder id from mail_list_folders`, 'bad_folder');
+}
+

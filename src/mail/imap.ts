@@ -5,10 +5,19 @@ import type { ImapAccount } from '../store/credentialStore.js';
 import { MAIL_TIMEOUTS, mailTlsOptions, validateHost, validatePort, type TestOnlyTlsTrust } from './imapPresets.js';
 import { htmlToText } from './html.js';
 import { SmtpSender } from './smtp.js';
+import { prepareDraftForSmtp } from './draftMime.js';
 import {
+  ACCEPTED_NOTE,
   HARD_MAIL_MAX_BYTES,
   MAX_MAIL_PAGE_SIZE,
   type DraftResult,
+  type MailDraftSummary,
+  type MailFolder,
+  type MailFolderRole,
+  type MarkChange,
+  type MoveTarget,
+  type OrganizeResult,
+  type ProviderCapabilities,
   type MailAttachmentContent,
   type MailAttachmentMeta,
   type MailMessage,
@@ -63,7 +72,29 @@ export interface ImapSession {
   /** Path of the \Drafts special-use mailbox, if the server reports one. */
   draftsMailbox(): Promise<string | undefined>;
   append(mailbox: string, raw: Buffer, flags: string[]): Promise<{ uid?: number; uidValidity?: string }>;
+  /** Every mailbox with its special-use flag (RFC 6154) and LIST flags. */
+  listMailboxes(): Promise<ImapMailboxInfo[]>;
+  /** SELECT the mailbox (read-write) for flag changes and moves until release(). */
+  openWritable(mailbox: string): Promise<ImapMailboxLock>;
+  /** UID STORE +FLAGS / -FLAGS on one message of the open (writable) mailbox. */
+  setFlags(uid: number, add: string[], remove: string[]): Promise<void>;
+  /**
+   * Moves one message of the open (writable) mailbox. Only with MOVE (RFC 6851) or, as COPY + UID EXPUNGE of that
+   * one UID, with UIDPLUS: a plain EXPUNGE could permanently remove other messages flagged \Deleted, so without
+   * either extension it throws instead. Returns the new UID when the server reports it (COPYUID).
+   */
+  move(uid: number, destination: string): Promise<{ uid?: number; uidValidity?: string }>;
+  /** Complete raw message source of one UID (open mailbox), at most maxBytes. */
+  downloadSource(uid: number, maxBytes: number): Promise<Buffer | undefined>;
   logout(): Promise<void>;
+}
+
+export interface ImapMailboxInfo {
+  path: string;
+  name?: string;
+  specialUse?: string;
+  /** LIST flags such as \Noselect. */
+  flags?: string[];
 }
 
 // ---- imapflow implementation -----------------------------------------------------------------
@@ -129,6 +160,67 @@ export class ImapflowSession implements ImapSession {
       ...(res.uid ? { uid: res.uid } : {}),
       ...(res.uidValidity !== undefined ? { uidValidity: String(res.uidValidity) } : {}),
     };
+  }
+
+  async listMailboxes(): Promise<ImapMailboxInfo[]> {
+    return (await this.client.list()).map((m) => ({
+      path: m.path,
+      ...(m.name ? { name: m.name } : {}),
+      ...(m.specialUse ? { specialUse: m.specialUse } : {}),
+      ...(m.flags ? { flags: [...m.flags] } : {}),
+    }));
+  }
+
+  async openWritable(mailbox: string): Promise<ImapMailboxLock> {
+    const lock = await this.client.getMailboxLock(mailbox, { readOnly: false });
+    const mb = this.client.mailbox;
+    if (!mb || typeof mb !== 'object' || mb.uidValidity === undefined || mb.readOnly) {
+      lock.release();
+      throw new PerchError(`Could not open folder "${mailbox}" for changes`, 'imap_error');
+    }
+    return { uidValidity: String(mb.uidValidity), release: () => lock.release() };
+  }
+
+  async setFlags(uid: number, add: string[], remove: string[]): Promise<void> {
+    if (add.length && !(await this.client.messageFlagsAdd(String(uid), add, { uid: true }))) {
+      throw new PerchError('The server refused to change the message flags', 'imap_error');
+    }
+    if (remove.length && !(await this.client.messageFlagsRemove(String(uid), remove, { uid: true }))) {
+      throw new PerchError('The server refused to change the message flags', 'imap_error');
+    }
+  }
+
+  async move(uid: number, destination: string): Promise<{ uid?: number; uidValidity?: string }> {
+    const caps = this.client.capabilities;
+    if (!caps.has('MOVE') && !caps.has('UIDPLUS')) {
+      throw new PerchError(
+        'This IMAP server supports neither MOVE nor UIDPLUS; Perch does not move messages there (a plain EXPUNGE could delete other messages)',
+        'imap_move_unsupported',
+      );
+    }
+    const res = await this.client.messageMove(String(uid), destination, { uid: true });
+    if (!res) throw new PerchError(`Could not move the message to "${destination}"`, 'imap_error');
+    const newUid = res.uidMap?.get(uid);
+    return {
+      ...(newUid ? { uid: newUid } : {}),
+      ...(res.uidValidity !== undefined ? { uidValidity: String(res.uidValidity) } : {}),
+    };
+  }
+
+  async downloadSource(uid: number, maxBytes: number): Promise<Buffer | undefined> {
+    const res = await this.client.download(String(uid), undefined, { uid: true, maxBytes });
+    if (!res.content) return undefined;
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of res.content as AsyncIterable<Buffer>) {
+      chunks.push(chunk);
+      total += chunk.length;
+      if (total >= maxBytes) {
+        res.content.destroy();
+        break;
+      }
+    }
+    return Buffer.concat(chunks).subarray(0, maxBytes);
   }
 
   async logout(): Promise<void> {
@@ -232,6 +324,20 @@ function decodeCursor(cursor: string, uidValidity: string): number {
   return Number(m[2]);
 }
 
+/** Largest stored draft Perch reads for sending (10 MiB attachments base64-encoded plus headers and text). */
+const MAX_DRAFT_BYTES = 16 * 1024 * 1024;
+
+const SPECIAL_USE_ROLES: Record<string, MailFolderRole> = {
+  '\\sent': 'sent',
+  '\\drafts': 'drafts',
+  '\\trash': 'trash',
+  '\\archive': 'archive',
+  '\\all': 'all',
+  '\\junk': 'junk',
+  '\\flagged': 'starred',
+  '\\important': 'important',
+};
+
 function checkMaxBytes(n: number): number {
   if (!Number.isInteger(n) || n < 1 || n > HARD_MAIL_MAX_BYTES) {
     throw new PerchError(`maxBytes must be between 1 and ${HARD_MAIL_MAX_BYTES}`, 'bad_argument');
@@ -332,8 +438,13 @@ export class ImapMailProvider implements MailProvider<ImapAccount> {
     this.smtp = opts.smtp ?? new SmtpSender();
   }
 
-  providerCapabilities(account: ImapAccount) {
-    return { draft: account.allowDrafts, send: account.allowSend };
+  providerCapabilities(account: ImapAccount): ProviderCapabilities {
+    return { draft: account.allowDrafts, send: account.allowSend, modify: account.allowModify === true };
+  }
+
+  /** Sending a stored draft is sending: the allowSend opt-in (the draft is then moved to Sent). */
+  canSendDraft(account: ImapAccount): boolean {
+    return account.allowSend;
   }
 
   /** One connection per call, always logged out (also on error). */
@@ -388,17 +499,20 @@ export class ImapMailProvider implements MailProvider<ImapAccount> {
     const pageSize = Math.min(Math.max(1, Math.trunc(opts.pageSize) || 1), MAX_MAIL_PAGE_SIZE);
     const q = opts.query?.trim();
     if (q && (q.length > 500 || CONTROL.test(q))) throw new PerchError('query must be at most 500 characters without control characters', 'bad_argument');
-    return this.withMailbox(account, folder, async (s, uidValidity) => {
-      const below = cursor ? decodeCursor(cursor, uidValidity) : Infinity;
-      const uids = (await s.search(q ? { text: q } : { all: true })).filter((u) => u < below).sort((a, b) => b - a);
-      const page = uids.slice(0, pageSize);
-      const fetched = new Map((await s.fetchSummaries(page)).map((m) => [m.uid, m]));
-      const items = page
-        .map((uid) => fetched.get(uid))
-        .filter((m): m is ImapFetchedMessage => !!m)
-        .map((m) => this.summary(folder, uidValidity, m));
-      return { items, next: uids.length > pageSize ? `${uidValidity}:${page[page.length - 1]}` : null };
-    });
+    return this.withMailbox(account, folder, (s, uidValidity) => this.page(s, folder, uidValidity, q ? { text: q } : { all: true }, pageSize, cursor));
+  }
+
+  /** One page of the open mailbox, newest UID first (see search). */
+  private async page(s: ImapSession, folder: string, uidValidity: string, query: ImapSearchQuery, pageSize: number, cursor: string | undefined) {
+    const below = cursor ? decodeCursor(cursor, uidValidity) : Infinity;
+    const uids = (await s.search(query)).filter((u) => u < below).sort((a, b) => b - a);
+    const page = uids.slice(0, pageSize);
+    const fetched = new Map((await s.fetchSummaries(page)).map((m) => [m.uid, m]));
+    const items = page
+      .map((uid) => fetched.get(uid))
+      .filter((m): m is ImapFetchedMessage => !!m)
+      .map((m) => this.summary(folder, uidValidity, m));
+    return { items, next: uids.length > pageSize ? `${uidValidity}:${page[page.length - 1]}` : null };
   }
 
   private summary(folder: string, uidValidity: string, m: ImapFetchedMessage): MailSummary {
@@ -516,4 +630,191 @@ export class ImapMailProvider implements MailProvider<ImapAccount> {
     }
     return this.smtp.send(account, mail.raw, mail.envelope);
   }
+  // ---- organizing (allowModify opt-in) and sending existing drafts (allowSend) ---------------------------
+
+  private requireModify(account: ImapAccount): void {
+    if (account.allowModify === true) return;
+    throw new PerchError(
+      `Organizing mail is not enabled for ${account.id}. Re-add the account with --allow-modify: ` +
+        `\`perch imap remove ${account.id}\`, then \`perch imap add ... --allow-modify\`.`,
+      'provider_scope_missing',
+    );
+  }
+
+  /** Opens the id's mailbox read-write and refuses ids from another UIDVALIDITY epoch. */
+  private withWritableMessage<T>(account: ImapAccount, messageId: string, fn: (s: ImapSession, uid: number, mailbox: string) => Promise<T>) {
+    const id = decodeImapMessageId(messageId);
+    return this.withSession(account, async (s) => {
+      const lock = await s.openWritable(id.mailbox);
+      try {
+        if (lock.uidValidity !== id.uidValidity) {
+          throw new PerchError(
+            'This message id is no longer valid: the folder was rebuilt on the server (UIDVALIDITY changed). Search again to get current ids.',
+            'stale_message_id',
+          );
+        }
+        await ImapMailProvider.fetchExisting(s, id.uid);
+        return await fn(s, id.uid, id.mailbox);
+      } finally {
+        lock.release();
+      }
+    });
+  }
+
+  private static selectable(list: ImapMailboxInfo[]): ImapMailboxInfo[] {
+    return list.filter((m) => !(m.flags ?? []).some((f) => f.toLowerCase() === '\\noselect' || f.toLowerCase() === '\\nonexistent'));
+  }
+
+  private static special(list: ImapMailboxInfo[], use: string): string | undefined {
+    return ImapMailProvider.selectable(list).find((m) => m.specialUse?.toLowerCase() === use.toLowerCase())?.path;
+  }
+
+  private async draftsPath(account: ImapAccount, s: ImapSession): Promise<string> {
+    return validateFolder(account.draftsMailbox ?? (await s.draftsMailbox()) ?? 'Drafts');
+  }
+
+  /** Moves within one session; the destination must be an existing selectable mailbox other than the source. */
+  private async moveIn(s: ImapSession, uid: number, from: string, to: string, list: ImapMailboxInfo[]): Promise<OrganizeResult> {
+    if (!ImapMailProvider.selectable(list).some((m) => m.path === to)) throw new PerchError(`Unknown folder "${to}"`, 'bad_folder');
+    if (to === from) throw new PerchError('The message is already in that folder', 'bad_argument');
+    const res = await s.move(uid, to);
+    if (res.uid && res.uidValidity) return { messageId: encodeImapMessageId(to, res.uidValidity, res.uid), folderId: to };
+    return { folderId: to, note: 'The server did not report the new message id (no UIDPLUS); search the folder again.' };
+  }
+
+  async listFolders(account: ImapAccount): Promise<MailFolder[]> {
+    return this.withSession(account, async (s) =>
+      ImapMailProvider.selectable(await s.listMailboxes()).map((m) => ({
+        folderId: m.path,
+        name: m.name ?? m.path,
+        role: m.path.toUpperCase() === 'INBOX' ? 'inbox' : (SPECIAL_USE_ROLES[m.specialUse?.toLowerCase() ?? ''] ?? 'other'),
+        ...(m.specialUse ? { specialUse: m.specialUse } : {}),
+      })),
+    );
+  }
+
+  async listDrafts(account: ImapAccount, opts: { pageSize: number }, cursor: string | undefined): Promise<SourcePage<MailDraftSummary>> {
+    const pageSize = Math.min(Math.max(1, Math.trunc(opts.pageSize) || 1), MAX_MAIL_PAGE_SIZE);
+    return this.withSession(account, async (s) => {
+      const mailbox = await this.draftsPath(account, s);
+      const lock = await s.openReadonly(mailbox);
+      try {
+        const page = await this.page(s, mailbox, lock.uidValidity, { all: true }, pageSize, cursor);
+        return {
+          items: page.items.map((m) => ({
+            draftId: m.messageId,
+            ...(m.subject !== undefined ? { subject: m.subject } : {}),
+            ...(m.to ? { to: m.to } : {}),
+            ...(m.date ? { date: m.date } : {}),
+          })),
+          next: page.next,
+        };
+      } finally {
+        lock.release();
+      }
+    });
+  }
+
+  async markMessage(account: ImapAccount, messageId: string, change: MarkChange): Promise<OrganizeResult> {
+    this.requireModify(account);
+    const add: string[] = [];
+    const remove: string[] = [];
+    if (change.read !== undefined) (change.read ? add : remove).push('\\Seen');
+    if (change.starred !== undefined) (change.starred ? add : remove).push('\\Flagged');
+    return this.withWritableMessage(account, messageId, async (s, uid) => {
+      await s.setFlags(uid, add, remove);
+      return { messageId };
+    });
+  }
+
+  async moveMessage(account: ImapAccount, messageId: string, target: MoveTarget): Promise<OrganizeResult> {
+    this.requireModify(account);
+    if (target.folderId !== undefined) validateFolder(target.folderId);
+    return this.withWritableMessage(account, messageId, async (s, uid, mailbox) => {
+      const list = await s.listMailboxes();
+      let to = target.folderId;
+      if (target.archive && to === undefined) {
+        to = ImapMailProvider.special(list, '\\Archive');
+        if (!to) throw new PerchError('This server reports no \\Archive folder; pass folderId with archive: true', 'no_archive_folder');
+      }
+      if (to === undefined) throw new PerchError('folderId is required (or archive: true)', 'bad_argument');
+      return this.moveIn(s, uid, mailbox, to, list);
+    });
+  }
+
+  /** MOVE to the \Trash special-use mailbox (recoverable). Never \Deleted + EXPUNGE of the message itself. */
+  async trashMessage(account: ImapAccount, messageId: string): Promise<OrganizeResult> {
+    this.requireModify(account);
+    return this.withWritableMessage(account, messageId, async (s, uid, mailbox) => {
+      const list = await s.listMailboxes();
+      const trash = ImapMailProvider.special(list, '\\Trash');
+      if (!trash) throw new PerchError('This server reports no \\Trash folder; Perch does not guess one', 'no_trash_folder');
+      if (trash === mailbox) throw new PerchError('The message is already in the trash', 'bad_argument');
+      return this.moveIn(s, uid, mailbox, trash, list);
+    });
+  }
+
+  /** Only a message in the \Trash mailbox is moved back, to INBOX. */
+  async restoreMessage(account: ImapAccount, messageId: string): Promise<OrganizeResult> {
+    this.requireModify(account);
+    return this.withWritableMessage(account, messageId, async (s, uid, mailbox) => {
+      const list = await s.listMailboxes();
+      if (ImapMailProvider.special(list, '\\Trash') !== mailbox) throw new PerchError('This message is not in the trash', 'not_in_trash');
+      return this.moveIn(s, uid, mailbox, 'INBOX', list);
+    });
+  }
+
+  /**
+   * Sends a stored draft: reads its raw MIME from the drafts mailbox, submits it over SMTP with the envelope from
+   * its To/Cc/Bcc and WITHOUT the Bcc header, then (only when accepted) clears \Draft and moves it to the \Sent
+   * mailbox. Exactly one SMTP attempt. Failing to file it in Sent never changes the send outcome.
+   */
+  async sendDraft(account: ImapAccount, draftId: string): Promise<SendResult> {
+    if (!account.allowSend) {
+      throw new PerchError(`Sending is not enabled for ${account.id}. Re-add the account with sending allowed.`, 'not_permitted');
+    }
+    const id = decodeImapMessageId(draftId);
+    // Everything before SMTP throws a PerchError (nothing was submitted), also for unexpected IMAP failures.
+    const raw = await this.withSession(account, async (s) => {
+      if ((await this.draftsPath(account, s)) !== id.mailbox) throw new PerchError('This message is not in the drafts folder', 'not_a_draft');
+      const lock = await s.openReadonly(id.mailbox);
+      try {
+        if (lock.uidValidity !== id.uidValidity) throw new PerchError('This draft id is no longer valid (UIDVALIDITY changed); list the drafts again', 'stale_message_id');
+        await ImapMailProvider.fetchExisting(s, id.uid);
+        const source = await s.downloadSource(id.uid, MAX_DRAFT_BYTES + 1);
+        if (!source?.length) throw new PerchError('The draft could not be read', 'not_found');
+        if (source.length > MAX_DRAFT_BYTES) throw new PerchError(`The draft is larger than ${MAX_DRAFT_BYTES} bytes`, 'message_too_large');
+        return source;
+      } finally {
+        lock.release();
+      }
+    }).catch((err: unknown) => {
+      if (err instanceof PerchError) throw err;
+      throw new PerchError('The draft could not be read from the IMAP server', 'imap_error');
+    });
+    const ready = prepareDraftForSmtp(raw, account.email);
+    const result = await this.smtp.send(account, ready.raw, ready.envelope);
+    if (result.status !== 'accepted') return result;
+    let filed: string;
+    try {
+      filed = await this.withSession(account, async (s) => {
+        const sent = ImapMailProvider.special(await s.listMailboxes(), '\\Sent');
+        if (!sent) return ' The server reports no \\Sent folder; the draft stays in the drafts folder. Do not send it again.';
+        const lock = await s.openWritable(id.mailbox);
+        try {
+          if (lock.uidValidity !== id.uidValidity) throw new Error('uidvalidity changed');
+          await s.setFlags(id.uid, ['\\Seen'], ['\\Draft']);
+          await s.move(id.uid, sent);
+          return ` The draft was moved to "${sent}".`;
+        } finally {
+          lock.release();
+        }
+      });
+    } catch {
+      filed = ' The draft could not be moved to the Sent folder and is still in the drafts folder. Do not send it again.';
+    }
+    const detail = result.detail.startsWith(ACCEPTED_NOTE) ? result.detail : ACCEPTED_NOTE;
+    return { ...result, detail: `${detail}${filed}` };
+  }
 }
+

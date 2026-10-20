@@ -91,6 +91,11 @@ export function canonicalSendPayload(req: SendPayload): string {
   ]);
 }
 
+/** Canonical payload of sending an existing draft: a distinct domain, so it never equals a mail_send payload. */
+export function canonicalSendDraftPayload(accountId: string, draftId: string): string {
+  return JSON.stringify(['perch-send-draft-v1', accountId, draftId]);
+}
+
 export interface SendView {
   status: 'accepted' | 'rejected' | 'indeterminate';
   requestState: SendState;
