@@ -10,6 +10,7 @@ import { SendWorkflow } from '../mail/workflow.js';
 import { MailWorkflowLedger } from '../mail/workflowLedger.js';
 import { CredentialStore } from '../store/credentialStore.js';
 import { createFetchTransport, Upstream } from '../upstream.js';
+import { loginPrompts } from './loginPrompt.js';
 import type { CliIo } from './run.js';
 
 /** perch luma … (docs/LUMA_SPEC.md §7). Local CLI only. */
@@ -73,14 +74,7 @@ export async function cmdLuma(config: PerchConfig, io: CliIo, sub: string | unde
     ...(config.lumaClientId ? { clientIdUrl: config.lumaClientId } : {}),
     port,
     timeoutMs: timeoutS * 1000,
-    onAuthUrl: (url) => {
-      const p = new URL(new URL(url).searchParams.get('redirect_uri')!).port;
-      io.stderr(
-        `Open this URL in a browser and sign in to the Luma account you want to add:\n\n${url}\n\n` +
-          `The browser must reach http://127.0.0.1:${p} on this machine. If it runs elsewhere, forward the port first: ssh -L ${p}:127.0.0.1:${p} <this-server>\n` +
-          `Waiting up to ${timeoutS}s...\n`,
-      );
-    },
+    ...loginPrompts(io, 'sign in to the Luma account you want to add', timeoutS * 1000),
   });
   const { account, blocked, missing } = await registerLumaAccount(store, svc.mcp, { label: values.label, grant });
   const known = Object.keys(LUMA_TOOLS).length;

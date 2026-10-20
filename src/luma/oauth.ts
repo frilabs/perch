@@ -1,5 +1,5 @@
 import { PerchError } from '../errors.js';
-import { runPkceLoopback } from '../oauth/loopback.js';
+import { runPkceLoopback, type PasteRedirect } from '../oauth/loopback.js';
 import type { TokenGrantResponse } from '../oauth/tokenProvider.js';
 import type { LumaAccount } from '../store/credentialStore.js';
 import { UpstreamError, validateLumaOrigin, type Upstream } from '../upstream.js';
@@ -135,6 +135,7 @@ export async function runLumaAuthorization(opts: {
   port?: number;
   timeoutMs?: number;
   onAuthUrl: (url: string) => void;
+  paste?: PasteRedirect;
 }): Promise<LumaGrant> {
   const as = await discoverLumaAuth(opts.upstream);
   let clientId = '';
@@ -149,6 +150,7 @@ export async function runLumaAuthorization(opts: {
     ...(opts.port !== undefined ? { port: opts.port } : {}),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     onAuthUrl: opts.onAuthUrl,
+    ...(opts.paste ? { paste: opts.paste } : {}),
     prepare: async (redirectUri) => {
       clientId = registration === 'cimd' ? (opts.clientIdUrl ?? DEFAULT_LUMA_CLIENT_ID) : await registerClient(opts.upstream, as, redirectUri);
       return { client_id: clientId };

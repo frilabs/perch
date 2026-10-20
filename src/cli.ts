@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readLineFromTty, readSecretFromTty } from './cli/prompt.js';
+import { readLineFromTty, readPastedLineFromTty, readSecretFromTty, readSecretJsonFromTty } from './cli/prompt.js';
 import { runCli } from './cli/run.js';
 
 process.umask(0o077);
@@ -10,6 +10,8 @@ runCli(process.argv.slice(2), {
   stderr: (s) => process.stderr.write(s),
   readSecret: readSecretFromTty,
   readLine: readLineFromTty,
+  readSecretJson: (prompt, maxBytes) => readSecretJsonFromTty(prompt, maxBytes),
+  readPastedUrl: (prompt, signal) => readPastedLineFromTty(prompt, signal),
   stdoutIsTTY: process.stdout.isTTY === true,
   ...(process.stdout.columns ? { stdoutColumns: process.stdout.columns } : {}),
 }).then(

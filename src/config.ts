@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { PerchError } from './errors.js';
+import { defaultMicrosoftClientIdFile, readMicrosoftClientIdFile } from './microsoft/clientSetup.js';
 import { readPrivateFile } from './secureFs.js';
 import { validateCimdOrigin } from './upstream.js';
 
@@ -21,9 +22,18 @@ export interface PerchConfig {
   httpPort: number;
   allowedHosts: string[];
   allowedOrigins: string[];
+  /** PERCH_GOOGLE_CLIENT_FILE, if set. */
   googleClientFile?: string;
+  /** Where `perch google client setup` stores the client without PERCH_GOOGLE_CLIENT_FILE (also read from there). */
+  googleClientDefaultFile: string;
   /** Application (client) ID of the Entra app registration (public client; not a secret). */
   microsoftClientId?: string;
+  /** Where microsoftClientId came from: PERCH_MICROSOFT_CLIENT_ID (precedence) or the client-id file. */
+  microsoftClientIdSource?: 'env' | 'file';
+  /** Fallback file written by `perch microsoft client setup` (~/.config/perch/microsoft-client-id). */
+  microsoftClientIdFile: string;
+  /** Why the client-id file exists but was not used (insecure mode, not a GUID, …). */
+  microsoftClientIdFileError?: string;
   /** Entra tenant for sign-in: common (default), consumers, organizations, a tenant GUID or domain. */
   microsoftTenant: string;
   /** stdio only: client token file selecting a client grant (default stdio is read-only). */
@@ -68,6 +78,17 @@ export function resolveConfig(env: Record<string, string | undefined>): PerchCon
   const port = Number(env.PERCH_HTTP_PORT || '8765');
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new PerchError('PERCH_HTTP_PORT must be a valid port', 'bad_config');
   rejectUserSelector(env);
+  // The client-id file follows the HOME/XDG_CONFIG_HOME of the given environment (not only the process's).
+  const msFile = defaultMicrosoftClientIdFile(env.XDG_CONFIG_HOME || path.join(env.HOME || home, '.config'));
+  const msEnv = env.PERCH_MICROSOFT_CLIENT_ID?.trim();
+  const msRead = msEnv ? undefined : readMicrosoftClientIdFile(msFile);
+  const microsoft = msEnv
+    ? { microsoftClientId: msEnv, microsoftClientIdSource: 'env' as const }
+    : msRead && 'id' in msRead
+      ? { microsoftClientId: msRead.id, microsoftClientIdSource: 'file' as const }
+      : msRead && 'error' in msRead
+        ? { microsoftClientIdFileError: msRead.error }
+        : {};
   const publicPort = Number(env.PERCH_PUBLIC_PORT || '8767');
   if (!Number.isInteger(publicPort) || publicPort < 0 || publicPort > 65535) throw new PerchError('PERCH_PUBLIC_PORT must be a valid port', 'bad_config');
   const flag = (name: string, dflt: boolean) => {
@@ -87,7 +108,10 @@ export function resolveConfig(env: Record<string, string | undefined>): PerchCon
     allowedHosts: list(env.PERCH_ALLOWED_HOSTS),
     allowedOrigins: list(env.PERCH_ALLOWED_ORIGINS),
     ...(env.PERCH_GOOGLE_CLIENT_FILE ? { googleClientFile: path.resolve(env.PERCH_GOOGLE_CLIENT_FILE) } : {}),
-    ...(env.PERCH_MICROSOFT_CLIENT_ID ? { microsoftClientId: env.PERCH_MICROSOFT_CLIENT_ID.trim() } : {}),
+    // HOME from the given environment (not only the process's) so tests never touch the operator's real file.
+    googleClientDefaultFile: path.resolve(env.XDG_CONFIG_HOME || path.join(env.HOME || home, '.config'), 'perch', 'google-client.json'),
+    ...microsoft,
+    microsoftClientIdFile: msFile,
     microsoftTenant: env.PERCH_MICROSOFT_TENANT?.trim() || 'common',
     ...(env.PERCH_CLIENT_TOKEN_FILE ? { clientTokenFile: path.resolve(env.PERCH_CLIENT_TOKEN_FILE) } : {}),
     ...(env.PERCH_PUBLIC_BASE_URL ? { publicBaseUrl: env.PERCH_PUBLIC_BASE_URL.trim() } : {}),

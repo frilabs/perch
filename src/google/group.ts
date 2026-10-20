@@ -19,6 +19,7 @@ import {
   type GoogleMemberSection,
   type SharedGrantHolder,
 } from './groupStore.js';
+import type { PasteRedirect } from '../oauth/loopback.js';
 import {
   DRIVE_READONLY_SCOPE,
   DRIVE_SCOPE,
@@ -159,6 +160,7 @@ export interface GoogleGroupAuthOptions {
   timeoutMs?: number;
   loginHint?: string;
   onAuthUrl: (url: string) => void;
+  paste?: PasteRedirect;
 }
 
 /** One loopback flow (127.0.0.1, state, PKCE S256) for every selected service, include_granted_scopes=true. */
@@ -170,6 +172,7 @@ export function runGoogleGroupAuthorization(opts: GoogleGroupAuthOptions): Promi
     includeGrantedScopes: true,
     verify: assertGroupGrant,
     onAuthUrl: opts.onAuthUrl,
+    ...(opts.paste ? { paste: opts.paste } : {}),
     ...(opts.port !== undefined ? { port: opts.port } : {}),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     ...(opts.loginHint ? { loginHint: opts.loginHint } : {}),

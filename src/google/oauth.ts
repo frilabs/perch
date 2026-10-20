@@ -1,5 +1,5 @@
 import { PerchError } from '../errors.js';
-import { DEFAULT_AUTH_TIMEOUT_MS, MAX_AUTH_TIMEOUT_MS, runPkceLoopback } from '../oauth/loopback.js';
+import { DEFAULT_AUTH_TIMEOUT_MS, MAX_AUTH_TIMEOUT_MS, runPkceLoopback, type PasteRedirect } from '../oauth/loopback.js';
 import type { Upstream } from '../upstream.js';
 
 export const DRIVE_READONLY_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
@@ -95,6 +95,8 @@ export interface LoopbackOptions {
   /** Replaces the default "every requested scope granted" check (e.g. for scope aliases like `email`). */
   verify?: (tok: GoogleTokenResponse) => AuthorizationResult;
   onAuthUrl: (url: string) => void;
+  /** Paste-the-redirect-address input racing the callback (login without a tunnel). */
+  paste?: PasteRedirect;
 }
 
 /**
@@ -119,6 +121,7 @@ export async function runLoopbackAuthorization(opts: LoopbackOptions): Promise<A
     ...(opts.port !== undefined ? { port: opts.port } : {}),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     onAuthUrl: opts.onAuthUrl,
+    ...(opts.paste ? { paste: opts.paste } : {}),
     exchange: async (code, verifier, redirectUri) => {
       const tok = await opts.upstream.json<GoogleTokenResponse>('oauth', {
         method: 'POST',

@@ -17,6 +17,7 @@ function io(extra: Partial<CliIo> = {}): CliIo {
   return {
     env: {
       PERCH_DATA_DIR: dirs.dataDir,
+      HOME: dirs.root,
       PERCH_KEY_FILE: dirs.keyFile,
       PERCH_HTTP_TOKEN_FILE: dirs.tokenFile,
     },

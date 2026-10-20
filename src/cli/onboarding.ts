@@ -121,7 +121,8 @@ async function prepareWhatsapp({ run, io, hooks }: SetupContext): Promise<boolea
 }
 
 const tunnel = (port: number) =>
-  `The login opens in your browser and returns to 127.0.0.1:${port} on this server. If the browser runs on your laptop, first run there: ssh -N -L ${port}:127.0.0.1:${port} <this server>\n`;
+  'The login opens in your browser. Afterwards the browser shows "This site can\'t be reached" (it tries 127.0.0.1 on your laptop): ' +
+  `copy the complete address from its address bar and paste it here. Or: tunnel first, on the laptop: ssh -N -L ${port}:127.0.0.1:${port} <this server>\n`;
 
 const SERVICES: readonly SetupService[] = [
   {
@@ -130,15 +131,18 @@ const SERVICES: readonly SetupService[] = [
     title: 'Google account (Drive, Gmail, Calendar, Contacts)',
     another: 'another Google account',
     needs: (c) =>
-      c.googleClientFile && existsSync(c.googleClientFile)
+      existsSync(c.googleClientFile ?? c.googleClientDefaultFile)
         ? tunnel(8766)
-        : 'Needs a Google Cloud OAuth client of type "Desktop app" (docs/SETUP.md §3.1) saved as a 0600 file, and PERCH_GOOGLE_CLIENT_FILE set to it in .env. Skip for now if you have not done that.\n',
+        : 'First Perch walks you through your own Google Cloud OAuth client (once, about 10 minutes, links included).\n' + tunnel(8766),
     args: async () => ['--port', '8766'],
   },
   {
     cmd: 'microsoft',
     title: 'Outlook / Microsoft 365',
-    needs: (c) => (c.microsoftClientId ? tunnel(8766) : 'Needs an Entra app registration and PERCH_MICROSOFT_CLIENT_ID in .env (docs/SETUP.md §4a.2).\n'),
+    needs: (c) =>
+      c.microsoftClientId
+        ? tunnel(8766)
+        : 'Needs your own Entra app registration (once per installation): Perch guides you through it step by step first.\n' + tunnel(8766),
     args: async () => ['--port', '8766'],
   },
   {
@@ -168,7 +172,7 @@ const SERVICES: readonly SetupService[] = [
     cmd: 'slack',
     title: 'Slack',
     needs: () =>
-      'Per workspace: create an app from the manifest (perch slack manifest) at api.slack.com/apps, install it, copy the "User OAuth Token" (xoxp-…). It is asked hidden.\n',
+      'Per workspace: Perch shows the app manifest and the steps to create and install the Slack app, then asks for the "User OAuth Token" (xoxp-…) hidden.\n',
     args: async () => [],
   },
   {
