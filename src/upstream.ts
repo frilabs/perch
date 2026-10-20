@@ -280,6 +280,8 @@ export interface UpstreamRequest {
   url: URL;
   headers: Record<string, string>;
   body?: string;
+  /** Binary request body (uploads); when set, `body` is unset. */
+  bodyBytes?: Buffer;
   maxBytes: number;
 }
 
@@ -322,7 +324,7 @@ export function createFetchTransport(opts: { timeoutMs?: number } = {}): Upstrea
       res = await fetch(req.url, {
         method: req.method,
         headers: req.headers,
-        body: req.body,
+        body: req.bodyBytes ?? req.body,
         redirect: 'error',
         signal,
       });
@@ -372,6 +374,8 @@ export interface CallOptions {
   form?: Record<string, string>;
   /** Raw text body with explicit content type (e.g. base64 MIME for Graph). */
   text?: { contentType: string; data: string };
+  /** Binary body with explicit content type (uploads, multipart/form-data built by the caller). */
+  bytes?: { contentType: string; data: Buffer };
   maxBytes?: number;
   /** Required for draft/send/calendar_write routes; must equal the route's tag. */
   capability?: RouteCapability;
@@ -443,13 +447,18 @@ export class Upstream {
       headers['content-type'] = opts.text.contentType;
       body = opts.text.data;
     }
+    let bodyBytes: Buffer | undefined;
+    if (opts.bytes) {
+      headers['content-type'] = opts.bytes.contentType;
+      bodyBytes = opts.bytes.data;
+    }
     let res: UpstreamResponse;
     try {
       res = await this.transport({
         method: opts.method,
         url,
         headers,
-        body,
+        ...(bodyBytes ? { bodyBytes } : { body }),
         maxBytes: opts.maxBytes ?? DEFAULT_JSON_MAX_BYTES,
       });
     } catch (err) {

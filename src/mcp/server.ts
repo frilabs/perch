@@ -371,7 +371,7 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
       }),
   );
 
-  // Drive and Notion are operator-only (read-only); client grants never see these tools.
+  // Drive read tools (operator only until client grants carry drive_read; see src/mcp/tools/driveExtra.ts).
   if (operator) {
     server.registerTool(
       'drive_search',
@@ -448,7 +448,10 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
       },
       (a) => tool('drive_export_file', a, () => ctx.drive.exportFile(a.accountId, a.fileId, a.mimeType, a)),
     );
+  }
 
+  // Notion read tools (operator only until client grants carry notion_read; see src/mcp/tools/notionExtra.ts).
+  if (operator) {
     server.registerTool(
       'notion_search',
       {
