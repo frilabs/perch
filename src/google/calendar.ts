@@ -4,7 +4,18 @@ import { fanOut, type FanOutResult } from '../fanout.js';
 import type { CredentialStore, GoogleProductivityAccount } from '../store/credentialStore.js';
 import { UpstreamError, type CallOptions, type Upstream } from '../upstream.js';
 import { assertTimestamp, assertTimeZone } from './calendarTime.js';
-import { assertSelfOnlyEvent, buildCreateBody, buildPatchBody, parseCreateInput, parseUpdateInput } from './calendarWrite.js';
+import {
+  assertOwnEvent,
+  buildCreateBody,
+  guestsOf,
+  parseCreateInput,
+  parseDeleteInput,
+  parseRespondInput,
+  parseUpdateInput,
+  planPatch,
+  SINGLE_OCCURRENCE_REFUSED,
+  type SendUpdates,
+} from './calendarWrite.js';
 import { bounded, ProductivityAccess, type ProductivityTokenSource } from './productivityAccess.js';
 
 /**
@@ -64,7 +75,9 @@ export interface GoogleEvent {
   originalStartTime?: EventTime;
   organizer?: Person;
   creator?: Person;
-  attendees?: Array<Person & { responseStatus?: string; optional?: boolean; organizer?: boolean; resource?: boolean }>;
+  attendees?: Array<Person & { responseStatus?: string; optional?: boolean; organizer?: boolean; resource?: boolean; comment?: string; additionalGuests?: number }>;
+  recurrence?: unknown;
+  conferenceData?: unknown;
   eventType?: string;
   visibility?: string;
   transparency?: string;
@@ -91,6 +104,8 @@ export interface CalendarEvent {
   created?: string;
   updated?: string;
   recurringEventId?: string;
+  /** RRULE/EXDATE/RDATE lines of a series (the series event itself, not its expanded occurrences). */
+  recurrence?: string[];
   originalStartTime?: EventTime;
   organizer?: Person;
   creator?: Person;
@@ -135,6 +150,7 @@ export function toEvent(e: GoogleEvent, calendarId: string, calendarTimeZone?: s
     if (e.description!.length > MAX_DESCRIPTION_CHARS) out.descriptionTruncated = true;
   }
   if (start) out.start = start;
+  if (Array.isArray(e.recurrence)) out.recurrence = e.recurrence.filter((l): l is string => typeof l === 'string').slice(0, 10).map((l) => l.slice(0, 1000));
   const end = time(e.end);
   if (end) out.end = end;
   if (allDay) out.endExclusive = true;
@@ -189,15 +205,21 @@ export interface ListEventsOptions {
   cursor?: string;
 }
 
-const NO_NOTIFY_NOTE =
-  'No invitations or updates were sent to anyone (no attendees; sendUpdates=none). The event is private (visibility private/confidential) ' +
-  'with popup reminders only, never calendar default or email reminders. Accepted by Google; that is not a sync or delivery confirmation for other devices.';
+const ACCEPTED_NOTE = 'Accepted by Google; that is not a sync or delivery confirmation for other devices or guests.';
+
+/** What Google was asked to send, for the result detail. */
+function notifyNote(guests: boolean, sendUpdates: SendUpdates): string {
+  if (!guests) return `No invitations or updates were sent to anyone (no guests; sendUpdates=none). Reminders are popup-only. ${ACCEPTED_NOTE}`;
+  if (sendUpdates === 'none') return `Guests were NOT notified (sendUpdates=none); their calendars may be out of date. ${ACCEPTED_NOTE}`;
+  return `Google was asked to email ${sendUpdates === 'all' ? 'all guests' : 'guests outside your organisation (externalOnly)'} (sendUpdates=${sendUpdates}). ${ACCEPTED_NOTE}`;
+}
 
 export interface CreateEventResult extends Provenance {
   status: 'created' | 'conflict' | 'rejected' | 'indeterminate';
   requestId: string;
   calendarId: string;
   eventId: string;
+  sendUpdates: SendUpdates;
   event?: CalendarEvent;
   detail: string;
 }
@@ -206,10 +228,33 @@ export interface UpdateEventResult extends Provenance {
   status: 'updated' | 'precondition_failed' | 'rejected' | 'indeterminate';
   calendarId: string;
   eventId: string;
+  sendUpdates?: SendUpdates;
   event?: CalendarEvent;
   currentEtag?: string;
   detail: string;
 }
+
+export interface DeleteEventResult extends Provenance {
+  status: 'deleted' | 'not_found' | 'precondition_failed' | 'rejected' | 'indeterminate';
+  calendarId: string;
+  eventId: string;
+  sendUpdates?: SendUpdates;
+  currentEtag?: string;
+  detail: string;
+}
+
+export interface RespondEventResult extends Provenance {
+  status: 'responded' | 'precondition_failed' | 'rejected' | 'indeterminate';
+  calendarId: string;
+  eventId: string;
+  response: string;
+  sendUpdates: SendUpdates;
+  event?: CalendarEvent;
+  detail: string;
+}
+
+const INDETERMINATE =
+  'Outcome unknown (network error, timeout or Google server error after the request was sent); Perch did not retry. ';
 
 type WriteOutcome = { ok: true; body: Buffer } | { ok: false; status: number; message: string } | { ok: false; status: 'unknown' };
 
@@ -333,11 +378,17 @@ export class CalendarService {
   /**
    * Exactly one request, never retried: after a lost response Perch cannot know whether Google applied
    * it. Failures before the request reaches the transport (validation, grant, token, allowlist) throw.
+   * `cap` is the route tag: calendar_write (no guests involved, sendUpdates=none) or calendar_invite.
    */
-  private async write(account: GoogleProductivityAccount, opts: Omit<CallOptions, 'headers' | 'capability'>, extra: Record<string, string> = {}): Promise<WriteOutcome> {
-    const headers = { ...(await this.access.authHeaders(account, 'calendar_write')), ...extra };
+  private async write(
+    account: GoogleProductivityAccount,
+    cap: 'calendar_write' | 'calendar_invite',
+    opts: Omit<CallOptions, 'headers' | 'capability'>,
+    extra: Record<string, string> = {},
+  ): Promise<WriteOutcome> {
+    const headers = { ...(await this.access.authHeaders(account, cap)), ...extra };
     try {
-      const res = await this.upstream.raw('calendar', { ...opts, headers, capability: 'calendar_write' });
+      const res = await this.upstream.raw('calendar', { ...opts, headers, capability: cap });
       return { ok: true, body: res.body };
     } catch (err) {
       if (err instanceof PerchError && err.code === 'route_not_allowed') throw err;
@@ -349,8 +400,26 @@ export class CalendarService {
     }
   }
 
+  /** calendar_invite for this account, with the reason in the denial. */
+  private async requireInvite(principal: Principal, accountId: string, why: string): Promise<void> {
+    try {
+      await this.access.account(principal, accountId, 'calendar_invite');
+    } catch (err) {
+      if (err instanceof PerchError && err.code === 'capability_denied') throw new PerchError(`${err.message}. ${why} Nothing was sent or changed.`, 'capability_denied');
+      throw err;
+    }
+  }
+
+  /** The existing event (calendar_read), for checks before any write. */
+  private async existing(principal: Principal, account: GoogleProductivityAccount, calendarId: string, eventId: string): Promise<GoogleEvent> {
+    await this.access.account(principal, account.id, 'calendar_read');
+    return this.call<GoogleEvent>(account, 'calendar_read', { method: 'GET', path: eventPath(calendarId, eventId) });
+  }
+
   /**
-   * events.insert with a requestId-derived event id and sendUpdates=none. Idempotency: the same
+   * events.insert with a requestId-derived event id. Without guests: sendUpdates=none and calendar_write.
+   * With guests: calendar_invite as well, sendUpdates as given (default all). addMeet adds a Meet request
+   * (conferenceDataVersion=1) whose request id is derived from requestId too. Idempotency: the same
    * (accountId, calendarId as given, requestId) always yields the same id, so a manual retry after an
    * indeterminate outcome either creates the event once or gets 409 ("conflict"). Google notes that id
    * collisions may not always be detected at creation time, so "created" twice is not impossible.
@@ -358,12 +427,15 @@ export class CalendarService {
   async createEvent(principal: Principal, raw: Record<string, unknown>): Promise<CreateEventResult> {
     const input = parseCreateInput(raw);
     const account = await this.access.account(principal, input.accountId, 'calendar_write');
+    const guests = input.attendees.length > 0;
+    if (guests) await this.requireInvite(principal, account.id, 'Events with attendees (invitations) need calendar_invite.');
     const body = buildCreateBody(input);
-    const base = { ...provenance(account), requestId: input.requestId, calendarId: input.calendarId, eventId: body.id };
-    const out = await this.write(account, { method: 'POST', path: eventsPath(input.calendarId), query: { sendUpdates: 'none' }, json: body });
+    const base = { ...provenance(account), requestId: input.requestId, calendarId: input.calendarId, eventId: body.id, sendUpdates: input.sendUpdates };
+    const query = { sendUpdates: input.sendUpdates, ...(input.addMeet ? { conferenceDataVersion: 1 } : {}) };
+    const out = await this.write(account, guests ? 'calendar_invite' : 'calendar_write', { method: 'POST', path: eventsPath(input.calendarId), query, json: body });
     if (out.ok) {
       const event = parseEventBody(out.body);
-      return { ...base, status: 'created', ...(event ? { event: toEvent(event, input.calendarId) } : {}), detail: `Created. ${NO_NOTIFY_NOTE}` };
+      return { ...base, status: 'created', ...(event ? { event: toEvent(event, input.calendarId) } : {}), detail: `Created. ${notifyNote(guests, input.sendUpdates)}` };
     }
     if (out.status === 409) {
       return {
@@ -371,7 +443,7 @@ export class CalendarService {
         status: 'conflict',
         detail:
           'An event with this requestId already exists in this calendar (an earlier call, possibly one whose response was lost, created it; ' +
-          'ids of deleted events stay taken). Nothing new was created. Inspect it with calendar_get_event; use a new requestId for a different event.',
+          'ids of deleted events stay taken). Nothing new was created and nobody was invited again. Inspect it with calendar_get_event; use a new requestId for a different event.',
       };
     }
     if (out.status === 'unknown') {
@@ -379,25 +451,25 @@ export class CalendarService {
         ...base,
         status: 'indeterminate',
         detail:
-          'Outcome unknown (network error, timeout or Google server error after the request was sent); Perch did not retry. Check with ' +
-          'calendar_get_event using this eventId, or call calendar_create_event again with the same requestId and calendarId: it then either creates the event once or reports conflict.',
+          `${INDETERMINATE}Check with calendar_get_event using this eventId, or call calendar_create_event again with the same requestId and calendarId: ` +
+          'it then either creates the event once or reports conflict (no second invitation).',
       };
     }
     return { ...base, status: 'rejected', detail: `Not created: ${out.message}` };
   }
 
   /**
-   * events.patch with the caller's ETag in If-Match and sendUpdates=none, only for private events the
-   * user organises (no guests, no series). Needs calendar_write and calendar_read (the existing event is
-   * checked first and the updated event is returned).
+   * events.patch with the caller's ETag in If-Match, for events (or whole series) the user organises.
+   * Needs calendar_write and calendar_read (the existing event is checked first and the updated event is
+   * returned), plus calendar_invite when the guest list changes or guests are notified. sendUpdates
+   * defaults to all when guests are involved, otherwise none.
    */
   async updateEvent(principal: Principal, raw: Record<string, unknown>): Promise<UpdateEventResult> {
     const input = parseUpdateInput(raw);
     const account = await this.access.account(principal, input.accountId, 'calendar_write');
-    await this.access.account(principal, input.accountId, 'calendar_read');
     const path = eventPath(input.calendarId, input.eventId);
     const base = { ...provenance(account), calendarId: input.calendarId, eventId: input.eventId };
-    const existing = await this.call<GoogleEvent & { recurrence?: unknown }>(account, 'calendar_read', { method: 'GET', path });
+    const existing = await this.existing(principal, account, input.calendarId, input.eventId);
     if (existing.etag !== input.etag) {
       return {
         ...base,
@@ -406,26 +478,117 @@ export class CalendarService {
         detail: 'The event changed since you read it (etag mismatch); nothing was changed. Read it again and reapply your change.',
       };
     }
-    assertSelfOnlyEvent(existing);
-    const body = buildPatchBody(input, existing);
-    const out = await this.write(account, { method: 'PATCH', path, query: { sendUpdates: 'none' }, json: body }, { 'if-match': input.etag });
+    assertOwnEvent(existing);
+    const plan = planPatch(input, existing);
+    const sendUpdates: SendUpdates = plan.guestsInvolved ? (input.sendUpdates ?? 'all') : 'none';
+    const invite = plan.changesGuests || (plan.guestsInvolved && sendUpdates !== 'none');
+    if (invite) {
+      await this.requireInvite(
+        principal,
+        account.id,
+        plan.changesGuests ? 'Changing the guest list needs calendar_invite.' : 'Notifying guests needs calendar_invite (or pass sendUpdates: "none" to change the event without notifying them).',
+      );
+    }
+    const query = { sendUpdates, ...(plan.addsMeet ? { conferenceDataVersion: 1 } : {}) };
+    const out = await this.write(account, invite ? 'calendar_invite' : 'calendar_write', { method: 'PATCH', path, query, json: plan.body }, { 'if-match': input.etag });
+    const withSend = { ...base, sendUpdates };
     if (out.ok) {
       const event = parseEventBody(out.body);
-      return { ...base, status: 'updated', ...(event ? { event: toEvent(event, input.calendarId) } : {}), detail: `Updated. ${NO_NOTIFY_NOTE}` };
+      return { ...withSend, status: 'updated', ...(event ? { event: toEvent(event, input.calendarId) } : {}), detail: `Updated. ${notifyNote(plan.guestsInvolved, sendUpdates)}` };
     }
     if (out.status === 412) {
-      return { ...base, status: 'precondition_failed', detail: 'The event changed just before the update (HTTP 412); nothing was changed. Read it again and reapply.' };
+      return { ...withSend, status: 'precondition_failed', detail: 'The event changed just before the update (HTTP 412); nothing was changed. Read it again and reapply.' };
     }
     if (out.status === 'unknown') {
       return {
-        ...base,
+        ...withSend,
         status: 'indeterminate',
-        detail:
-          'Outcome unknown (network error, timeout or Google server error after the request was sent); Perch did not retry. Read the event with ' +
-          'calendar_get_event: a new etag with your values means it was applied; the old etag means it was not.',
+        detail: `${INDETERMINATE}Read the event with calendar_get_event: a new etag with your values means it was applied; the old etag means it was not.`,
       };
     }
-    return { ...base, status: 'rejected', detail: `Not updated: ${out.message}` };
+    return { ...withSend, status: 'rejected', detail: `Not updated: ${out.message}` };
+  }
+
+  /**
+   * events.delete: PERMANENT deletion (not a trash) of an event or a whole series the user organises.
+   * Single occurrences are refused. The current etag is always sent as If-Match (the caller's, if given,
+   * must match first). Events with guests need calendar_invite; sendUpdates defaults to all for them
+   * (Google then emails a cancellation), otherwise none.
+   */
+  async deleteEvent(principal: Principal, raw: Record<string, unknown>): Promise<DeleteEventResult> {
+    const input = parseDeleteInput(raw);
+    const account = await this.access.account(principal, input.accountId, 'calendar_write');
+    const path = eventPath(input.calendarId, input.eventId);
+    const base = { ...provenance(account), calendarId: input.calendarId, eventId: input.eventId };
+    const existing = await this.existing(principal, account, input.calendarId, input.eventId);
+    if (input.etag !== undefined && existing.etag !== input.etag) {
+      return {
+        ...base,
+        status: 'precondition_failed',
+        ...(str(existing.etag) ? { currentEtag: existing.etag } : {}),
+        detail: 'The event changed since you read it (etag mismatch); nothing was deleted. Read it again and decide again.',
+      };
+    }
+    assertOwnEvent(existing);
+    const guests = guestsOf(existing).length > 0;
+    if (guests) await this.requireInvite(principal, account.id, 'Deleting an event with guests needs calendar_invite.');
+    const sendUpdates: SendUpdates = guests ? (input.sendUpdates ?? 'all') : 'none';
+    const etag = str(existing.etag);
+    const out = await this.write(account, guests ? 'calendar_invite' : 'calendar_write', { method: 'DELETE', path, query: { sendUpdates } }, etag ? { 'if-match': etag } : {});
+    const withSend = { ...base, sendUpdates };
+    const series = Array.isArray(existing.recurrence) && existing.recurrence.length > 0;
+    if (out.ok) {
+      const who = !guests ? 'No guests were notified (there were none).' : sendUpdates === 'none' ? 'Guests were NOT notified (sendUpdates=none).' : `Google was asked to send cancellations (sendUpdates=${sendUpdates}).`;
+      return { ...withSend, status: 'deleted', detail: `Permanently deleted${series ? ' (the whole series)' : ''}; this cannot be undone. ${who}` };
+    }
+    if (out.status === 404 || out.status === 410) return { ...withSend, status: 'not_found', detail: 'Google reports the event as already deleted or not found; nothing was deleted now.' };
+    if (out.status === 412) return { ...withSend, status: 'precondition_failed', detail: 'The event changed just before the deletion (HTTP 412); nothing was deleted. Read it again and decide again.' };
+    if (out.status === 'unknown') {
+      return { ...withSend, status: 'indeterminate', detail: `${INDETERMINATE}Check with calendar_get_event: not found or status "cancelled" means it was deleted.` };
+    }
+    return { ...withSend, status: 'rejected', detail: `Not deleted: ${out.message}` };
+  }
+
+  /**
+   * Answers an invitation for the account's own attendee entry (self:true, else the account email) with an
+   * events.patch that carries only that entry and attendeesOmitted:true (Google: "can be used to only update
+   * the participant's response"), If-Match on the fetched etag. Needs calendar_invite and calendar_read.
+   */
+  async respondEvent(principal: Principal, raw: Record<string, unknown>): Promise<RespondEventResult> {
+    const input = parseRespondInput(raw);
+    const account = await this.access.account(principal, input.accountId, 'calendar_invite');
+    const path = eventPath(input.calendarId, input.eventId);
+    const sendUpdates: SendUpdates = input.sendUpdates ?? 'all';
+    const base = { ...provenance(account), calendarId: input.calendarId, eventId: input.eventId, response: input.response, sendUpdates };
+    const existing = await this.existing(principal, account, input.calendarId, input.eventId);
+    if (input.etag !== undefined && existing.etag !== input.etag) {
+      return { ...base, status: 'precondition_failed', detail: 'The event changed since you read it (etag mismatch); nothing was sent. Read it again and decide again.' };
+    }
+    if (existing.status === 'cancelled') throw new PerchError('This event is cancelled; there is nothing to answer.', 'unsupported_event');
+    if (existing.recurringEventId !== undefined) throw new PerchError(SINGLE_OCCURRENCE_REFUSED, 'unsupported_event');
+    const list = Array.isArray(existing.attendees) ? existing.attendees : [];
+    const email = account.email.toLowerCase();
+    const own = list.find((a) => a?.self === true) ?? list.find((a) => typeof a?.email === 'string' && a.email.toLowerCase() === email);
+    if (!own || typeof own.email !== 'string') throw new PerchError('You are not on the guest list of this event, so there is no invitation to answer. Nothing was sent.', 'unsupported_event');
+    const entry: Record<string, unknown> = { email: own.email, responseStatus: input.response };
+    if (own.optional === true) entry.optional = true;
+    if (typeof own.comment === 'string') entry.comment = own.comment;
+    if (Number.isInteger(own.additionalGuests)) entry.additionalGuests = own.additionalGuests;
+    const etag = str(existing.etag);
+    const out = await this.write(
+      account,
+      'calendar_invite',
+      { method: 'PATCH', path, query: { sendUpdates }, json: { attendees: [entry], attendeesOmitted: true } },
+      etag ? { 'if-match': etag } : {},
+    );
+    if (out.ok) {
+      const event = parseEventBody(out.body);
+      const who = sendUpdates === 'none' ? 'The organizer was NOT notified (sendUpdates=none).' : `Google was asked to notify the organizer (sendUpdates=${sendUpdates}).`;
+      return { ...base, status: 'responded', ...(event ? { event: toEvent(event, input.calendarId) } : {}), detail: `Answered "${input.response}". ${who} ${ACCEPTED_NOTE}` };
+    }
+    if (out.status === 412) return { ...base, status: 'precondition_failed', detail: 'The event changed just before the answer (HTTP 412); nothing was sent. Read it again and decide again.' };
+    if (out.status === 'unknown') return { ...base, status: 'indeterminate', detail: `${INDETERMINATE}Check your responseStatus with calendar_get_event.` };
+    return { ...base, status: 'rejected', detail: `Not answered: ${out.message}` };
   }
 }
 

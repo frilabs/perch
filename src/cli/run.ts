@@ -113,7 +113,7 @@ Usage:
   perch whatsapp list | status | remove ID [--keep-device]
   perch client add --label NAME --full [--token-file PATH]   read + write on every account (also later ones)
   perch client add --label NAME --allow CAPS --account ID [--account ID ...] [--token-file PATH]
-                      CAPS: read,draft,send,modify (mail accounts); calendar_read,calendar_write,contacts_read (gprod accounts);
+                      CAPS: read,draft,send,modify (mail accounts); calendar_read,calendar_write,calendar_invite,contacts_read (gprod accounts);
                             slack_read,slack_send (slack accounts); whatsapp_read,whatsapp_send (whatsapp accounts);
                             luma_read,luma_events,luma_guests,luma_blast (luma accounts)
   perch client list | remove ID
@@ -525,7 +525,7 @@ async function cmdProductivity(config: PerchConfig, io: CliIo, sub: string | und
   });
   const account = await registerProductivityAccount(store, upstream, { label: values.label, client, grant, services, allowCalendarWrite });
   io.stdout(`Connected Google account ${account.id} (${account.email}) as "${account.label}" for ${what}.\n`);
-  if (allowCalendarWrite) io.stdout(`Calendar writes additionally need a client grant: perch client add --allow calendar_read,calendar_write --account ${account.id}\n`);
+  if (allowCalendarWrite) io.stdout(`Calendar writes additionally need a client grant: perch client add --allow calendar_read,calendar_write[,calendar_invite] --account ${account.id} (calendar_invite: guests, invitations, responses)\n`);
 }
 
 function optPort(values: Record<string, unknown>, name: string): number | undefined {
@@ -730,7 +730,7 @@ async function cmdClient(config: PerchConfig, io: CliIo, sub: string | undefined
   }
   if (typeof values.allow !== 'string') {
     throw new UsageError(
-      '--allow is required (comma separated: read,draft,send for mail; calendar_read,calendar_write,contacts_read for gprod accounts; ' +
+      '--allow is required (comma separated: read,draft,send for mail; calendar_read,calendar_write,calendar_invite,contacts_read for gprod accounts; ' +
         'slack_read,slack_send for slack accounts; whatsapp_read,whatsapp_send for whatsapp accounts)',
     );
   }

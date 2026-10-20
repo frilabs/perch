@@ -29,7 +29,7 @@ export type Service =
 /**
  * `admin` routes (GOWA device pairing/removal) are only ever passed by the local CLI, never by an MCP tool.
  */
-export type RouteCapability = 'read' | 'draft' | 'send' | 'calendar_write' | 'slack_send' | 'whatsapp_send' | 'admin' | 'notify' | 'drive_write' | 'notion_write' | 'mail_modify';
+export type RouteCapability = 'read' | 'draft' | 'send' | 'calendar_write' | 'calendar_invite' | 'slack_send' | 'whatsapp_send' | 'admin' | 'notify' | 'drive_write' | 'notion_write' | 'mail_modify';
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
 export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
@@ -107,6 +107,8 @@ const CAL_ID = '(?:[A-Za-z0-9._-]|%40|%2B|%23){1,1024}';
  * suffix `_YYYYMMDD` or `_YYYYMMDDTHHMMSSZ`. Reserved collection verbs are excluded explicitly.
  */
 const EVENT_ID = '(?!import$|quickAdd$|watch$)[a-v0-9]{5,1024}(?:_[0-9]{8}(?:T[0-9]{6}Z)?)?';
+/** A single event or a whole series: never the instance suffix (single occurrences are not written). */
+const SERIES_EVENT_ID = '(?!import$|quickAdd$|watch$)[a-v0-9]{5,1024}';
 /** People: only contact resource names (people/c<digits>), never people/me or Google account ids. */
 const CONTACT_ID = 'c[0-9]{1,30}';
 
@@ -211,8 +213,16 @@ const ROUTES: Record<Service, Route[]> = {
     ['GET', /^\/calendar\/v3\/users\/me\/calendarList$/],
     ['GET', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events$`)],
     ['GET', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events/${EVENT_ID}$`)],
+    // Writes: events.insert/patch/delete on one event or a whole series (never an instance id), tagged
+    // calendar_write (no guests involved: sendUpdates=none, no attendees in the body, see
+    // assertCalendarRequestSafe) or calendar_invite (guests, invitations, responses). Never: calendars.delete,
+    // calendars.clear, calendarList/acl writes, events.move/import/quickAdd/instances.
     ['POST', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events$`), 'calendar_write'],
-    ['PATCH', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events/${EVENT_ID}$`), 'calendar_write'],
+    ['POST', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events$`), 'calendar_invite'],
+    ['PATCH', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events/${SERIES_EVENT_ID}$`), 'calendar_write'],
+    ['PATCH', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events/${SERIES_EVENT_ID}$`), 'calendar_invite'],
+    ['DELETE', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events/${SERIES_EVENT_ID}$`), 'calendar_write'],
+    ['DELETE', new RegExp(`^/calendar/v3/calendars/${CAL_ID}/events/${SERIES_EVENT_ID}$`), 'calendar_invite'],
   ],
   people: [
     ['GET', /^\/v1\/people\/me\/connections$/],
@@ -347,6 +357,29 @@ function assertDriveRequestSafe(opts: CallOptions): void {
   if (bad) throw new PerchError('Blocked Google Drive ownership change', 'route_not_allowed');
 }
 
+const CALENDAR_SEND_UPDATES = new Set(['all', 'externalOnly', 'none']);
+
+/**
+ * Calendar writes carry only sendUpdates (all/externalOnly/none) and, on insert/patch, conferenceDataVersion
+ * (0/1) as query parameters. A calendar_write call (no guests involved) must not notify anyone
+ * (sendUpdates absent or none) and must not carry attendees; guests need the calendar_invite tag.
+ */
+function assertCalendarRequestSafe(opts: CallOptions): void {
+  if (opts.method === 'GET') return;
+  const bad = (why: string) => new PerchError(`Blocked Google Calendar API write (${why})`, 'route_not_allowed');
+  for (const [k, v] of Object.entries(opts.query ?? {})) {
+    if (v === undefined) continue;
+    if (k === 'sendUpdates') {
+      if (!CALENDAR_SEND_UPDATES.has(String(v))) throw bad('sendUpdates');
+      if (opts.capability === 'calendar_write' && v !== 'none') throw bad('notifications need calendar_invite');
+    } else if (k === 'conferenceDataVersion' && opts.method !== 'DELETE') {
+      if (String(v) !== '0' && String(v) !== '1') throw bad('conferenceDataVersion');
+    } else throw bad(`query parameter ${k}`);
+  }
+  const body = opts.json;
+  if (opts.capability === 'calendar_write' && body !== null && typeof body === 'object' && 'attendees' in body) throw bad('attendees need calendar_invite');
+}
+
 /** True when (service, method, path) is allowlisted for exactly this capability. */
 export function isAllowedRoute(service: Service, method: string, path: string, capability: RouteCapability = 'read'): boolean {
   return ROUTES[service].some(([m, re, cap]) => m === method && (cap ?? 'read') === capability && re.test(path));
@@ -457,7 +490,7 @@ export interface CallOptions {
   /** Binary body with explicit content type (uploads, multipart/form-data built by the caller). */
   bytes?: { contentType: string; data: Buffer };
   maxBytes?: number;
-  /** Required for draft/send/calendar_write routes; must equal the route's tag. */
+  /** Required for draft/send/calendar_write/calendar_invite routes; must equal the route's tag. */
   capability?: RouteCapability;
   /** Only for services without a fixed origin (GOWA): the configured instance origin, re-validated here. */
   origin?: string;
@@ -502,6 +535,7 @@ export class Upstream {
       throw new PerchError(`Blocked non-allowlisted ${SERVICE_NAMES[service]} call`, 'route_not_allowed');
     }
     if (service === 'drive') assertDriveRequestSafe(opts);
+    if (service === 'calendar') assertCalendarRequestSafe(opts);
     let origin = ORIGINS[service];
     if (DYNAMIC_ORIGIN.has(service)) {
       if (!opts.origin) throw new PerchError(`Blocked ${SERVICE_NAMES[service]} call without a configured origin`, 'route_not_allowed');
