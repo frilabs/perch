@@ -1,4 +1,5 @@
 import { createDeviceGrant, parseCapabilities, removeClientGrant } from '../auth/grants.js';
+import type { Capability } from '../store/credentialStore.js';
 import { BUILTIN_CIMD, newPreClientId, validRedirectUri } from '../access/clients.js';
 import { connectControl } from '../access/control.js';
 import { loadGoogleLoginClient } from '../access/google.js';
@@ -159,6 +160,7 @@ async function pair(config: PerchConfig, io: CliIo): Promise<number> {
   const ctl = await connectControl(config.dataDir);
   return new Promise<number>((resolve) => {
     let paired: string | undefined;
+    let fullAccess = false;
     let done = false;
     let firstUseTimer: NodeJS.Timeout | undefined;
     const finish = (code: number) => {
@@ -209,14 +211,28 @@ async function pair(config: PerchConfig, io: CliIo): Promise<number> {
               `  Since opening:   ${String(d.secondsSinceOpen)} s${d.usedRecoveryCode ? '  (a recovery code was used)' : ''}\n\n` +
               'Only confirm if this is the device you are connecting right now.\n',
           );
-          ask('Pair this device? [y/N] ').then(
-            (a) => ctl.send({ op: 'answer', approved: yes(a) }),
-            () => ctl.send({ op: 'answer', approved: false }),
-          );
+          ask('Pair this device? [y/N] ')
+            .then(async (a) => {
+              if (yes(a)) {
+                const r = (await ask('Access for this device: [r]ead only, or [f]ull (read + write, every account)? [r/f] ').catch(() => '')).trim().toLowerCase();
+                fullAccess = r === 'f' || r === 'full';
+              }
+              ctl.send({ op: 'answer', approved: yes(a) });
+            })
+            .catch(() => ctl.send({ op: 'answer', approved: false }));
           break;
         }
         case 'paired':
           paired = String(m.deviceId);
+          if (fullAccess) {
+            const id = paired;
+            void open(config)
+              .then((c) => grantDevice(c, id, { full: true }))
+              .then(
+                () => io.stdout(`Device ${id} has FULL access (read + write on every account). Undo: perch oauth ungrant ${id} --read-all, or perch oauth revoke ${id}\n`),
+                (err: unknown) => io.stderr(`perch: full access could not be granted (${err instanceof PerchError ? err.message : 'error'}); the device stays read-only. Retry: perch oauth grant ${id} --full\n`),
+              );
+          } else io.stdout(`Device ${paired} can read every account; to let it write: perch oauth grant ${paired} --full\n`);
           io.stdout(`\nPaired device ${paired}. Waiting up to 5 minutes for its first request (Ctrl-C to stop) ...\n`);
           firstUseTimer = setTimeout(() => {
             io.stdout(`No request from ${paired} yet. If your client does not work, revoke it: perch oauth revoke ${paired}\n`);
@@ -282,14 +298,32 @@ async function revoke(config: PerchConfig, io: CliIo, id: string | undefined, al
 }
 
 async function grant(config: PerchConfig, io: CliIo, id: string | undefined, values: Record<string, unknown>): Promise<void> {
-  if (!id || !DEVICE_ID_PATTERN.test(id)) throw usage('Usage: perch oauth grant <oc-…> --allow CAPS --account ID [--account ID ...]');
-  if (typeof values.allow !== 'string') throw usage('--allow is required (same capabilities as perch client add)');
+  if (!id || !DEVICE_ID_PATTERN.test(id)) throw usage('Usage: perch oauth grant <oc-…> --full | --allow CAPS --account ID [--account ID ...]');
+  const full = values.full === true;
+  if (full && (values.allow !== undefined || values.account !== undefined)) throw usage('--full replaces --allow and --account; use one or the other');
+  if (!full && typeof values.allow !== 'string') throw usage('--allow is required (same capabilities as perch client add), or --full');
   const accounts = (values.account as string[] | undefined) ?? [];
-  if (!accounts.length) throw usage('--account is required');
+  if (!full && !accounts.length) throw usage('--account is required (or --full)');
   const { store, oauth, audit } = await open(config);
+  await grantDevice({ store, oauth, audit }, id, full ? { full: true } : { capabilities: parseCapabilities((values.allow as string).split(',')), accountIds: accounts });
+  io.stdout(
+    full
+      ? `Device ${id} now has FULL access: read and write on every connected account, including accounts connected later.\n`
+      : `Device ${id} now acts as a client grant for ${accounts.join(', ')}. Like perch client add, it then sees only what this grant covers; include read capabilities if it should keep reading.\n`,
+  );
+  io.stdout(`Undo: perch oauth ungrant ${id} --read-all (then it reads every account), or perch oauth revoke ${id}\n`);
+}
+
+/** Attaches a (full or narrow) grant to an active device, replacing an earlier one. */
+async function grantDevice(
+  ctx: Pick<Awaited<ReturnType<typeof open>>, 'store' | 'oauth' | 'audit'>,
+  id: string,
+  access: { full: true } | { capabilities: Capability[]; accountIds: string[] },
+): Promise<void> {
+  const { store, oauth, audit } = ctx;
   const dev = (await oauth.read()).devices.find((d) => d.id === id && d.status === 'active');
   if (!dev) throw new PerchError(`No active device ${id}`, 'unknown_device');
-  const g = await createDeviceGrant(store, { label: `OAuth ${id}`, capabilities: parseCapabilities(values.allow.split(',')), accountIds: accounts });
+  const g = await createDeviceGrant(store, 'full' in access ? { label: `OAuth ${id}`, capabilities: [], accountIds: [], full: true } : { label: `OAuth ${id}`, ...access });
   let old: string | undefined;
   try {
     await oauth.transact((d) => {
@@ -304,11 +338,6 @@ async function grant(config: PerchConfig, io: CliIo, id: string | undefined, val
   }
   if (old) await removeClientGrant(store, old).catch(() => {});
   await recordAudit(audit, 'oauth_device_grant', id, 'granted');
-  io.stdout(
-    `Device ${id} now acts as client grant ${g.id} (${g.capabilities.join(',')}) for ${g.accountIds.join(', ')}.\n` +
-      'Like perch client add, it then sees only what this grant covers; include read capabilities if it should keep reading.\n' +
-      `Undo: perch oauth ungrant ${id} --read-all (then it reads every account), or perch oauth revoke ${id}\n`,
-  );
 }
 
 /**

@@ -103,8 +103,8 @@ export function renderStatusPage(r: StatusReport, opts: { cachedSeconds?: number
     ? `<div class="box"><table><thead><tr><th>Client</th><th>Capabilities</th><th>Accounts</th><th>Since</th></tr></thead><tbody>${r.clients
         .map(
           (c) =>
-            `<tr><td><b>${esc(c.label)}</b><br><span class="mono">${esc(c.id)}</span></td><td>${esc(c.capabilities.join(', '))}</td>` +
-            `<td class="mono">${c.accountIds.map(esc).join('<br>')}</td><td>${esc(c.createdAt.slice(0, 10))}</td></tr>`,
+            `<tr><td><b>${esc(c.label)}</b><br><span class="mono">${esc(c.id)}</span></td><td>${c.full ? '<b>Full access</b> (read + write)' : esc(c.capabilities.join(', '))}</td>` +
+            `<td class="mono">${c.full ? 'all accounts, also later ones' : c.accountIds.map(esc).join('<br>')}</td><td>${esc(c.createdAt.slice(0, 10))}</td></tr>`,
         )
         .join('')}</tbody></table></div>`
     : '<div class="box"><div class="empty">No client grants: every connection is read-only.</div></div>';

@@ -46,6 +46,7 @@ import { cmdOauth, cmdPublic } from './oauth.js';
 import { cmdLuma, lumaMcpFor } from './luma.js';
 import type { FetchLike } from '../luma/client.js';
 import { PERCH_VERSION } from '../version.js';
+import { chooseAccess, claudeAddCommand, runSetup, WRITE_FLAGS } from './onboarding.js';
 import { DEFAULT_PAIR_TIMEOUT_MS, pairWhatsappAccount, removeWhatsappAccount, setWhatsappInstance, whatsappDeviceStatus } from '../whatsapp/whatsapp.js';
 
 export interface CliIo {
@@ -69,6 +70,7 @@ export interface CliIo {
 const USAGE = `perch ${PERCH_VERSION} - Google Drive + Notion + mail + Calendar/Contacts + Slack + WhatsApp MCP server (read-only unless a client grant allows more)
 
 Usage:
+  perch setup                                  guided onboarding: connect every service step by step, then one full-access client
   perch init                                   create key, encrypted store and HTTP token (if missing)
   perch serve --stdio                          MCP over stdio (read-only; PERCH_CLIENT_TOKEN_FILE selects a client grant)
   perch serve --http [--host IP] [--port N] [--public]   MCP over stateless Streamable HTTP (bearer auth);
@@ -109,6 +111,7 @@ Usage:
   perch whatsapp instance show
   perch whatsapp add --label NAME --phone +43…  [--timeout SECONDS]   pair a new linked device by pairing code
   perch whatsapp list | status | remove ID [--keep-device]
+  perch client add --label NAME --full [--token-file PATH]   read + write on every account (also later ones)
   perch client add --label NAME --allow CAPS --account ID [--account ID ...] [--token-file PATH]
                       CAPS: read,draft,send,modify (mail accounts); calendar_read,calendar_write,contacts_read (gprod accounts);
                             slack_read,slack_send (slack accounts); whatsapp_read,whatsapp_send (whatsapp accounts);
@@ -691,7 +694,13 @@ async function cmdClient(config: PerchConfig, io: CliIo, sub: string | undefined
     const { clients } = await store.read();
     const lines = ['Client grants:'];
     if (!clients.length) lines.push('  (none)');
-    for (const c of clients) lines.push(`  ${c.id}  "${c.label}"  ${c.capabilities.join(',')}  accounts ${c.accountIds.join(',')}  created ${c.createdAt}`);
+    for (const c of clients) {
+      lines.push(
+        c.full
+          ? `  ${c.id}  "${c.label}"  FULL access (all capabilities, all accounts incl. later ones)  created ${c.createdAt}`
+          : `  ${c.id}  "${c.label}"  ${c.capabilities.join(',')}  accounts ${c.accountIds.join(',')}  created ${c.createdAt}`,
+      );
+    }
     return io.stdout(`${lines.join('\n')}\n`);
   }
   if (sub === 'remove') {
@@ -702,6 +711,23 @@ async function cmdClient(config: PerchConfig, io: CliIo, sub: string | undefined
   }
   if (sub !== 'add') throw new UsageError('Usage: perch client add|list|remove');
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
+  const tokenFileFor = () =>
+    path.resolve(
+      typeof values['token-file'] === 'string'
+        ? values['token-file']
+        : path.join(path.dirname(config.tokenFile), 'clients', `${randomBytes(4).toString('hex')}.token`),
+    );
+  if (values.full === true) {
+    if (values.allow !== undefined || values.account !== undefined) throw new UsageError('--full replaces --allow and --account; use one or the other');
+    const tokenFile = tokenFileFor();
+    const { client } = await createClientGrant(store, { label: values.label, capabilities: [], accountIds: [], tokenFile, full: true });
+    io.stdout(
+      `Created client ${client.id} "${client.label}" with FULL access: read and write on every connected account, including accounts connected later.\n` +
+        `Its bearer token was written to ${tokenFile} (0600) and is not shown here. Revoke with: perch client remove ${client.id}\n` +
+        claudeAddCommand(config, tokenFile),
+    );
+    return;
+  }
   if (typeof values.allow !== 'string') {
     throw new UsageError(
       '--allow is required (comma separated: read,draft,send for mail; calendar_read,calendar_write,contacts_read for gprod accounts; ' +
@@ -863,6 +889,9 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         'read-all': { type: 'boolean' },
         'allow-write': { type: 'boolean' },
         'allow-modify': { type: 'boolean' },
+        write: { type: 'boolean' },
+        'read-only': { type: 'boolean' },
+        full: { type: 'boolean' },
         public: { type: 'boolean' },
         name: { type: 'string' },
         redirect: { type: 'string', multiple: true },
@@ -890,6 +919,11 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
   }
   try {
     const config = resolveConfig(io.env);
+    let wantsWrite = false;
+    if (sub === 'add' && WRITE_FLAGS[cmd]) wantsWrite = await chooseAccess(cmd, values as Record<string, unknown>, io.readLine, io.stderr);
+    if (wantsWrite) {
+      io.stdout('Requesting read and write permissions from the provider. Clients still need a grant to write: perch client add --label NAME --full\n');
+    }
     switch (cmd) {
       case 'init':
         await cmdInit(config, io);
@@ -903,6 +937,8 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         return 0;
       case 'public':
         return await cmdPublic(config, io, sub);
+      case 'setup':
+        return await runSetup(config, io, (argv) => runCli(argv, io));
       case 'status':
         return await cmdStatus(config, io, values);
       case 'accounts':
