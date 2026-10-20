@@ -424,6 +424,40 @@ export function cutUtf8(buf: Buffer, maxBytes: number): string {
   return buf.subarray(0, end).toString('utf8');
 }
 
+// ---- Sent copy -------------------------------------------------------------------------------
+
+/**
+ * SMTP servers that file every submitted message in the account's Sent folder themselves (Gmail's SMTP, Microsoft
+ * 365 / Outlook.com SMTP AUTH). An extra APPEND there would leave each sent mail twice, so the default for these
+ * hosts is "no Sent copy". Everything else (e.g. GMX, which only files web-mail sends) gets a copy by default.
+ */
+const SMTP_HOSTS_FILING_SENT = new Set(['smtp.gmail.com', 'smtp.googlemail.com', 'smtp.office365.com', 'smtp-mail.outlook.com']);
+
+/** Whether Perch APPENDs a copy of an accepted SMTP send to the Sent folder: explicit setting, else by SMTP host. */
+export function imapSentCopyEnabled(account: Pick<ImapAccount, 'sentCopy' | 'smtp'>): boolean {
+  if (typeof account.sentCopy === 'boolean') return account.sentCopy;
+  return !SMTP_HOSTS_FILING_SENT.has(account.smtp.host.toLowerCase());
+}
+
+/** Common Sent folder names, tried in order when the server reports no \Sent special-use mailbox. */
+const SENT_FALLBACK_NAMES = ['Sent', 'Sent Items', 'Sent Messages', 'Sent Mail', 'Gesendet', 'Gesendete Objekte', 'Gesendete Elemente', 'INBOX.Sent', 'INBOX/Sent', '[Gmail]/Sent Mail'];
+
+/** The \Sent special-use mailbox, else the first selectable mailbox with a common Sent name (case-insensitive). */
+export function sentMailboxOf(list: ImapMailboxInfo[]): string | undefined {
+  const selectable = list.filter((m) => !(m.flags ?? []).some((f) => f.toLowerCase() === '\\noselect' || f.toLowerCase() === '\\nonexistent'));
+  const special = selectable.find((m) => m.specialUse?.toLowerCase() === '\\sent');
+  if (special) return special.path;
+  for (const name of SENT_FALLBACK_NAMES) {
+    const hit = selectable.find((m) => m.path.toLowerCase() === name.toLowerCase());
+    if (hit) return hit.path;
+  }
+  return undefined;
+}
+
+const SENT_COPY_FILED = (box: string) => ` A copy was filed in "${box}".`;
+const SENT_COPY_FAILED = ' The message was sent, but no copy could be filed in the Sent folder (sentCopy: false). It was NOT sent again; do not resend it.';
+const SENT_COPY_OFF = ' No copy was filed in Sent: turned off for this account, or its SMTP server files sent mail itself (sentCopy: false).';
+
 // ---- provider --------------------------------------------------------------------------------
 
 export type ImapSessionFactory = (account: ImapAccount) => Promise<ImapSession>;
@@ -624,11 +658,31 @@ export class ImapMailProvider implements MailProvider<ImapAccount> {
     });
   }
 
+  /**
+   * One SMTP submission (never retried). Only after SMTP accepted it, a copy (with Bcc, the sender's own record) is
+   * APPENDed to the Sent folder with \Seen, when the account files Sent copies. A failing APPEND never changes the
+   * outcome and never causes a second submission: the result stays accepted with sentCopy: false.
+   */
   async send(account: ImapAccount, mail: OutgoingMime): Promise<SendResult> {
     if (!account.allowSend) {
       throw new PerchError(`Sending is not enabled for ${account.id}. Re-add the account with sending allowed.`, 'not_permitted');
     }
-    return this.smtp.send(account, mail.raw, mail.envelope);
+    const result = await this.smtp.send(account, mail.raw, mail.envelope);
+    if (result.status !== 'accepted') return result;
+    const detail = result.detail.startsWith(ACCEPTED_NOTE) ? result.detail : ACCEPTED_NOTE;
+    if (!imapSentCopyEnabled(account)) return { ...result, detail: detail + SENT_COPY_OFF, sentCopy: false };
+    try {
+      const box = await this.withSession(account, async (s) => {
+        const sent = sentMailboxOf(await s.listMailboxes());
+        if (!sent) return undefined;
+        await s.append(validateFolder(sent), mail.sentCopy ?? mail.raw, ['\\Seen']);
+        return sent;
+      });
+      if (box) return { ...result, detail: detail + SENT_COPY_FILED(box), sentCopy: true };
+    } catch {
+      // fall through: reported below, never retried over SMTP
+    }
+    return { ...result, detail: detail + SENT_COPY_FAILED, sentCopy: false };
   }
   // ---- organizing (allowModify opt-in) and sending existing drafts (allowSend) ---------------------------
 
@@ -768,8 +822,10 @@ export class ImapMailProvider implements MailProvider<ImapAccount> {
 
   /**
    * Sends a stored draft: reads its raw MIME from the drafts mailbox, submits it over SMTP with the envelope from
-   * its To/Cc/Bcc and WITHOUT the Bcc header, then (only when accepted) clears \Draft and moves it to the \Sent
-   * mailbox. Exactly one SMTP attempt. Failing to file it in Sent never changes the send outcome.
+   * its To/Cc/Bcc and WITHOUT the Bcc header, then (only when accepted) clears \Draft and moves it to the Sent
+   * mailbox (\Sent special-use, else a common name). Without MOVE/UIDPLUS a copy is APPENDed to Sent instead (the
+   * draft stays). Moving is done regardless of the sentCopy setting (it takes the sent draft out of Drafts so it is
+   * not sent twice); the APPEND fallback follows the setting. Exactly one SMTP attempt; filing never changes the outcome.
    */
   async sendDraft(account: ImapAccount, draftId: string): Promise<SendResult> {
     if (!account.allowSend) {
@@ -797,26 +853,35 @@ export class ImapMailProvider implements MailProvider<ImapAccount> {
     const ready = prepareDraftForSmtp(raw, account.email);
     const result = await this.smtp.send(account, ready.raw, ready.envelope);
     if (result.status !== 'accepted') return result;
-    let filed: string;
+    let filed: { note: string; sentCopy: boolean };
     try {
       filed = await this.withSession(account, async (s) => {
-        const sent = ImapMailProvider.special(await s.listMailboxes(), '\\Sent');
-        if (!sent) return ' The server reports no \\Sent folder; the draft stays in the drafts folder. Do not send it again.';
+        const sent = sentMailboxOf(await s.listMailboxes());
+        if (!sent) return { note: ' The server reports no Sent folder; the draft stays in the drafts folder. Do not send it again.', sentCopy: false };
         const lock = await s.openWritable(id.mailbox);
+        let moveError: unknown;
         try {
           if (lock.uidValidity !== id.uidValidity) throw new Error('uidvalidity changed');
           await s.setFlags(id.uid, ['\\Seen'], ['\\Draft']);
-          await s.move(id.uid, sent);
-          return ` The draft was moved to "${sent}".`;
+          try {
+            await s.move(id.uid, sent);
+            return { note: ` The draft was moved to "${sent}".`, sentCopy: true };
+          } catch (err) {
+            moveError = err;
+          }
         } finally {
           lock.release();
         }
+        // No MOVE/UIDPLUS (or the move failed): file a copy instead when the account files Sent copies.
+        if (!imapSentCopyEnabled(account)) throw moveError;
+        await s.append(validateFolder(sent), raw, ['\\Seen']);
+        return { note: ` A copy was filed in "${sent}"; the draft could not be moved and is still in the drafts folder. Do not send it again.`, sentCopy: true };
       });
     } catch {
-      filed = ' The draft could not be moved to the Sent folder and is still in the drafts folder. Do not send it again.';
+      filed = { note: ' The draft could not be moved to the Sent folder and is still in the drafts folder. Do not send it again.', sentCopy: false };
     }
     const detail = result.detail.startsWith(ACCEPTED_NOTE) ? result.detail : ACCEPTED_NOTE;
-    return { ...result, detail: `${detail}${filed}` };
+    return { ...result, detail: `${detail}${filed.note}`, sentCopy: filed.sentCopy };
   }
 }
 
