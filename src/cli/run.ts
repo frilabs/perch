@@ -598,10 +598,12 @@ async function cmdSlack(config: PerchConfig, io: CliIo, sub: string | undefined,
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
   const token = await io.readSecret(`Slack user token (xoxp-…) for "${values.label}" (input hidden): `);
   const ws = await addSlackWorkspace(store, new Upstream(io.transport ?? createFetchTransport()), { label: values.label, token });
-  const missing = ['search:read', 'chat:write'].filter((s) => !ws.scopes.includes(s));
+  const missing = ['search:read', 'chat:write', 'reactions:read', 'reactions:write', 'files:read', 'files:write'].filter((s) => !ws.scopes.includes(s));
   io.stdout(
     `Connected Slack workspace ${ws.id} "${ws.label}" (${ws.teamName ?? ws.teamId}, user ${ws.userName ?? ws.userId}).\n` +
-      (missing.length ? `Note: the token lacks ${missing.join(', ')}; ${missing.includes('chat:write') ? 'posting' : 'search'} will not work until you add it and reconnect.\n` : '') +
+      (missing.length
+        ? `Note: the token lacks ${missing.join(', ')}; the tools that need them will not work until you reinstall the app with the current manifest (perch slack manifest) and run perch slack add again.\n`
+        : '') +
       `Posting needs a client grant: perch client add --label NAME --allow slack_read,slack_send --account ${ws.id}\n`,
   );
 }

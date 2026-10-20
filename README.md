@@ -70,6 +70,7 @@ Perch re-checks the grant before every tool call, so `perch client remove ID` ta
 - **Slack** (`docs/SLACK_WHATSAPP_MILESTONE.md`; one internal app with a user token per workspace, manifest in `docs/slack-app-manifest.json`):
   - list channels, private channels, DMs and group DMs; read history and threads; Slack search across all workspaces
   - post as the connected user (also in threads), only with a `slack_send` grant, idempotent per `requestId`
+  - read file metadata and content (`slack_get_file`, size-bounded, never truncated); with `slack_send`: add/remove reactions, edit own messages, upload files up to 10 MiB (idempotent per `requestId`). Never deletes messages or files. Needs the current manifest (`reactions:*`, `files:*`): reinstall the app and run `perch slack add` again
 - **WhatsApp** through GOWA (unofficial, self-hosted, localhost only):
   - pair with a pairing code from the CLI; several accounts in separate device slots
   - list chats, read and search messages (search covers the most recent chats); media as metadata only

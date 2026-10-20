@@ -334,7 +334,12 @@ Die App hat nur User-Scopes:
 | `channels:history`, `groups:history`, `im:history`, `mpim:history` | Nachrichten und Threads lesen |
 | `users:read` | Namen zu Nutzer-IDs |
 | `search:read` | `slack_search` |
-| `chat:write` | `slack_send_message` (nur mit Client-Grant) |
+| `chat:write` | `slack_send_message`, `slack_edit_message` (nur mit Client-Grant) |
+| `reactions:read`, `reactions:write` | `slack_add_reaction`, `slack_remove_reaction` (nur mit Client-Grant) |
+| `files:read` | `slack_get_file` (Metadaten und Inhalt einer Datei) |
+| `files:write` | `slack_upload_file` (nur mit Client-Grant) |
+
+**Bestehende Workspaces (Manifest vor Oktober 2026):** Die Scopes `reactions:*` und `files:*` sind neu. Im Workspace die App-Seite öffnen → **App Manifest** → durch `perch slack manifest` ersetzen → **Reinstall to Workspace** → neues User OAuth Token kopieren. Dann in Perch `perch slack remove ID` und `perch slack add --label …` (Perch liest die Scopes nur beim Verbinden). Ohne Neuinstallation lehnen die neuen Tools mit `provider_scope_missing` ab, bevor sie Slack aufrufen.
 
 Token-Rotation ist im Manifest aus, das Token läuft also nicht ab.
 
@@ -345,7 +350,7 @@ perch slack add --label "Firma"     # Token verdeckt eingeben
 perch slack list
 ```
 
-Perch prüft das Token mit `auth.test` und speichert Workspace, Nutzer und die tatsächlich gewährten Scopes. Fehlen `search:read` oder `chat:write`, warnt `slack add`. Das gleiche Workspace-Konto zweimal zu verbinden wird abgelehnt.
+Perch prüft das Token mit `auth.test` und speichert Workspace, Nutzer und die tatsächlich gewährten Scopes. Fehlen Scopes des aktuellen Manifests (etwa `search:read`, `chat:write`, `files:write`), warnt `slack add`. Das gleiche Workspace-Konto zweimal zu verbinden wird abgelehnt.
 
 ### 4e.3 Lesen und Senden
 
@@ -357,6 +362,12 @@ Perch prüft das Token mit `auth.test` und speichert Workspace, Nutzer und die t
   ```
 
   Pflichtfeld `requestId` wie bei `mail_send` (Abschnitt 4d): gleiche ID + gleicher Inhalt postet nie zweimal.
+
+- **Dateien und Reaktionen:**
+  - `slack_get_file` (lesen, wie oben): Metadaten per `files.info`, Inhalt als Base64 bis `maxBytes` (Standard 48 KiB, höchstens 10 MiB). Größere Dateien werden abgelehnt, nie abgeschnitten. Geladen wird nur von `https://files.slack.com/files-pri/<Team>-<Datei>/…`.
+  - `slack_add_reaction`, `slack_remove_reaction`, `slack_edit_message` (nur eigene Nachrichten; Slack lehnt fremde ab): nur mit `slack_send`.
+  - `slack_upload_file` (bis 10 MiB, optional in einen Thread mit Kommentar): nur mit `slack_send`, idempotent per `requestId` wie `slack_send_message`. Die Bytes gehen nur an `https://files.slack.com/upload/v1/…`; jede andere Upload-Adresse wird abgelehnt, bevor Daten fließen.
+  - Löschen (Nachrichten, Dateien) und öffentliche Datei-Links gibt es nicht: Löschen ist bei Slack endgültig.
 
   **Achtung Limit:** Slack-, WhatsApp- und Mail-Sends teilen sich 1000 Sende-Einträge pro Namespace. Danach schlagen alle Sends fehl, auch Mail (`ledger_full`), bis es einen Ledger-Rollover gibt (`docs/SLACK_WHATSAPP_MILESTONE.md` §6).
 
