@@ -42,13 +42,14 @@ import { ensurePrivateDir, pathExists, readPrivateFile, writePrivateFileAtomic, 
 import { CredentialStore, initStore, type ImapAccount, type StoreData } from '../store/credentialStore.js';
 import { createFetchTransport, Upstream, type UpstreamTransport } from '../upstream.js';
 import { collectStatus, failedChecks, formatStatusText } from '../status/status.js';
+import { accountCapabilities, formatStatusTerminal } from '../status/terminal.js';
 import { startPublicAccess } from '../access/runtime.js';
 import { cmdOauth, cmdPublic } from './oauth.js';
 import { cmdLuma, lumaMcpFor } from './luma.js';
 import type { FetchLike } from '../luma/client.js';
 import { PERCH_VERSION } from '../version.js';
 import { chooseAccess, claudeAddCommand, runSetup, WRITE_FLAGS } from './onboarding.js';
-import { defaultInstallDeps, installGowa, type InstallDeps } from '../whatsapp/install.js';
+import { defaultInstallDeps, installGowa, rotateGowaPassword, type InstallDeps } from '../whatsapp/install.js';
 import { DEFAULT_PAIR_TIMEOUT_MS, pairWhatsappAccount, probeWhatsappInstance, removeWhatsappAccount, setWhatsappInstance, whatsappDeviceStatus } from '../whatsapp/whatsapp.js';
 
 export interface CliIo {
@@ -69,6 +70,10 @@ export interface CliIo {
   sleep?: (ms: number) => Promise<void>;
   /** Tests inject MOCK platform, download, systemctl and pins for `perch whatsapp install`; production uses the real ones. */
   whatsappInstall?: Partial<InstallDeps>;
+  /** stdout is a terminal (perch status: colour unless NO_COLOR); tests inject it, production passes process.stdout.isTTY. */
+  stdoutIsTTY?: boolean;
+  /** Terminal width for perch status; undefined when piped. */
+  stdoutColumns?: number;
 }
 
 const USAGE = `perch ${PERCH_VERSION} - Google Drive + Notion + mail + Calendar/Contacts + Slack + WhatsApp MCP server (read-only unless a client grant allows more)
@@ -90,8 +95,9 @@ Usage:
   perch luma list | remove ID [--revoke] | tools ID [--accept]   tools: approved vs live tool schemas
   perch oauth local-page enable | disable       local pairing page /local/pair with its own password
   perch accounts                               list all connected accounts
-  perch status [--no-check] [--json]           overview with a live check per account
-                                               (exit code 1 if a check failed); the same page: GET /status on serve --http
+  perch status [--no-check] [--json] [--plain] overview with a live check per account, capabilities and the commands
+                                               that enable missing ones (exit code 1 if a check failed); --plain: the
+                                               previous one-line-per-account text; the same page: GET /status on serve --http
   perch google add --label NAME [--allow-write] [--port N] [--timeout SECONDS] [--login-hint EMAIL]
   perch google list | remove ID [--revoke]
   perch notion add --label NAME                PAT is read via a masked terminal prompt
@@ -113,7 +119,10 @@ Usage:
   perch slack add --label NAME                 user token (xoxp-…) is read via a masked terminal prompt
   perch slack list | remove ID
   perch whatsapp install [--yes] [--dir PATH] [--port N]   download the pinned GOWA bridge (SHA-256 checked), run it as a
-                                               systemd user service on 127.0.0.1 and store it in Perch (Linux; asks first)
+                                               systemd user service on 127.0.0.1 and store it in Perch (Linux; asks first);
+                                               a re-run replaces a gowa.service written by an older Perch
+  perch whatsapp rotate-password [--dir PATH]  new random GOWA password in .env, restart GOWA, store it in Perch;
+                                               paired devices stay linked; the password is never shown
   perch whatsapp instance set --url http://127.0.0.1:3000   GOWA basic-auth user/password via masked prompts
   perch whatsapp instance show
   perch whatsapp add --label NAME --phone +43…  [--timeout SECONDS]   pair a new linked device by pairing code
@@ -631,11 +640,10 @@ async function cmdSlack(config: PerchConfig, io: CliIo, sub: string | undefined,
 async function cmdWhatsapp(config: PerchConfig, io: CliIo, sub: string | undefined, rest: string[], values: Record<string, unknown>) {
   const store = await openStore(config);
   const upstream = new Upstream(io.transport ?? createFetchTransport());
-  if (sub === 'install') {
-    if (rest.length) throw new UsageError('Usage: perch whatsapp install [--yes] [--dir PATH] [--port N]');
+  const gowaDeps = (): InstallDeps => {
     const home = io.env.HOME;
     if (!home || !path.isAbsolute(home)) throw new PerchError('HOME is not set to an absolute path', 'usage');
-    const deps: InstallDeps = {
+    return {
       ...defaultInstallDeps({
         home,
         sleep: io.sleep,
@@ -647,9 +655,19 @@ async function cmdWhatsapp(config: PerchConfig, io: CliIo, sub: string | undefin
       }),
       ...io.whatsappInstall,
     };
+  };
+  if (sub === 'install') {
+    if (rest.length) throw new UsageError('Usage: perch whatsapp install [--yes] [--dir PATH] [--port N]');
     const dir = typeof values.dir === 'string' ? values.dir : undefined;
-    await installGowa({ yes: values.yes === true, dir, port: optPort(values, 'port') }, deps);
+    const r = await installGowa({ yes: values.yes === true, dir, port: optPort(values, 'port') }, gowaDeps());
+    if (r.status === 'unit_updated') return;
     return io.stdout('Next: perch whatsapp add --label NAME --phone +43…  (pairs your phone by code)\n');
+  }
+  if (sub === 'rotate-password') {
+    if (rest.length) throw new UsageError('Usage: perch whatsapp rotate-password [--dir PATH]');
+    const dir = typeof values.dir === 'string' ? values.dir : undefined;
+    await rotateGowaPassword({ dir }, gowaDeps());
+    return;
   }
   if (sub === 'instance') {
     const action = rest[0];
@@ -688,7 +706,7 @@ async function cmdWhatsapp(config: PerchConfig, io: CliIo, sub: string | undefin
     );
     return;
   }
-  if (sub !== 'add') throw new UsageError('Usage: perch whatsapp install|instance|add|list|status|remove');
+  if (sub !== 'add') throw new UsageError('Usage: perch whatsapp install|rotate-password|instance|add|list|status|remove');
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
   if (typeof values.phone !== 'string') throw new UsageError('--phone is required (international format, e.g. +4366012345678)');
   const timeout = values.timeout === undefined ? DEFAULT_PAIR_TIMEOUT_MS / 1000 : Number(values.timeout);
@@ -715,7 +733,12 @@ async function cmdStatus(config: PerchConfig, io: CliIo, values: Record<string, 
   const store = await openStore(config);
   const ctx = createPerchContext(store, io.transport ?? createFetchTransport(), undefined, lumaMcpFor(io));
   const report = await collectStatus(ctx, { live: values['no-check'] !== true, ...(io.imapVerify ? { imapVerify: io.imapVerify } : {}) });
-  io.stdout(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : formatStatusText(report));
+  if (values.json === true) io.stdout(`${JSON.stringify(report, null, 2)}\n`);
+  else if (values.plain === true) io.stdout(formatStatusText(report));
+  else {
+    const capabilities = accountCapabilities(await store.read());
+    io.stdout(formatStatusTerminal(report, capabilities, { tty: io.stdoutIsTTY === true, ...(io.stdoutColumns ? { columns: io.stdoutColumns } : {}), env: io.env }));
+  }
   return failedChecks(report) ? 1 : 0;
 }
 
@@ -931,6 +954,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         all: { type: 'boolean' },
         accept: { type: 'boolean' },
         json: { type: 'boolean' },
+        plain: { type: 'boolean' },
         yes: { type: 'boolean' },
         dir: { type: 'string' },
         help: { type: 'boolean', short: 'h' },

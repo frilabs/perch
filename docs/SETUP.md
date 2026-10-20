@@ -471,11 +471,13 @@ Was der Befehl tut (Spezifikation: `docs/WHATSAPP_INSTALL_SPEC.md`):
 1. Warnt (inoffiziell, Konto kann eingeschränkt werden, Nachrichten unverschlüsselt auf der Platte) und fragt `[y/N]`. Ohne Terminal und ohne `--yes` bricht er ab. Nur Linux mit systemd, `x64` oder `arm64`, nicht als root.
 2. Lädt `whatsapp_9.6.0_linux_amd64.zip` (bzw. `linux_arm64`) per HTTPS von GitHub (Weiterleitung nur zu GitHubs Release-Hosts, höchstens 64 MiB) und prüft es gegen die **im Perch-Code festgelegte SHA-256**. Abweichung: Abbruch, nichts wird entpackt.
 3. Entpackt nur das Programm (im ZIP `linux-amd64` bzw. `linux-arm64`) als `~/gowa/whatsapp` (Ordner und Programm `0700`), mit eigenem ZIP-Leser ohne `unzip`.
-4. Schreibt `~/gowa/.env` (`0600`, Inhalt wie unten, zufälliges Passwort für den Nutzer `perch`) und `~/.config/systemd/user/gowa.service` (wie unten).
+4. Schreibt `~/gowa/.env` (`0600`, Inhalt wie unten, zufälliges Passwort für den Nutzer `perch`) und `~/.config/systemd/user/gowa.service` (wie unten). Die Unit enthält `LogFilterPatterns=~app_basic_auth`: GOWA schreibt beim Start seine Konfiguration samt `app_basic_auth:perch:<Passwort>` ins Log, diese Zeile landet so nicht im Journal. Das braucht **systemd ≥ 253** (Ubuntu 24.04: 255, Debian 12: 252). Bei älterem systemd (oder unbekannter Version, ermittelt per `systemctl --version`) warnt der Befehl; die Zeile wird dann ignoriert und das Passwort steht im Journal.
 5. `systemctl --user daemon-reload` und `systemctl --user enable --now gowa`, wartet bis `GET /devices` mit Basic Auth antwortet (sonst Meldung mit `journalctl --user -u gowa -n 50`).
-6. Trägt die Bridge in Perch ein wie `perch whatsapp instance set` (Passwort direkt in den verschlüsselten Store, nie auf der Konsole). Weiter mit §4f.2 (`perch whatsapp add`).
+6. Trägt die Bridge in Perch ein wie `perch whatsapp instance set` (Passwort direkt in den verschlüsselten Store, nie auf der Konsole); schlägt das direkt nach dem Start fehl, wiederholt er es bis zur selben Frist wie die Prüfung in Schritt 5. Weiter mit §4f.2 (`perch whatsapp add`).
 
-Erneuter Aufruf: Ist GOWA 9.6.0 dort schon vollständig installiert, ändert der Befehl nichts, prüft nur die Bridge und trägt sie (falls noch nicht geschehen) in Perch ein. Eine andere Version oder fremde Dateien im Zielordner, eine andere `gowa.service` oder ein anderer `--port` führen zum Abbruch (anderes `--dir` wählen oder von Hand aufräumen). Ein Update von GOWA ist eine Code-Änderung in Perch (neue Version, neuer Hash), kein automatischer Schritt.
+Unerwartete Fehler meldet der Befehl mit dem Schritt, in dem sie auftraten (z. B. „Storing the bridge in Perch failed (step: store)“), ohne Passwörter oder Details. (Der erste Live-Lauf endete nach „waiting for …/devices“ mit „Internal error“: Die Warteschleife hatte im echten Betrieb keine Sleep-Funktion, sobald GOWA nicht schon bei der ersten Prüfung antwortete. Behoben; GOWA lief trotzdem, ein erneuter Aufruf von `perch whatsapp install` trägt die Bridge nach.)
+
+Erneuter Aufruf: Ist GOWA 9.6.0 dort schon vollständig installiert, ändert der Befehl nichts, prüft nur die Bridge und trägt sie (falls noch nicht geschehen) in Perch ein. Ausnahme: Ist die `gowa.service` noch die einer **älteren Perch-Version** (exakt der frühere Inhalt, ohne Log-Filter), ersetzt er sie durch die neue, macht `systemctl --user daemon-reload` und `systemctl --user restart gowa` und wartet wieder auf `/devices`. Danach `perch whatsapp rotate-password` (§4f.1b), weil das alte Passwort schon im Journal steht. Eine andere Version oder fremde Dateien im Zielordner, eine andere `gowa.service` oder ein anderer `--port` führen zum Abbruch (anderes `--dir` wählen oder von Hand aufräumen). Ein Update von GOWA ist eine Code-Änderung in Perch (neue Version, neuer Hash), kein automatischer Schritt.
 
 Damit GOWA nach dem Abmelden weiterläuft (Server ohne Login-Sitzung): `sudo loginctl enable-linger $USER`. Meldet `systemctl --user` „Failed to connect to bus“, als dieser Nutzer direkt anmelden (nicht über `su`/`sudo`) oder `XDG_RUNTIME_DIR=/run/user/$(id -u)` setzen.
 
@@ -530,6 +532,8 @@ WorkingDirectory=%h/gowa
 ExecStart=%h/gowa/whatsapp rest
 Restart=on-failure
 UMask=0077
+# GOWA logs its configuration incl. the basic-auth password at startup; keep that line out of the journal (systemd >= 253)
+LogFilterPatterns=~app_basic_auth
 
 [Install]
 WantedBy=default.target
@@ -541,6 +545,28 @@ curl -s -u "perch:PASSWORT" http://127.0.0.1:3000/devices   # Test: {"code":"SUC
 ```
 
 GOWA liest die `.env` im Arbeitsverzeichnis. Den Port 3000 **nicht** per Tailscale Serve oder Firewall freigeben.
+
+### 4f.1b Neues GOWA-Passwort: `perch whatsapp rotate-password`
+
+```bash
+perch whatsapp rotate-password            # bzw. --dir PATH, wenn mit --dir installiert
+```
+
+Nur für ein von `perch whatsapp install` eingerichtetes GOWA (erkennt es an `~/gowa/.perch-gowa.json` und an der von Perch geschriebenen `gowa.service`); sonst bricht der Befehl mit einer Meldung ab (manuell installiert: `APP_BASIC_AUTH` in der `.env` ändern, GOWA neu starten, `perch whatsapp instance set`). Ablauf:
+
+1. Neues Zufallspasswort in `~/gowa/.env` (`0600`, atomar ersetzt; alle anderen Zeilen bleiben). Eine Unit einer älteren Perch-Version wird dabei gleich durch die mit Log-Filter ersetzt (mit `daemon-reload`).
+2. `systemctl --user restart gowa`, warten bis `GET /devices` das neue Passwort annimmt.
+3. Bridge mit dem neuen Passwort in Perch speichern. Gekoppelte Geräte (`storages/`) bleiben unverändert verbunden. Das Passwort erscheint nie auf der Konsole.
+
+Scheitert Schritt 2, steht das neue Passwort schon in der `.env`: GOWA reparieren (`journalctl --user -u gowa -n 50`) und den Befehl erneut ausführen.
+
+Alte Journal-Einträge mit dem früheren Passwort kann nur root löschen. Achtung, das löscht **alle** archivierten Journal-Einträge des Rechners:
+
+```bash
+sudo journalctl --rotate && sudo journalctl --vacuum-time=1s
+```
+
+Prüfen, ob der Filter greift (nach einem Neustart von GOWA, sollte nichts ausgeben): `journalctl --user -u gowa --since "10 min ago" | grep -c app_basic_auth`. Live noch nicht geprüft: ob journald `LogFilterPatterns=` bei **User**-Units auf diesem System anwendet.
 
 ### 4f.2 In Perch verbinden und koppeln
 
@@ -645,7 +671,11 @@ Perch löscht nie endgültig: Drive, Notion und Mail verschieben nur in den Papi
 perch status              # alle Konten mit Live-Check, Clients, Sende-Speicher, Audit
 perch status --no-check   # ohne Anfragen an die Anbieter
 perch status --json       # maschinenlesbar
+perch status --plain      # bisherige schlichte Ausgabe (eine Zeile pro Konto)
 ```
+
+- **Darstellung:** Abschnitte pro Dienst mit Checkboxen. Verbundene Konten stehen als `☑` (oder `✗` bei fehlgeschlagenem Check) mit Label, Adresse und Ergebnis da. Darunter die **Fähigkeiten** des Kontos: aktivierte als `☑` (z. B. lesen, Entwürfe, senden), mögliche, aber nicht aktivierte als `☐` mit dem genauen Befehl, der sie freischaltet (Mail/Drive/Kalender: Konto entfernen und mit der zusätzlichen Option neu verbinden, bestehende Optionen bleiben im Befehl; Slack: App mit aktuellem Manifest neu installieren). Neu verbinden vergibt eine neue Konto-ID; Clients mit Kontoliste bekommen sie nicht automatisch (Hinweis in der Ausgabe). Nicht verbundene Dienste stehen als `☐` mit `perch … add`-Befehl. Danach Zugänge (Clients, öffentlicher Zugang, WhatsApp-Bridge), Sende-Speicher als Balken, Audit-Zähler, die Onboarding-Checkliste (`Onboarding N/4`) und das Gesamtergebnis.
+- **Farbe** nur für Status (grün ok, rot Fehler, gelb Hinweis) und nur im Terminal; mit `NO_COLOR=1` oder umgeleiteter Ausgabe ohne Farbe, die Checkboxen bleiben. Die Breite folgt dem Terminal (mindestens 60 Zeichen), lange Werte werden gekürzt, Befehle nie.
 
 - Pro Konto prüft Perch **nur lesend**, ob der Zugang noch funktioniert: Drive `about`, Gmail-Profil, Graph `/me`, Google `userinfo`, Notion `users/me`, Slack `auth.test`, IMAP-/SMTP-Login, GOWA-Gerätestatus.
 - Der Exit-Code ist 1, sobald ein Check fehlschlägt. Damit eignet sich der Befehl auch für Monitoring, z. B. per Cron.

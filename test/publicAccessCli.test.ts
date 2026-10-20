@@ -290,7 +290,10 @@ describe('perch oauth pair (end to end over the control socket)', () => {
 
   it('perch status shows the public access without secrets', async () => {
     const io = cliIo(() => '');
-    await runCli(['status', '--no-check'], io);
+    await runCli(['status', '--no-check', '--plain'], io);
     expect(io.out()).toMatch(/Public access: set up · Perch code set up · 1 allowed Google account\(s\) · 0 active device\(s\)/);
+    const fancy = cliIo(() => '');
+    await runCli(['status', '--no-check'], fancy);
+    expect(fancy.out()).toMatch(/☑ public access \(OAuth for claude\.ai, ChatGPT …\) +on\n {4}Perch code set up · 1 allowed Google account\(s\) · 0 active device\(s\)/);
   });
 });

@@ -9,7 +9,19 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runCli, type CliIo } from '../src/cli/run.js';
 import { PerchError } from '../src/errors.js';
 import { CredentialStore } from '../src/store/credentialStore.js';
-import { GOWA_PINS, gowaDownloadUrl, installGowa, MAX_ARCHIVE_BYTES, type InstallDeps, type RunResult } from '../src/whatsapp/install.js';
+import {
+  defaultInstallDeps,
+  envFileContent,
+  GOWA_PINS,
+  gowaDownloadUrl,
+  installGowa,
+  legacyUnitFileContents,
+  MAX_ARCHIVE_BYTES,
+  rotateGowaPassword,
+  unitFileContent,
+  type InstallDeps,
+  type RunResult,
+} from '../src/whatsapp/install.js';
 import { extractZipEntry, listZipEntries } from '../src/whatsapp/zip.js';
 import { makeTempDirs, rejection, type TempDirs } from './support/fixtures.js';
 import { MockGowa } from './support/mockGowa.js';
@@ -87,6 +99,7 @@ let stored: Array<[string, string, string]>;
 let out: string[];
 let clock: number;
 let sleeps: number;
+let systemdVersion: number;
 
 beforeEach(async () => {
   dirs = await makeTempDirs();
@@ -98,6 +111,7 @@ beforeEach(async () => {
   out = [];
   clock = 0;
   sleeps = 0;
+  systemdVersion = 255;
 });
 afterEach(async () => {
   await dirs.cleanup();
@@ -122,7 +136,7 @@ function deps(over: Partial<InstallDeps> = {}, zip = goodZip()): InstallDeps {
     fetch: githubFetch(zip),
     run: async (cmd, args): Promise<RunResult> => {
       runs.push([cmd, ...args]);
-      return { code: 0, stdout: '', stderr: '' };
+      return { code: 0, stdout: args[0] === '--version' ? `systemd ${systemdVersion} (${systemdVersion}.4-1ubuntu8)\n+PAM +AUDIT\n` : '', stderr: '' };
     },
     probe: async (origin, user, pw) => {
       if (user !== 'perch' || pw.length < 32 || !origin.startsWith('http://127.0.0.1:')) throw new Error('MOCK: 401');
@@ -200,9 +214,12 @@ describe('fresh install [MOCK download, MOCK systemctl]', () => {
     }
     expect(await readFile(unitPath(), 'utf8')).toBe(
       '[Unit]\nDescription=GOWA WhatsApp bridge (localhost only)\n\n[Service]\nWorkingDirectory=%h/gowa\nExecStart=%h/gowa/whatsapp rest\n' +
-        'Restart=on-failure\nUMask=0077\n\n[Install]\nWantedBy=default.target\n',
+        'Restart=on-failure\nUMask=0077\n' +
+        '# GOWA logs its configuration incl. the basic-auth password at startup; keep that line out of the journal (systemd >= 253)\n' +
+        'LogFilterPatterns=~app_basic_auth\n\n[Install]\nWantedBy=default.target\n',
     );
     expect(runs).toEqual([
+      ['systemctl', '--version'],
       ['systemctl', '--user', 'daemon-reload'],
       ['systemctl', '--user', 'enable', '--now', 'gowa'],
     ]);
@@ -261,7 +278,11 @@ describe('fresh install [MOCK download, MOCK systemctl]', () => {
     expect(fetched).toEqual([]);
     expect(await exists(unitPath())).toBe(true);
     expect(await readFile(path.join(gowaDir(), '.env'), 'utf8')).toContain(PASSWORD);
-    expect(runs).toHaveLength(2);
+    expect(runs).toEqual([
+      ['systemctl', '--version'],
+      ['systemctl', '--user', 'daemon-reload'],
+      ['systemctl', '--user', 'enable', '--now', 'gowa'],
+    ]);
   });
 
   it('leaves a different configured bridge alone', async () => {
@@ -434,6 +455,292 @@ describe('service start and health poll', () => {
   });
 });
 
+describe('first live run: no bare "Internal error" after the health wait', () => {
+  it('regression: defaultInstallDeps keeps a real sleep when the CLI passes sleep: undefined (production io)', async () => {
+    const base = {
+      home,
+      sleep: undefined,
+      out: () => {},
+      probe: async () => {},
+      store: async () => {},
+      configuredOrigin: async () => undefined,
+    };
+    const d = defaultInstallDeps(base);
+    expect(typeof d.sleep).toBe('function');
+    await d.sleep(1);
+  });
+
+  it('store is retried until the health deadline (plain errors), then succeeds', async () => {
+    let calls = 0;
+    const r = await installGowa(
+      { yes: true },
+      deps({
+        store: async (o, u, p) => {
+          if (++calls < 3) throw new TypeError('MOCK: store not ready');
+          stored.push([o, u, p]);
+        },
+      }),
+    );
+    expect(r.status).toBe('installed');
+    expect(calls).toBe(3);
+    expect(sleeps).toBe(2);
+    expect(stored).toHaveLength(1);
+  });
+
+  it('a non-PerchError while storing ends as a PerchError naming the step, without secrets', async () => {
+    const err = await rejection(installGowa({ yes: true }, deps({ store: async () => Promise.reject(new Error(`MOCK: boom ${PASSWORD}`)) })));
+    expect(err).toBeInstanceOf(PerchError);
+    expect((err as PerchError).code).toBe('whatsapp_install_failed');
+    expect(err.message).toContain('Storing the bridge in Perch failed (step: store)');
+    expect(err.message).not.toContain(PASSWORD);
+    expect(err.message).not.toContain('boom');
+    expect(sleeps).toBeGreaterThan(0); // retried before giving up
+  });
+
+  it('a TypeError from configuredOrigin is reported as the store step too', async () => {
+    const err = await rejection(
+      installGowa(
+        { yes: true },
+        deps({
+          configuredOrigin: async () => {
+            throw new TypeError("Cannot read properties of undefined (reading 'origin')");
+          },
+        }),
+      ),
+    );
+    expect((err as PerchError).code).toBe('whatsapp_install_failed');
+    expect(err.message).toMatch(/\(step: store\)/);
+  });
+
+  it('a PerchError from storing keeps its code and safe message, prefixed with the step', async () => {
+    const err = await rejection(installGowa({ yes: true }, deps({ store: async () => Promise.reject(new PerchError('Store is locked', 'store_locked')) })));
+    expect((err as PerchError).code).toBe('store_locked');
+    expect(err.message).toBe('Storing the bridge in Perch failed (step: store): Store is locked');
+  });
+
+  it('plain errors in other steps name the step and an errno code only', async () => {
+    const err = await rejection(
+      installGowa(
+        { yes: true },
+        deps({
+          run: async () => {
+            throw Object.assign(new Error(`spawn failed ${PASSWORD}`), { code: 'EACCES' });
+          },
+        }),
+      ),
+    );
+    expect((err as PerchError).code).toBe('whatsapp_install_failed');
+    expect(err.message).toMatch(/^Starting the GOWA service failed \(step: systemd\) \(EACCES\)\./);
+    expect(err.message).not.toContain(PASSWORD);
+    await (await import('node:fs/promises')).rm(gowaDir(), { recursive: true });
+    await (await import('node:fs/promises')).unlink(unitPath());
+    const probeErr = await rejection(
+      installGowa(
+        { yes: true },
+        deps({
+          sleep: undefined as unknown as InstallDeps['sleep'], // the original bug: deps.sleep missing
+          probe: async () => Promise.reject(new Error('MOCK: refused')),
+        }),
+      ),
+    );
+    expect((probeErr as PerchError).code).toBe('whatsapp_install_failed');
+    expect(probeErr.message).toMatch(/\(step: health\)/);
+  });
+});
+
+describe('log filter and units written by an older Perch', () => {
+  const legacyUnit = (dir = '%h/gowa') =>
+    `[Unit]\nDescription=GOWA WhatsApp bridge (localhost only)\n\n[Service]\nWorkingDirectory=${dir}\nExecStart=${dir}/whatsapp rest\n` +
+    'Restart=on-failure\nUMask=0077\n\n[Install]\nWantedBy=default.target\n';
+
+  it('the old unit content is exactly what earlier Perch versions wrote', () => {
+    expect(legacyUnitFileContents(path.join(home, 'gowa'), home)).toEqual([legacyUnit()]);
+    expect(unitFileContent(path.join(home, 'gowa'), home)).toContain('\nLogFilterPatterns=~app_basic_auth\n');
+  });
+
+  it('a re-run on a complete installation replaces the older Perch unit, reloads and restarts GOWA', async () => {
+    await installGowa({ yes: true }, deps());
+    await writeFile(unitPath(), legacyUnit());
+    runs = [];
+    stored = [];
+    fetched = [];
+    const r = await installGowa({ yes: false }, deps({ ask: undefined }));
+    expect(r.status).toBe('unit_updated');
+    expect(fetched).toEqual([]);
+    expect(await readFile(unitPath(), 'utf8')).toBe(unitFileContent(gowaDir(), home));
+    expect(runs).toEqual([
+      ['systemctl', '--version'],
+      ['systemctl', '--user', 'daemon-reload'],
+      ['systemctl', '--user', 'restart', 'gowa'],
+    ]);
+    expect(stored).toEqual([['http://127.0.0.1:3000', 'perch', PASSWORD]]);
+    expect(out.join('')).toMatch(/rotate-password/);
+    expect(out.join('')).not.toContain(PASSWORD);
+    // and a further re-run is a plain check again
+    runs = [];
+    expect((await installGowa({ yes: true }, deps())).status).toBe('already_installed');
+    expect(runs).toEqual([]);
+  });
+
+  it('an older Perch unit next to an incomplete installation is replaced during the install (restart included)', async () => {
+    await mkdir(path.dirname(unitPath()), { recursive: true });
+    await writeFile(unitPath(), legacyUnit());
+    const r = await installGowa({ yes: true }, deps());
+    expect(r.status).toBe('installed');
+    expect(await readFile(unitPath(), 'utf8')).toBe(unitFileContent(gowaDir(), home));
+    expect(runs.slice(1)).toEqual([
+      ['systemctl', '--user', 'daemon-reload'],
+      ['systemctl', '--user', 'enable', '--now', 'gowa'],
+      ['systemctl', '--user', 'restart', 'gowa'],
+    ]);
+  });
+
+  it('foreign units stay refused, including an old Perch unit for another directory', async () => {
+    await mkdir(path.dirname(unitPath()), { recursive: true });
+    await writeFile(unitPath(), legacyUnit('/opt/elsewhere'));
+    expect(await codeOf(installGowa({ yes: true }, deps()))).toBe('foreign_files');
+    await writeFile(unitPath(), `${legacyUnit()}# my change\n`);
+    expect(await codeOf(installGowa({ yes: true }, deps()))).toBe('foreign_files');
+    expect(await readFile(unitPath(), 'utf8')).toBe(`${legacyUnit()}# my change\n`);
+    expect(fetched).toEqual([]);
+  });
+
+  it('warns on systemd older than 253 and when the version is unknown; silent on 253+', async () => {
+    systemdVersion = 252;
+    await installGowa({ yes: true }, deps());
+    expect(out.join('')).toMatch(/Warning: systemd 252 is older than 253; LogFilterPatterns= needs systemd 253/);
+    out = [];
+    await (await import('node:fs/promises')).rm(gowaDir(), { recursive: true });
+    await (await import('node:fs/promises')).unlink(unitPath());
+    const run = async (cmd: string, args: string[]): Promise<RunResult> => {
+      runs.push([cmd, ...args]);
+      return args[0] === '--version' ? { code: 1, stdout: '', stderr: 'nope' } : { code: 0, stdout: '', stderr: '' };
+    };
+    await installGowa({ yes: true }, deps({ run }));
+    expect(out.join('')).toMatch(/Warning: could not determine the systemd version/);
+    out = [];
+    systemdVersion = 253;
+    await (await import('node:fs/promises')).rm(gowaDir(), { recursive: true });
+    await (await import('node:fs/promises')).unlink(unitPath());
+    await installGowa({ yes: true }, deps());
+    expect(out.join('')).not.toMatch(/Warning/);
+  });
+});
+
+describe('perch whatsapp rotate-password [MOCK systemctl, MOCK GOWA]', () => {
+  const NEW = `DUMMY-TEST-NEWPW-${'cd34'.repeat(8)}`;
+  let probes: string[];
+  const rotDeps = (over: Partial<InstallDeps> = {}) =>
+    deps({
+      password: () => NEW,
+      probe: async (_o, _u, pw) => {
+        probes.push(pw);
+        if (pw !== NEW) throw new Error('MOCK: 401');
+      },
+      ...over,
+    });
+
+  beforeEach(() => {
+    probes = [];
+  });
+
+  it('writes a new password to .env (0600), restarts GOWA, waits for it and stores it; devices untouched', async () => {
+    await installGowa({ yes: true }, deps());
+    await mkdir(path.join(gowaDir(), 'storages'), { mode: 0o700 });
+    await writeFile(path.join(gowaDir(), 'storages', 'whatsapp.db'), 'MOCK device store');
+    const envBefore = await readFile(path.join(gowaDir(), '.env'), 'utf8');
+    runs = [];
+    stored = [];
+    out = [];
+    const r = await rotateGowaPassword({}, rotDeps());
+    expect(r).toEqual({ origin: 'http://127.0.0.1:3000', dir: gowaDir(), stored: true });
+    const env = await readFile(path.join(gowaDir(), '.env'), 'utf8');
+    expect(env).toBe(envBefore.replace(`APP_BASIC_AUTH=perch:${PASSWORD}`, `APP_BASIC_AUTH=perch:${NEW}`));
+    expect(await mode(path.join(gowaDir(), '.env'))).toBe(0o600);
+    expect((await readdir(gowaDir())).sort()).toEqual(['.env', '.perch-gowa.json', 'storages', 'whatsapp']); // no temp files
+    expect(await readFile(path.join(gowaDir(), 'storages', 'whatsapp.db'), 'utf8')).toBe('MOCK device store');
+    expect(runs).toEqual([
+      ['systemctl', '--version'],
+      ['systemctl', '--user', 'restart', 'gowa'],
+    ]);
+    expect(probes.at(-1)).toBe(NEW);
+    expect(stored).toEqual([['http://127.0.0.1:3000', 'perch', NEW]]);
+    const text = out.join('');
+    expect(text).not.toContain(NEW);
+    expect(text).not.toContain(PASSWORD);
+    expect(text).toContain('sudo journalctl --rotate && sudo journalctl --vacuum-time=1s');
+    expect(text).toMatch(/paired devices stay linked/);
+  });
+
+  it('waits until GOWA accepts the new password', async () => {
+    await installGowa({ yes: true }, deps());
+    let n = 0;
+    sleeps = 0;
+    await rotateGowaPassword(
+      {},
+      rotDeps({
+        probe: async (_o, _u, pw) => {
+          if (++n < 3 || pw !== NEW) throw new Error('MOCK: still restarting');
+        },
+      }),
+    );
+    expect(n).toBe(3);
+    expect(sleeps).toBe(2);
+  });
+
+  it('refuses a GOWA without the Perch marker (manual install) and changes nothing', async () => {
+    expect(await codeOf(rotateGowaPassword({}, rotDeps()))).toBe('not_perch_gowa');
+    await mkdir(gowaDir(), { mode: 0o700 });
+    await writeFile(path.join(gowaDir(), '.env'), envFileContent(3000, PASSWORD), { mode: 0o600 });
+    const err = await rejection(rotateGowaPassword({}, rotDeps()));
+    expect((err as PerchError).code).toBe('not_perch_gowa');
+    expect(err.message).toMatch(/perch whatsapp instance set/);
+    expect(await readFile(path.join(gowaDir(), '.env'), 'utf8')).toContain(PASSWORD);
+    expect(runs).toEqual([]);
+    expect(stored).toEqual([]);
+  });
+
+  it('refuses when the unit is missing or foreign; non-Linux and root too', async () => {
+    await installGowa({ yes: true }, deps());
+    await writeFile(unitPath(), '[Service]\nExecStart=/somewhere/else\n');
+    runs = [];
+    expect(await codeOf(rotateGowaPassword({}, rotDeps()))).toBe('not_perch_gowa');
+    await (await import('node:fs/promises')).unlink(unitPath());
+    expect(await codeOf(rotateGowaPassword({}, rotDeps()))).toBe('not_perch_gowa');
+    expect(await readFile(path.join(gowaDir(), '.env'), 'utf8')).toContain(PASSWORD);
+    expect(runs).toEqual([]);
+    expect(await codeOf(rotateGowaPassword({}, rotDeps({ platform: 'darwin' })))).toBe('unsupported_platform');
+    expect(await codeOf(rotateGowaPassword({}, rotDeps({ uid: 0 })))).toBe('refused_root');
+  });
+
+  it('replaces an older Perch unit on the way (daemon-reload before the restart)', async () => {
+    await installGowa({ yes: true }, deps());
+    await writeFile(unitPath(), legacyUnitFileContents(gowaDir(), home)[0]!);
+    runs = [];
+    await rotateGowaPassword({}, rotDeps());
+    expect(await readFile(unitPath(), 'utf8')).toBe(unitFileContent(gowaDir(), home));
+    expect(runs).toEqual([
+      ['systemctl', '--version'],
+      ['systemctl', '--user', 'daemon-reload'],
+      ['systemctl', '--user', 'restart', 'gowa'],
+    ]);
+  });
+
+  it('a failed restart or health check says that .env already holds the new password', async () => {
+    await installGowa({ yes: true }, deps());
+    const run = async (cmd: string, args: string[]): Promise<RunResult> => {
+      runs.push([cmd, ...args]);
+      return args.includes('restart') ? { code: 1, stdout: '', stderr: 'Job failed\n' } : { code: 0, stdout: 'systemd 255\n', stderr: '' };
+    };
+    const err = await rejection(rotateGowaPassword({}, rotDeps({ run })));
+    expect((err as PerchError).code).toBe('systemd_failed');
+    expect(err.message).toMatch(/already holds the new password/);
+    const unhealthy = await rejection(rotateGowaPassword({}, rotDeps({ password: () => 'Z'.repeat(40), probe: async () => Promise.reject(new Error('x')) })));
+    expect((unhealthy as PerchError).code).toBe('gowa_unhealthy');
+    expect(unhealthy.message).not.toContain('Z'.repeat(40));
+  });
+});
+
 // ---------- CLI and setup ----------
 
 describe('perch whatsapp install / perch setup [MOCK GOWA]', () => {
@@ -454,7 +761,7 @@ describe('perch whatsapp install / perch setup [MOCK GOWA]', () => {
         if (a === undefined) throw new Error('MOCK: no more answers');
         return a;
       },
-      transport: gowa.transport,
+      transport: (req) => gowa.transport(req), // late-bound: rotate-password swaps the MOCK bridge
       sleep: async () => {},
       whatsappInstall: (() => {
         const d = deps();
@@ -485,6 +792,48 @@ describe('perch whatsapp install / perch setup [MOCK GOWA]', () => {
     expect(await runCli(['whatsapp', 'install'], io())).toBe(0); // re-run: no prompt needed
     expect(cliOut).toMatch(/already installed/);
     expect(cliOut + cliErr).not.toContain(PASSWORD);
+  });
+
+  it('regression (first live run): production io without sleep, GOWA not ready at first -> still installs (no "Internal error")', async () => {
+    let refused = 0;
+    const flaky: CliIo['transport'] = async (req) => {
+      if (req.url.pathname === '/devices' && refused < 2) {
+        refused++;
+        throw new Error('MOCK: connect ECONNREFUSED 127.0.0.1:3000');
+      }
+      return gowa.transport(req);
+    };
+    const base = io().whatsappInstall!;
+    const { sleep: _sleep, now: _now, ...noTimers } = base;
+    const code = await runCli(['whatsapp', 'install', '--yes'], io([], { sleep: undefined, transport: flaky, whatsappInstall: { ...noTimers, pollIntervalMs: 1 } }));
+    expect(cliErr).not.toMatch(/Internal error/);
+    expect(code, cliErr).toBe(0);
+    expect(refused).toBe(2);
+    expect((await (await openStore()).read()).whatsappInstance?.origin).toBe('http://127.0.0.1:3000');
+  });
+
+  it('perch whatsapp rotate-password stores the new password; it is never printed', async () => {
+    expect(await runCli(['whatsapp', 'install', '--yes'], io()), cliErr).toBe(0);
+    const NEW = `DUMMY-TEST-ROTATED-${'ef56'.repeat(8)}`;
+    const base = io().whatsappInstall!;
+    const run = async (cmd: string, args: string[]): Promise<RunResult> => {
+      if (args.includes('restart')) gowa = new MockGowa('http://127.0.0.1:3000', 'perch', NEW); // GOWA now expects the new password
+      return base.run!(cmd, args);
+    };
+    cliOut = '';
+    expect(await runCli(['whatsapp', 'rotate-password'], io([], { whatsappInstall: { ...base, run, password: () => NEW } })), cliErr).toBe(0);
+    const inst = (await (await openStore()).read()).whatsappInstance;
+    expect(inst).toMatchObject({ origin: 'http://127.0.0.1:3000', username: 'perch', password: NEW });
+    expect(await readFile(path.join(gowaDir(), '.env'), 'utf8')).toContain(`APP_BASIC_AUTH=perch:${NEW}\n`);
+    expect(cliOut).toContain('sudo journalctl --rotate && sudo journalctl --vacuum-time=1s');
+    expect(cliOut + cliErr).not.toContain(NEW);
+    expect(cliOut + cliErr).not.toContain(PASSWORD);
+    expect(await runCli(['whatsapp', 'rotate-password', 'now'], io())).toBe(2);
+  });
+
+  it('perch whatsapp rotate-password without a Perch-installed GOWA fails clearly', async () => {
+    expect(await runCli(['whatsapp', 'rotate-password'], io())).toBe(1);
+    expect(cliErr).toMatch(/No Perch-installed GOWA/);
   });
 
   it('aborts without a terminal and without --yes', async () => {
