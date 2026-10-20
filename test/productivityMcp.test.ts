@@ -154,7 +154,7 @@ describe('calendar/contacts client grants [MOCK Google]', () => {
   it('a calendar writer sees only calendar tools and its account; no mail, contacts, Drive or Notion', async () => {
     const { token } = await grant(['calendar_read', 'calendar_write'], ['gprod-0000000a']);
     const c = await http(token);
-    expect(await names(c)).toEqual([...CAL_TOOLS, 'calendar_create_event', 'calendar_update_event', 'perch_list_accounts'].sort());
+    expect(await names(c)).toEqual([...CAL_TOOLS, 'calendar_create_event', 'calendar_delete_event', 'calendar_update_event', 'perch_list_accounts'].sort());
     const listed = await call(c, 'perch_list_accounts', {});
     expect(Object.keys(listed.json).sort()).toEqual(['connection', 'googleProductivity']);
     expect(listed.json.googleProductivity).toEqual([
@@ -190,30 +190,59 @@ describe('calendar/contacts client grants [MOCK Google]', () => {
     await c.close();
   });
 
-  it('rejects invitation fields at the MCP boundary with an explicit reason and no write', async () => {
+  it('rejects invitations without calendar_invite and forbidden fields at the MCP boundary with an explicit reason and no write', async () => {
     const { token } = await grant(['calendar_read', 'calendar_write'], ['gprod-0000000a']);
     const c = await http(token);
-    for (const extra of [{ attendees: [{ email: 'guest@example.test' }] }, { conferenceData: { createRequest: {} } }, { colour: 'red' }]) {
+    for (const [extra, re] of [
+      [{ attendees: [{ email: 'guest@example.test' }] }, /calendar_invite/],
+      [{ conferenceData: { createRequest: {} } }, /not supported/i],
+      [{ colour: 'red' }, /unsupported field/i],
+    ] as const) {
       const r = await call(c, 'calendar_create_event', createArgs('gprod-0000000a', extra));
       expect(r.isError).toBe(true);
-      expect(r.text).toMatch(/not supported|unsupported field/i);
+      expect(r.text).toMatch(re);
     }
     expect(google.calendarWrites()).toEqual([]);
     await c.close();
   });
+
+  it('calendar_invite adds calendar_respond_event; calendar_delete_event needs calendar_write and calendar_read; both are destructive', async () => {
+    const { token } = await grant(['calendar_read', 'calendar_invite'], ['gprod-0000000a']);
+    const c = await http(token);
+    expect(await names(c)).toEqual([...CAL_TOOLS, 'calendar_respond_event', 'perch_list_accounts'].sort());
+    const listed = (await call(c, 'perch_list_accounts', {})).json;
+    expect(listed.googleProductivity[0].granted).toEqual(['calendar_invite', 'calendar_read']);
+    await c.close();
+    const { token: t2 } = await grant(['calendar_read', 'calendar_write', 'calendar_invite'], ['gprod-0000000a']);
+    const c2 = await http(t2);
+    const { tools } = await c2.listTools();
+    for (const name of ['calendar_delete_event', 'calendar_respond_event']) {
+      expect(tools.find((t) => t.name === name)!.annotations, name).toMatchObject({ destructiveHint: true, readOnlyHint: false });
+    }
+    expect(tools.find((t) => t.name === 'calendar_delete_event')!.description).toMatch(/permanent/i);
+    const invited = (await call(c2, 'calendar_create_event', createArgs('gprod-0000000a', { attendees: ['guest@example.test'], addMeet: true }))).json;
+    expect(invited).toMatchObject({ status: 'created', sendUpdates: 'all' });
+    const deleted = (await call(c2, 'calendar_delete_event', { accountId: 'gprod-0000000a', calendarId: 'primary', eventId: invited.eventId })).json;
+    expect(deleted).toMatchObject({ status: 'deleted', sendUpdates: 'all' });
+    expect(google.calendarWrites().map((w) => w.method)).toEqual(['POST', 'DELETE']);
+    await c2.close();
+  });
 });
 
 describe('calendar write subset is private and silent at the MCP boundary [MOCK Google]', () => {
-  it("advertises only private/confidential visibility and useDefault=false, and rejects 'default', 'public' and calendar default reminders without a write", async () => {
+  it('advertises every visibility and useDefault=false, defaults guest-less events to private, and rejects calendar default reminders without a write', async () => {
     const { token } = await grant(['calendar_read', 'calendar_write'], ['gprod-0000000a']);
     const c = await http(token);
     const { tools } = await c.listTools();
     for (const name of ['calendar_create_event', 'calendar_update_event']) {
       const props = (tools.find((t) => t.name === name)!.inputSchema as { properties: Record<string, any> }).properties;
-      expect(props.visibility.enum, name).toEqual(['private', 'confidential']);
+      expect(props.visibility.enum, name).toEqual(['default', 'public', 'private', 'confidential']);
+      expect(props.sendUpdates.enum, name).toEqual(['all', 'externalOnly', 'none']);
+      expect(props.attendees.maxItems, name).toBe(50);
+      expect(props.recurrence.maxItems, name).toBe(5);
       expect(props.reminders.properties.useDefault, name).toMatchObject({ const: false });
     }
-    for (const extra of [{ visibility: 'default' }, { visibility: 'public' }, { reminders: { useDefault: true } }]) {
+    for (const extra of [{ reminders: { useDefault: true } }, { visibility: 'secret' }]) {
       const r = await call(c, 'calendar_create_event', createArgs('gprod-0000000a', extra));
       expect(r.isError, JSON.stringify(extra)).toBe(true);
     }

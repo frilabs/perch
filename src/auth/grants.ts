@@ -232,9 +232,9 @@ export function hasProductivityCapability(p: Principal): boolean {
 
 /** Throws unless the principal holds `cap` for the Google productivity account `accountId`. */
 export function assertProductivityCapability(p: Principal, accountId: string, cap: ProductivityCapability): void {
-  if (p.kind === 'operator_readonly' && cap === 'calendar_write') {
+  if (p.kind === 'operator_readonly' && (cap === 'calendar_write' || cap === 'calendar_invite')) {
     throw new PerchError(
-      'This connection is read-only (global token or default stdio). Calendar writes need a client grant: perch client add --allow calendar_write',
+      `This connection is read-only (global token or default stdio). Calendar writes need a client grant: perch client add --allow ${cap}`,
       'capability_denied',
     );
   }

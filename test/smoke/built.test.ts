@@ -287,7 +287,7 @@ describe('built artifact', () => {
       new StdioClientTransport({ command: process.execPath, args: [CLI, 'serve', '--stdio'], env: { ...env, PERCH_CLIENT_TOKEN_FILE: tokenFile }, stderr: 'pipe' }),
     );
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
-    expect(names).toEqual(['calendar_create_event', 'calendar_get_event', 'calendar_list_calendars', 'calendar_list_events', 'calendar_update_event', 'perch_list_accounts']);
+    expect(names).toEqual(['calendar_create_event', 'calendar_delete_event', 'calendar_get_event', 'calendar_list_calendars', 'calendar_list_events', 'calendar_update_event', 'perch_list_accounts']);
     const accounts = JSON.parse(text(await client.callTool({ name: 'perch_list_accounts', arguments: {} })));
     expect(Object.keys(accounts).sort()).toEqual(['connection', 'googleProductivity']);
     expect(accounts.googleProductivity.map((a: { accountId: string }) => a.accountId)).toEqual(['gprod-0000000a']);
@@ -297,7 +297,7 @@ describe('built artifact', () => {
     expect(text(other)).toMatch(/not granted/i);
     const invite = await client.callTool({ name: 'calendar_create_event', arguments: { accountId: 'gprod-0000000a', ...event, attendees: [{ email: 'x@example.test' }] } });
     expect(invite.isError).toBe(true);
-    expect(text(invite)).toMatch(/attendees is not supported/i);
+    expect(text(invite)).toMatch(/calendar_invite.*not granted/i);
     const mail = await client.callTool({ name: 'mail_search', arguments: {} }).catch(() => ({ isError: true }));
     expect(mail.isError).toBe(true);
 
