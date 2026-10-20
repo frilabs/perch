@@ -127,7 +127,7 @@ Perch is self-hosted, so there is no central Perch app that Google or Microsoft 
 | **Slack** (per workspace) | `perch slack manifest` → [api.slack.com/apps](https://api.slack.com/apps) → *Create New App* → *From a manifest* → paste → *Install to Workspace* (some workspaces need an admin's approval) → copy the **User OAuth Token** (`xoxp-…`) | 5 min |
 | **Google** (Drive, Gmail, Calendar, Contacts; once for all Google accounts) | [Google Cloud Console](https://console.cloud.google.com): new project → enable **Drive, Gmail, Calendar and People API** → OAuth consent screen *External*, status *Testing*, add yourself as **test user** → Credentials → OAuth client ID type **Desktop app** → download the JSON → on the server `install -m 600 client.json ~/.config/perch/google-client.json` and in `.env` `PERCH_GOOGLE_CLIENT_FILE=/home/USER/.config/perch/google-client.json` | 15 min |
 | **Outlook / Microsoft 365** | [Entra admin center](https://entra.microsoft.com) → App registrations → New: "Perch", include personal Microsoft accounts, platform *Mobile and desktop applications* with redirect `http://localhost`, no secret → API permissions (delegated): `User.Read`, `Mail.Read`, `Mail.ReadWrite`, `Mail.Send` → copy the *Application (client) ID* into `.env` as `PERCH_MICROSOFT_CLIENT_ID` | 10 min |
-| **WhatsApp** (unofficial) | install the GOWA bridge on the server as in `docs/SETUP.md` §4f (localhost only, basic auth), then once `perch whatsapp instance set --url http://127.0.0.1:3000` | 15 min |
+| **WhatsApp** (unofficial) | nothing beforehand: `perch whatsapp install` (or choosing WhatsApp in `perch setup`) downloads the pinned GOWA bridge from GitHub, checks its SHA-256, runs it as a systemd user service on 127.0.0.1 and stores it in Perch (Linux, asks first; manual way in `docs/SETUP.md` §4f.1a) | 2 min |
 
 Notes: Google sign-ins of a project in *Testing* expire after 7 days (reconnect then). WhatsApp via GOWA is an unofficial linked-device integration and can get the account restricted, more likely when sending.
 
@@ -144,7 +144,7 @@ perch setup
 
 `perch setup` creates the key, store and token, then asks service by service:
 
-- *Connect …?* → a label (e.g. Private, Work) → the login: Google, Outlook and Luma open a browser page; Notion and Slack tokens and the IMAP password are asked hidden; WhatsApp shows a pairing code for the phone (WhatsApp → Linked devices → Link with phone number).
+- *Connect …?* → a label (e.g. Private, Work) → the login: Google, Outlook and Luma open a browser page; Notion and Slack tokens and the IMAP password are asked hidden; WhatsApp first offers to install the GOWA bridge if none is configured (warning and `[y/N]`, same as `perch whatsapp install`), then shows a pairing code for the phone (WhatsApp → Linked devices → Link with phone number).
 - *Access: read only, or read + write?* (Google, Gmail, Calendar, Outlook, IMAP) → choose `w` where Claude should be able to change things.
 - At the end: *create a client with full access?* → it prints the ready-to-paste `claude mcp add` command.
 
@@ -205,7 +205,7 @@ npm run smoke     # builds and tests dist/cli.js over stdio and HTTP
 | `src/status/` | `perch status` report and the read-only `/status` page |
 | `src/auth/` | client grants (capabilities per account family), principals |
 | `src/slack/` | Slack Web API (user token per workspace), app manifest |
-| `src/whatsapp/` | GOWA bridge: instance, pairing, chats, messages, sending |
+| `src/whatsapp/` | GOWA bridge: install (pinned download, ZIP reader, systemd unit), instance, pairing, chats, messages, sending |
 | `src/messaging/` | idempotent send flow for Slack and WhatsApp (shares the ledger with mail) |
 | `src/oauth/` | PKCE loopback, refresh with single-flight and rotation (fail closed) |
 | `src/mail/` | MailService, MIME building, Gmail, Graph and IMAP/SMTP adapters, GMX presets, send workflow and ledger |

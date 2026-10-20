@@ -457,9 +457,33 @@ Weitere Grenzen:
 - **Keine globale Suche:** `whatsapp_search` durchsucht die zuletzt aktiven Chats (Default 30), nicht alle.
 - GOWA kann selbst senden, löschen, Gruppen verwalten usw. Perch erlaubt nur Leserouten und `POST /send/message`. GOWA darf deshalb **nur auf localhost** lauschen und muss Basic-Auth haben.
 
-### 4f.1 GOWA installieren (Server, Nutzeraufgabe)
+### 4f.1 GOWA installieren: `perch whatsapp install` (Standardweg)
 
-Getestet wurde Perch nur gegen einen nachgebauten GOWA (API v9). Stand der Recherche: Release **v9.6.0** (2026-10-03).
+Getestet wurde Perch nur gegen einen nachgebauten GOWA (API v9); die Installation selbst nur mit gemocktem Download und gemocktem `systemctl`. Festgelegt ist Release **v9.6.0** (2026-10-03).
+
+```bash
+perch whatsapp install                 # fragt nach der Warnung [y/N]; ohne Terminal nur mit --yes
+perch whatsapp install --port 3001     # anderer Port (Standard 3000); --dir PATH statt ~/gowa
+```
+
+Was der Befehl tut (Spezifikation: `docs/WHATSAPP_INSTALL_SPEC.md`):
+
+1. Warnt (inoffiziell, Konto kann eingeschränkt werden, Nachrichten unverschlüsselt auf der Platte) und fragt `[y/N]`. Ohne Terminal und ohne `--yes` bricht er ab. Nur Linux mit systemd, `x64` oder `arm64`, nicht als root.
+2. Lädt `whatsapp_9.6.0_linux_amd64.zip` (bzw. `linux_arm64`) per HTTPS von GitHub (Weiterleitung nur zu GitHubs Release-Hosts, höchstens 64 MiB) und prüft es gegen die **im Perch-Code festgelegte SHA-256**. Abweichung: Abbruch, nichts wird entpackt.
+3. Entpackt nur das Programm (im ZIP `linux-amd64` bzw. `linux-arm64`) als `~/gowa/whatsapp` (Ordner und Programm `0700`), mit eigenem ZIP-Leser ohne `unzip`.
+4. Schreibt `~/gowa/.env` (`0600`, Inhalt wie unten, zufälliges Passwort für den Nutzer `perch`) und `~/.config/systemd/user/gowa.service` (wie unten).
+5. `systemctl --user daemon-reload` und `systemctl --user enable --now gowa`, wartet bis `GET /devices` mit Basic Auth antwortet (sonst Meldung mit `journalctl --user -u gowa -n 50`).
+6. Trägt die Bridge in Perch ein wie `perch whatsapp instance set` (Passwort direkt in den verschlüsselten Store, nie auf der Konsole). Weiter mit §4f.2 (`perch whatsapp add`).
+
+Erneuter Aufruf: Ist GOWA 9.6.0 dort schon vollständig installiert, ändert der Befehl nichts, prüft nur die Bridge und trägt sie (falls noch nicht geschehen) in Perch ein. Eine andere Version oder fremde Dateien im Zielordner, eine andere `gowa.service` oder ein anderer `--port` führen zum Abbruch (anderes `--dir` wählen oder von Hand aufräumen). Ein Update von GOWA ist eine Code-Änderung in Perch (neue Version, neuer Hash), kein automatischer Schritt.
+
+Damit GOWA nach dem Abmelden weiterläuft (Server ohne Login-Sitzung): `sudo loginctl enable-linger $USER`. Meldet `systemctl --user` „Failed to connect to bus“, als dieser Nutzer direkt anmelden (nicht über `su`/`sudo`) oder `XDG_RUNTIME_DIR=/run/user/$(id -u)` setzen.
+
+`perch setup` bietet die Installation an, wenn man WhatsApp wählt und noch keine Bridge eingetragen ist (gleiche Warnung und Rückfrage), und koppelt danach direkt.
+
+### 4f.1a Manuell installieren (Alternative)
+
+Für andere Systeme (ohne systemd, macOS, Container) oder wenn du jeden Schritt selbst machen willst:
 
 ```bash
 mkdir -p ~/gowa && cd ~/gowa
@@ -467,10 +491,11 @@ V=9.6.0
 curl -LO https://github.com/aldinokemal/go-whatsapp-web-multidevice/releases/download/v$V/whatsapp_${V}_linux_amd64.zip
 curl -LO https://github.com/aldinokemal/go-whatsapp-web-multidevice/releases/download/v$V/checksums.txt
 grep "whatsapp_${V}_linux_amd64.zip" checksums.txt | sha256sum -c -
-unzip whatsapp_${V}_linux_amd64.zip && chmod 700 ~/gowa
+unzip whatsapp_${V}_linux_amd64.zip linux-amd64 && mv linux-amd64 whatsapp
+chmod 700 ~/gowa ~/gowa/whatsapp
 ```
 
-(`linux_arm64` für ARM-Server.) Die Datei `~/gowa/.env` (Rechte `0600`):
+(`linux_arm64` bzw. `linux-arm64` für ARM-Server. Das Programm heißt im ZIP `linux-amd64`/`linux-arm64`, die Unit erwartet `~/gowa/whatsapp`.) Die Datei `~/gowa/.env` (Rechte `0600`):
 
 ```ini
 APP_HOST=127.0.0.1
@@ -494,7 +519,7 @@ WHATSAPP_PRESENCE_ON_CONNECT=unavailable
 
 Mit `WHATSAPP_PRESENCE_ON_CONNECT=unavailable` erscheint das verknüpfte Gerät offline, sodass die Benachrichtigungen auf dem Handy normal bleiben. GOWAs „Presence-Puls“ (`WHATSAPP_PRESENCE_PULSE_*`, Default: einmal täglich 5 Minuten „online“) ist hier bewusst nicht abgeschaltet, weil nicht geprüft ist, ob die Sitzung ohne ihn stabil bleibt. Das beim Live-Test prüfen.
 
-systemd-User-Unit `~/.config/systemd/user/gowa.service` (nicht mitgeliefert, nicht automatisch installiert):
+systemd-User-Unit `~/.config/systemd/user/gowa.service` (dieselbe, die `perch whatsapp install` schreibt):
 
 ```ini
 [Unit]
@@ -519,8 +544,10 @@ GOWA liest die `.env` im Arbeitsverzeichnis. Den Port 3000 **nicht** per Tailsca
 
 ### 4f.2 In Perch verbinden und koppeln
 
+Nach `perch whatsapp install` ist die Bridge schon eingetragen; `instance set` braucht es nur nach der manuellen Installation.
+
 ```bash
-perch whatsapp instance set --url http://127.0.0.1:3000    # Nutzer und Passwort verdeckt eingeben
+perch whatsapp instance set --url http://127.0.0.1:3000    # nur manuell: Nutzer und Passwort verdeckt eingeben
 perch whatsapp add --label "Privat" --phone +4366012345678
 ```
 

@@ -68,6 +68,34 @@ interface SetupService {
   needs: (config: PerchConfig) => string | undefined;
   /** Extra arguments for `add` (asked interactively). */
   args: (ask: Ask) => Promise<string[]>;
+  /** Runs once after the service was chosen; false skips the service (prerequisite missing). */
+  prepare?: (ctx: SetupContext) => Promise<boolean>;
+}
+
+export interface SetupHooks {
+  /** True when a WhatsApp bridge is stored in Perch. */
+  whatsappConfigured?: () => Promise<boolean>;
+}
+
+interface SetupContext {
+  ask: Ask;
+  run: (argv: string[]) => Promise<number>;
+  io: { stdout: (s: string) => void; stderr: (s: string) => void };
+  hooks: SetupHooks;
+}
+
+/**
+ * WhatsApp in setup: without a stored bridge, run `perch whatsapp install` (it shows the warning and asks
+ * [y/N] itself), then pair. Declined or failed: skip WhatsApp.
+ */
+async function prepareWhatsapp({ run, io, hooks }: SetupContext): Promise<boolean> {
+  if (!hooks.whatsappConfigured || (await hooks.whatsappConfigured())) return true;
+  io.stdout('No WhatsApp bridge is configured yet. Perch can install GOWA on this server now (perch whatsapp install, Linux with systemd).\n');
+  if ((await run(['whatsapp', 'install'])) !== 0) {
+    io.stdout('Skipping WhatsApp. Later: perch whatsapp install, or install GOWA by hand (docs/SETUP.md §4f) and run perch whatsapp instance set.\n');
+    return false;
+  }
+  return true;
 }
 
 const tunnel = (port: number) =>
@@ -134,11 +162,12 @@ const SERVICES: readonly SetupService[] = [
   {
     cmd: 'whatsapp',
     title: 'WhatsApp (via the self-hosted GOWA bridge, unofficial)',
-    needs: () => 'Needs a running GOWA bridge on this server (docs/SETUP.md §4f) and `perch whatsapp instance set --url http://127.0.0.1:3000` done once.\n',
+    needs: () => 'Pairing shows a code to enter on the phone: WhatsApp > Settings > Linked devices > Link a device > "Link with phone number instead".\n',
     args: async (ask) => {
       const phone = (await ask('  Phone number in international format (e.g. +4366012345678): ')).trim();
       return ['--phone', phone];
     },
+    prepare: prepareWhatsapp,
   },
   {
     cmd: 'luma',
@@ -156,6 +185,7 @@ export async function runSetup(
   config: PerchConfig,
   io: { stdout: (s: string) => void; stderr: (s: string) => void; readLine?: Ask },
   run: (argv: string[]) => Promise<number>,
+  hooks: SetupHooks = {},
 ): Promise<number> {
   const ask = io.readLine;
   if (!ask) throw new PerchError('perch setup needs an interactive terminal', 'no_tty');
@@ -164,6 +194,10 @@ export async function runSetup(
   io.stdout('\n');
   for (const s of SERVICES) {
     if (!yes(await ask(`Connect ${s.title}? [y/N] `))) continue;
+    if (s.prepare && !(await s.prepare({ ask, run, io, hooks }))) {
+      io.stdout('\n');
+      continue;
+    }
     const hint = s.needs(config);
     if (hint) io.stdout(hint);
     for (let more = true; more; more = yes(await ask(`Connect another ${s.title} account? [y/N] `))) {
