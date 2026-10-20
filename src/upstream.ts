@@ -228,7 +228,12 @@ const ROUTES: Record<Service, Route[]> = {
     ['GET', /^\/api\/users\.info$/],
     ['GET', /^\/api\/search\.messages$/],
     ['GET', /^\/api\/files\.info$/],
+    ['GET', /^\/api\/chat\.scheduledMessages\.list$/],
     ['POST', /^\/api\/chat\.postMessage$/, 'slack_send'],
+    // DM / group DM with existing users (no channel creation, no invites) and not-yet-posted scheduled messages.
+    ['POST', /^\/api\/conversations\.open$/, 'slack_send'],
+    ['POST', /^\/api\/chat\.scheduleMessage$/, 'slack_send'],
+    ['POST', /^\/api\/chat\.deleteScheduledMessage$/, 'slack_send'],
     // Own messages only (Slack refuses others with cant_update_message). chat.delete, files.delete and
     // files.sharedPublicURL are deliberately absent: Slack deletion is permanent, public links leak files.
     ['POST', /^\/api\/chat\.update$/, 'slack_send'],

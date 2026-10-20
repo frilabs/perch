@@ -402,8 +402,9 @@ Die App hat nur User-Scopes:
 | `reactions:read`, `reactions:write` | `slack_add_reaction`, `slack_remove_reaction` (nur mit Client-Grant) |
 | `files:read` | `slack_get_file` (Metadaten und Inhalt einer Datei) |
 | `files:write` | `slack_upload_file` (nur mit Client-Grant) |
+| `im:write`, `mpim:write` | `slack_open_conversation`: DM bzw. Gruppen-DM öffnen (nur mit Client-Grant) |
 
-**Bestehende Workspaces (Manifest vor Oktober 2026):** Die Scopes `reactions:*` und `files:*` sind neu. Im Workspace die App-Seite öffnen → **App Manifest** → durch `perch slack manifest` ersetzen → **Reinstall to Workspace** → neues User OAuth Token kopieren. Dann in Perch `perch slack remove ID` und `perch slack add --label …` (Perch liest die Scopes nur beim Verbinden). Ohne Neuinstallation lehnen die neuen Tools mit `provider_scope_missing` ab, bevor sie Slack aufrufen.
+**Bestehende Workspaces (Manifest vor dem 20. Oktober 2026):** Die Scopes `reactions:*`, `files:*` und zuletzt `im:write`, `mpim:write` sind neu. Im Workspace die App-Seite öffnen → **App Manifest** → durch `perch slack manifest` ersetzen → **Reinstall to Workspace** → neues User OAuth Token kopieren. Dann in Perch `perch slack remove ID` und `perch slack add --label …` (Perch liest die Scopes nur beim Verbinden). Ohne Neuinstallation lehnen die neuen Tools mit `provider_scope_missing` ab, bevor sie Slack aufrufen. `perch status` zeigt fehlende Scopes eines Workspaces als Hinweis (`hint: token lacks …`), nicht als Fehler; Grundlage sind die Scopes, die Slack beim Verbinden im Header `x-oauth-scopes` gemeldet hat.
 
 Token-Rotation ist im Manifest aus, das Token läuft also nicht ab.
 
@@ -414,7 +415,7 @@ perch slack add --label "Firma"     # Token verdeckt eingeben
 perch slack list
 ```
 
-Perch prüft das Token mit `auth.test` und speichert Workspace, Nutzer und die tatsächlich gewährten Scopes. Fehlen Scopes des aktuellen Manifests (etwa `search:read`, `chat:write`, `files:write`), warnt `slack add`. Das gleiche Workspace-Konto zweimal zu verbinden wird abgelehnt.
+Perch prüft das Token mit `auth.test` und speichert Workspace, Nutzer und die tatsächlich gewährten Scopes. Fehlen Scopes des aktuellen Manifests (etwa `search:read`, `chat:write`, `files:write`, `im:write`, `mpim:write`), warnt `slack add`. Das gleiche Workspace-Konto zweimal zu verbinden wird abgelehnt.
 
 ### 4e.3 Lesen und Senden
 
@@ -432,6 +433,12 @@ Perch prüft das Token mit `auth.test` und speichert Workspace, Nutzer und die t
   - `slack_add_reaction`, `slack_remove_reaction`, `slack_edit_message` (nur eigene Nachrichten; Slack lehnt fremde ab): nur mit `slack_send`.
   - `slack_upload_file` (bis 10 MiB, optional in einen Thread mit Kommentar): nur mit `slack_send`, idempotent per `requestId` wie `slack_send_message`. Die Bytes gehen nur an `https://files.slack.com/upload/v1/…`; jede andere Upload-Adresse wird abgelehnt, bevor Daten fließen.
   - Löschen (Nachrichten, Dateien) und öffentliche Datei-Links gibt es nicht: Löschen ist bei Slack endgültig.
+
+- **DMs und geplante Nachrichten:**
+  - `slack_open_conversation` (nur mit `slack_send`): öffnet per `conversations.open` eine DM mit einem Nutzer (`im:write`) oder eine Gruppen-DM mit 2–8 Nutzern (`mpim:write`) und gibt die `channelId` zurück. Es wird nichts gepostet; geschrieben wird danach mit `slack_send_message` oder `slack_schedule_message`. Kanäle anlegen, archivieren oder Mitglieder einladen/entfernen gibt es nicht.
+  - `slack_schedule_message` (nur mit `slack_send`, `chat:write`): plant eine Nachricht per `chat.scheduleMessage`. `postAt` als Unix-Sekunden oder RFC 3339 mit Offset, mindestens 60 s und höchstens 120 Tage in der Zukunft (sonst Ablehnung vor jedem Slack-Aufruf), optional `threadTs`. Pflichtfeld `requestId` über denselben Versand-Ledger wie `slack_send_message`; das Ergebnis enthält die `scheduledMessageId`. Eine Wiederholung mit gleicher `requestId` liefert das gespeicherte Ergebnis, auch wenn der Zeitpunkt inzwischen vorbei ist.
+  - `slack_list_scheduled_messages` (lesen, globales Token und `slack_read`): noch nicht gesendete geplante Nachrichten eines Workspaces, optional eines Kanals, seitenweise (höchstens 100 pro Seite).
+  - `slack_cancel_scheduled_message` (nur mit `slack_send`): zieht eine noch nicht gesendete geplante Nachricht per `chat.deleteScheduledMessage` zurück. Bereits gesendete Nachrichten löscht Perch nie (`chat.delete` bleibt gesperrt).
 
   **Achtung Limit:** Slack-, WhatsApp- und Mail-Sends teilen sich 1000 Sende-Einträge pro Namespace. Danach schlagen alle Sends fehl, auch Mail (`ledger_full`), bis es einen Ledger-Rollover gibt (`docs/SLACK_WHATSAPP_MILESTONE.md` §6).
 
@@ -858,6 +865,8 @@ perch public on      # wieder an; Geräte müssen neu gekoppelt werden
 | `slack_get_history`, `slack_get_thread` | Nachrichten mit Namen (`userName`), Thread-Hinweisen (`threadTs`, `replyCount`) und Datei-Metadaten. Zeitfenster `oldest`/`latest` (RFC 3339). Cursor an Workspace und Kanal gebunden |
 | `slack_search` | Slacks Suche (`in:#kanal`, `from:@person`, `before:`/`after:`) über alle Workspaces, neueste zuerst, mit Permalink. Workspaces ohne `search:read` erscheinen in `errors[]` |
 | `slack_send_message`, `slack_send_status` | nur mit Client-Grant `slack_send`. Postet als der verbundene Nutzer, optional im Thread (`threadTs`, `replyBroadcast`). Pflichtfeld `requestId`; Ergebnis `accepted`/`rejected`/`indeterminate` wie bei Mail |
+| `slack_open_conversation`, `slack_schedule_message`, `slack_cancel_scheduled_message` | nur mit Client-Grant `slack_send`. DM/Gruppen-DM öffnen (1–8 Nutzer), Nachricht planen (60 s bis 120 Tage, Pflichtfeld `requestId`), geplante Nachricht zurückziehen (Abschnitt 4e.3) |
+| `slack_list_scheduled_messages` | geplante, noch nicht gesendete Nachrichten eines Workspaces |
 | `whatsapp_list_chats` | Chats (Personen, Gruppen) aller lesbaren Konten oder eines, `query` nach Chatname, `archived` |
 | `whatsapp_get_messages` | Nachrichten eines Chats, Textsuche `query`, Zeitfenster `after`/`before`, `fromMe`, `mediaOnly`. Medien nur als Metadaten, keine Medien-URLs |
 | `whatsapp_search` | Textsuche in den zuletzt aktiven `chatLimit` Chats pro Konto (Default 30, max. 100), **keine** Suche über alle Chats |

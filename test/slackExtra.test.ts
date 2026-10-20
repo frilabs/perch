@@ -134,7 +134,7 @@ describe('Slack files and reactions: tool exposure [MOCK Slack]', () => {
     }
     expect(isAllowedRoute('slack', 'GET', '/api/files.info')).toBe(true);
     expect(isAllowedRoute('slack', 'GET', '/api/files.info', 'slack_send')).toBe(false);
-    for (const m of ['chat.delete', 'files.delete', 'files.sharedPublicURL', 'files.revokePublicURL', 'files.upload', 'chat.deleteScheduledMessage']) {
+    for (const m of ['chat.delete', 'files.delete', 'files.sharedPublicURL', 'files.revokePublicURL', 'files.upload']) {
       for (const method of ['GET', 'POST', 'DELETE']) for (const c of caps) expect(isAllowedRoute('slack', method, `/api/${m}`, c)).toBe(false);
     }
     // File host: uploads only as slack_send, downloads only as read, nothing else.
