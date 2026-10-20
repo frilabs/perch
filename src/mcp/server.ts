@@ -125,7 +125,9 @@ const MESSAGE_SEND_NOTE =
 
 const CALENDAR_WRITE_NOTE =
   'Without attendees the event stays private and silent: visibility "private" unless given (an update of a guest-less event with visibility ' +
-  'default/unset also sets "private"), sendUpdates=none, popup-only reminders. With attendees (needs calendar_invite) Google emails ' +
+  'default/unset also sets "private"), sendUpdates=none, popup-only reminders. calendar_write alone only covers events without guests: ' +
+  'any create, change or delete of an event that has guests (before or after the change) needs calendar_invite, also with sendUpdates none. ' +
+  'With attendees Google emails ' +
   'invitations/updates according to sendUpdates (default all): show the user the guest list and get explicit confirmation first. ' +
   'Single occurrences of a recurring series are not supported (use the series id). ' +
   'Outcomes: "created"/"updated" (accepted by Google), "conflict" (requestId already used: nothing new created, nobody invited again), ' +
@@ -205,7 +207,7 @@ const eventFields = {
     .array(z.union([z.string().max(254), z.strictObject({ email: z.string().max(254), optional: z.boolean().optional() })]))
     .max(MAX_ATTENDEES)
     .optional()
-    .describe(`Guests (needs calendar_invite): up to ${MAX_ATTENDEES} email addresses or {email, optional}. On update the full new guest list (your own entry is kept; remaining guests keep their answers; [] removes all guests)`),
+    .describe(`Guests (needs calendar_invite): up to ${MAX_ATTENDEES} email addresses or {email, optional}. On update the full new guest list (your own entry is kept; remaining guests keep their answers, notes and names; [] removes all guests)`),
   guestsCanModify: z.boolean().optional(),
   guestsCanInviteOthers: z.boolean().optional(),
   guestsCanSeeOtherGuests: z.boolean().optional(),
@@ -775,7 +777,8 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
         {
           description:
             'Change an event or a whole recurring series you organise (fields, guests, guest permissions, recurrence, Meet link). ' +
-            `etag (from calendar_get_event) is required and sent as If-Match. Changing guests or notifying them needs calendar_invite. ${CALENDAR_WRITE_NOTE}`,
+            `etag (from calendar_get_event) is required and sent as If-Match. Any change to an event that has guests (before or after the change: ` +
+            `time, recurrence, Meet link, guest permissions, guest list), also with sendUpdates none, needs calendar_invite. ${CALENDAR_WRITE_NOTE}`,
           inputSchema: z.looseObject({
             accountId: prodAccountId,
             calendarId,
@@ -890,7 +893,10 @@ export function createMcpServer(ctx: PerchContext, principal: Principal = READON
     server.registerTool(
       'slack_send_status',
       {
-        description: 'Current outcome of one of YOUR earlier slack_send_message calls (same client, workspace and requestId), without sending anything.',
+        description:
+          'Current outcome of one of YOUR earlier slack_send_message or slack_schedule_message calls (same client, workspace and requestId), ' +
+          'without sending anything. For a scheduled message it shows the scheduledMessageId; "accepted" there means it was scheduled, ' +
+          'not that it is still pending (a later cancel is not recorded; see slack_list_scheduled_messages).',
         inputSchema: { workspaceId: slackWorkspaceId, requestId },
         annotations: READ_ONLY,
       },

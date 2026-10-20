@@ -314,6 +314,20 @@ describe('slack_list_scheduled_messages / slack_cancel_scheduled_message [MOCK S
     // Only deleteScheduledMessage was used, never chat.delete.
     expect(apiCalls('chat.delete')).toHaveLength(0);
   });
+  it('after a cancel, the scheduling requestId still replays "accepted" and slack_send_status shows the scheduled message id', async () => {
+    const client = await clientFor((await grant(['slack_read', 'slack_send'], [wsId])).principal);
+    const args = { workspaceId: wsId, channelId: 'C0GENERAL', text: 'later', postAt: inSeconds(600), requestId: rid() };
+    expect((await call(client, 'slack_schedule_message', args)).body).toMatchObject({ status: 'accepted', scheduledMessageId: 'Q0MOCK1' });
+    expect((await call(client, 'slack_send_status', { workspaceId: wsId, requestId: args.requestId })).body).toMatchObject({ status: 'accepted', scheduledMessageId: 'Q0MOCK1' });
+    expect((await call(client, 'slack_cancel_scheduled_message', { workspaceId: wsId, channelId: 'C0GENERAL', scheduledMessageId: 'Q0MOCK1' })).body).toMatchObject({ status: 'cancelled' });
+    const calls = slack.calls.length;
+    expect((await call(client, 'slack_schedule_message', args)).body).toMatchObject({ status: 'accepted', replayed: true, scheduledMessageId: 'Q0MOCK1' });
+    const status = (await call(client, 'slack_send_status', { workspaceId: wsId, requestId: args.requestId })).body;
+    expect(status).toMatchObject({ status: 'accepted', scheduledMessageId: 'Q0MOCK1' });
+    expect(status).not.toHaveProperty('messageTs');
+    expect(slack.calls.length).toBe(calls);
+    expect(team.scheduled).toEqual([]);
+  });
 });
 
 describe('capability gating and workspace isolation [MOCK Slack]', () => {

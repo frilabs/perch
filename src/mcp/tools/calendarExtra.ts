@@ -34,9 +34,9 @@ export const calendarExtraTools: ToolModule = {
         {
           description:
             'PERMANENTLY delete an event you organise, or a whole recurring series when given the series id. This is not a trash: it ' +
-            'cannot be undone. Single occurrences are not supported. Events with guests need calendar_invite; Google then emails ' +
+            'cannot be undone. Single occurrences are not supported. Events with guests need calendar_invite (also with sendUpdates none); Google then emails ' +
             `cancellations according to sendUpdates (default all; none = silently). ${CONFIRM} ` +
-            'Outcomes: "deleted", "not_found" (already gone), "precondition_failed" (etag stale), "rejected", "indeterminate" (unknown; never retried).',
+            'Outcomes: "deleted", "not_found" (already gone or cancelled), "precondition_failed" (etag stale), "rejected", "indeterminate" (unknown; never retried).',
           inputSchema: {
             accountId,
             calendarId,
@@ -54,7 +54,8 @@ export const calendarExtraTools: ToolModule = {
         'calendar_respond_event',
         {
           description:
-            'Answer an invitation (accepted, declined or tentative) for your own guest entry; for a recurring series, the series id answers ' +
+            'Answer an invitation (accepted, declined or tentative) for your own guest entry on an event someone else organizes (events you ' +
+            'organize are refused: change them with calendar_update_event); for a recurring series, the series id answers ' +
             'every occurrence (single occurrences are not supported). Google notifies the organizer according to sendUpdates (default all). ' +
             `${CONFIRM} Outcomes: "responded", "precondition_failed", "rejected", "indeterminate" (unknown; never retried).`,
           inputSchema: {

@@ -34,7 +34,7 @@ Neue Tools (Gmail, Microsoft Graph, IMAP/SMTP):
   - `recurrence`: höchstens 5 Zeilen `RRULE:`/`EXDATE:`/`RDATE:`, streng validiert (keine Steuerzeichen, kein `RRULE` ohne `FREQ`);
   - beliebige `visibility` (`default`, `public`, `private`, `confidential`);
   - Google-Meet-Link (`addMeet: true` → `conferenceData.createRequest`, `conferenceDataVersion=1`, Request-Id aus `requestId` abgeleitet).
-- **Neue Fähigkeit `calendar_invite`** (Familie productivity): nötig, sobald ein Write Gäste hinzufügt/ändert oder Benachrichtigungen verschickt (`sendUpdates` ≠ `none` mit Gästen). Private Termine ohne Gäste brauchen weiterhin nur `calendar_write`.
+- **Neue Fähigkeit `calendar_invite`** (Familie productivity): nötig für **jeden** Write an einem Termin, der vor oder nach der Änderung Gäste hat (Gästeliste, aber auch Zeit, Serie, Meet-Link, Gast-Rechte, Titel), auch mit `sendUpdates: none`. `calendar_write` allein deckt nur Termine ohne Gäste ab.
 - `calendar_delete_event`: **endgültig löschen** (Serie als Ganzes, wenn die Serien-Id übergeben wird), `sendUpdates` wählbar; mit Gästen braucht es `calendar_invite`. Optional `etag` als Schutz gegen gleichzeitige Änderung.
 - `calendar_respond_event`: Einladung annehmen, ablehnen, vorläufig (eigener Teilnehmer-Eintrag, `sendUpdates` Standard `all`); braucht `calendar_invite`.
 - Nicht umgesetzt: einzelne Vorkommen einer Serie ändern/löschen (Instance-Ids werden abgelehnt), Kalender löschen, Kalender-Freigaben, Frei/Belegt.
