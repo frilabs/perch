@@ -14,6 +14,7 @@ As of 2026-10-19 (`main` after PR #9). This is a completion checklist, **not a c
 | WhatsApp via self-hosted GOWA | read; text send with `whatsapp_send` | `SLACK_WHATSAPP_MILESTONE.md` |
 | Luma via the official Luma MCP | read; events/guests/blasts only with grants; pinned tool schemas | `LUMA_SPEC.md` |
 | `perch status` and read-only `/status` page | live check per account | `SETUP.md` §5a |
+| Write extensions (2026-10-20) | Drive create/edit/share/trash, Notion create/edit/trash/comments, mail organize + send drafts, Slack files/reactions/edit, WhatsApp media; all only with client grants, delete = trash only | `FULL_ACCESS_SPEC.md` (implemented subset) |
 | Public access over MCP OAuth | pairing windows, Google login + Perch code (TOTP), kill switch; two independent reviews | `PUBLIC_ACCESS_SPEC.md`, `SETUP.md` §6a |
 | OSS licence | MIT, third-party notices, `npm run licenses:check` | `OSS_LICENSE_MILESTONE.md` |
 | User isolation | **removed** on purpose (one operator per installation) | `USER_ISOLATION_MILESTONE.md` (historical) |
@@ -28,6 +29,7 @@ Follow the README live test. Points that only a live run can answer:
 - Luma: registration type (DCR or CIMD at `https://frilabs.dev/perch/luma-client.json`), refresh behaviour, the real tool list, response formats of `get_self` and `list_guests`, whether redirect URIs without port are accepted.
 - Public access: does claude.ai keep the up-to-10-minute pairing open; which CIMD URL the hosted Claude apps send; does Funnel pass the client IP (only then `PERCH_PUBLIC_TRUST_FORWARDED=on`); how Codex signs in.
 - Codex configuration (`SETUP.md` §6) is taken from the Codex docs and untested.
+- Write extensions: Drive `drive` scope consent, multipart upload, Doc/Sheet conversion, content replacement on native Docs, permission ids; Notion PAT capability names, 403 `restricted_resource`, `after` vs `position` on append, `in_trash` on PATCH; Gmail `gmail.modify` for drafts/send, Graph move response and draft send, GMX MOVE/UIDPLUS and special-use folders, IMAP send-draft without Bcc leak; Slack new scopes after reinstall, upload URL/flow, download URL format; GOWA multipart bodies, captions/replies, `/statics` media path and auth.
 
 ## 2. Operations — not implemented
 
@@ -44,7 +46,7 @@ Follow the README live test. Points that only a live run can answer:
   - refresh rotation has no grace window (two concurrent refreshes sign a device out);
   - `/oauth/token` with a well-formed refresh token rewrites `oauth.enc` even without a change (≤ 30/min); `readBody` keeps reading after its limit until the timeout.
 - Luma: refresh rotation between CLI and server has no shared lock; Luma tool descriptions appear in Perch's tool descriptions and are untrusted.
-- Features not built: sending stored drafts, mail move/delete/flags, IMAP "Sent" copy; calendar invitations, recurring events, deleting; writing contacts; Slack files and reactions; WhatsApp media and older-history loading.
+- Features not built: mail reply-all/forward helpers, IMAP "Sent" copy for normal sends; calendar invitations, recurring events, deleting; writing contacts; Slack DMs open/scheduled messages; WhatsApp edit, read receipts, older-history loading; Notion sharing (not in the Notion API).
 - WhatsApp stays an unofficial linked-device integration (account restriction risk, especially when sending); GOWA stores messages unencrypted.
 
 ## 4. Repository

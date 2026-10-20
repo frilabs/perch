@@ -1,5 +1,18 @@
 # Handoff: Perch
 
+## Update 2026-10-20: Schreib-Erweiterungen für Drive, Notion, Mail, Slack, WhatsApp (Branch `feat/full-access`)
+
+- **Auftrag:** Fritz: „Drive und Notion anlegen/bearbeiten, Mail verschieben/löschen/markieren/Entwürfe senden, Slack Dateien und Reaktionen, WhatsApp Medien – implementiere das“. Löschen nur Papierkorb (Entscheidung vom selben Tag). Rechtemodell unverändert (Schreiben nur mit Client-Grant); `docs/FULL_ACCESS_SPEC.md` §1/§2 bleiben Entwurf.
+- **Fundament:** Fähigkeiten `drive_read`/`drive_write` (google-…), `notion_read`/`notion_write` (notion-…), Mail `modify`; Upstream-Tags `drive_write`, `notion_write`, `mail_modify`; binäre Request-Bodies; Tool-Module `src/mcp/tools/*Extra.ts`.
+- **Neu (Details: SETUP §3.3, §4.1, §4a.5, §4e, §4f.3):**
+  - Drive: `drive_upload_file`, `drive_create_folder`, `drive_create_document`, `drive_update_file_content`, `drive_update_file`, `drive_copy_file`, `drive_trash_file`, `drive_restore_file`, `drive_list_permissions`, `drive_share_file`, `drive_unshare_file`, `drive_list_comments`, `drive_add_comment`; Scope `drive` mit `perch google add --allow-write`; Drive-Lesen jetzt auch für Clients mit `drive_read`.
+  - Notion: `notion_create_page`, `notion_update_page`, `notion_append_blocks`, `notion_update_block`, `notion_trash_page`, `notion_restore_page`, `notion_trash_block`, `notion_list_comments`, `notion_add_comment`; Notion-Lesen auch für Clients mit `notion_read`.
+  - Mail: `mail_list_folders`, `mail_list_drafts`, `mail_mark_message`, `mail_move_message`, `mail_trash_message`, `mail_restore_message`, `mail_send_draft`; Provider-Opt-in `--allow-modify` (Gmail `gmail.modify`, Graph `Mail.ReadWrite`, IMAP `allowModify`).
+  - Slack: `slack_add_reaction`, `slack_remove_reaction`, `slack_edit_message`, `slack_upload_file`, `slack_get_file`; neue Manifest-Scopes (App neu installieren).
+  - WhatsApp: `whatsapp_send_media`, `whatsapp_download_media`.
+- **Getestet (nur Mocks):** `npm run check` grün (siehe PR). **Live verifiziert:** nichts; offene Live-Punkte pro Dienst in `docs/PHASE1_REMAINING.md` §1.
+
+
 ## Update 2026-10-15: Luma über den offiziellen Luma-MCP (Branch `claude/perch-oauth-internet-access-b0cg8c`, auf `main` nach PR #8)
 
 - **Freigabe:** Fritz: „perch repo, mit gegenprobe, ja, passt. Implementiere“ (`docs/LUMA_SPEC.md` §9).
