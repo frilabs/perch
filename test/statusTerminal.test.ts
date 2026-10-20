@@ -186,12 +186,13 @@ describe('perch status terminal rendering', () => {
   it('lists unconnected services with their add command and a one-line description', () => {
     const out = render(baseReport(), baseStore());
     const block = out.slice(out.indexOf('── Not connected'), out.indexOf('── Access'));
+    // Google is ONE unconnected service: a single line and one command (rights per service: perch google access).
+    expect(block).toContain('☐ Google (Drive, Gmail, Calendar, Contacts)  one login; read, opt-in: write\n    perch google add --label NAME\n');
+    expect(block).not.toMatch(/☐ (Google Drive|Gmail|Google Calendar)/);
+    expect(block).not.toContain('--services');
     for (const [title, cmd] of [
-      ['Google Drive', 'perch google add --label NAME --services drive [--allow-write]'],
       ['Notion', 'perch notion add --label NAME'],
-      ['Gmail', 'perch google add --label NAME --services gmail [--allow-drafts] [--allow-send] [--allow-modify]'],
       ['Outlook / Microsoft 365', 'perch microsoft add --label NAME'],
-      ['Google Calendar/Contacts', 'perch google add --label NAME --services calendar,contacts [--allow-calendar-write]'],
       ['Slack', 'perch slack manifest, then perch slack add --label NAME'],
       ['Luma', 'perch luma add --label NAME'],
     ]) {
@@ -251,16 +252,15 @@ describe('perch status terminal rendering', () => {
     expect(skipped.trimEnd().split('\n').pop()).toBe('· live checks skipped');
   });
 
-  it('keeps the plain renderer unchanged', () => {
+  it('plain renderer: Google is one line when nothing is connected', () => {
     expect(formatStatusText(baseReport())).toBe(
       [
         'Perch 0.1.0 · namespace root · 2026-10-20 20:45 UTC',
         '',
-        'Google Drive: none',
+        'Google (Drive, Gmail, Calendar, Contacts): none',
         'Notion: none',
         'Mail',
         '  ✓ imap-fac20c59  "GMX"  fritz@example.org  [imap (gmx): read, draft, send]  since 2026-10-20  ok (732 ms)',
-        'Google Calendar/Contacts: none',
         'Slack: none',
         'WhatsApp',
         '  ✓ whatsapp-c3da7b43  "Whatsapp"  +4366012345678  [gowa: read, send]  since 2026-10-20  ok (16 ms)',
@@ -280,4 +280,86 @@ describe('perch status terminal rendering', () => {
       ].join('\n'),
     );
   });
+
+  it('one block per Google account group: services with ☑/☐ rights and perch google access hints', () => {
+    const { d, r } = withGroup();
+    const out = render(r, d);
+    expect(out).toContain(
+      [
+        '── Google · Private ' + '─'.repeat(60),
+        '☑ Private  fritz@example.test                             one login · 3 services',
+        '  ggroup-1a2b3c4d · since 2026-10-20',
+        '  ☑ Drive      google-11111111                                         ok · 5 ms',
+        '    ☑ read   ☐ write',
+        '      perch google access ggroup-1a2b3c4d --service drive --write',
+        '  ☑ Gmail      gmail-22222222                                          ok · 6 ms',
+        '    ☑ read   ☑ drafts   ☑ send   ☑ organize',
+        '  ☑ Calendar   gprod-33333333                                          ok · 7 ms',
+        '    ☑ read   ☐ write',
+        '      perch google access ggroup-1a2b3c4d --service calendar --write',
+        '  ☐ Contacts   not connected (read contacts)',
+        '      perch google access ggroup-1a2b3c4d --add contacts',
+        '',
+      ].join('\n'),
+    );
+    // No per-family sections, no unconnected Google line, no re-add or remove hints for group members.
+    expect(out).not.toMatch(/── (Google Drive|Mail · Gmail|Google Calendar\/Contacts) ─/);
+    expect(out).not.toContain('☐ Google (Drive');
+    expect(out).not.toMatch(/perch google add|perch google remove|--services/);
+    for (const secret of [...SECRETS, 'DUMMY-group-refresh', 'DUMMY-group-secret']) expect(out).not.toContain(secret);
+    for (const line of out.split('\n')) if (!line.trimStart().startsWith('perch ')) expect([...line].length, line).toBeLessThanOrEqual(80);
+    // Partial Gmail write (send only): the missing rights point to the one write command.
+    d.gmail[0]!.scopes = [GMAIL_READONLY_SCOPE, 'https://www.googleapis.com/auth/gmail.send'];
+    expect(render(r, d)).toContain('    ☑ read   ☐ drafts   ☑ send   ☐ organize\n      perch google access ggroup-1a2b3c4d --service gmail --write\n');
+  });
+
+  it('a failed member check marks only that service of the group', () => {
+    const { d, r } = withGroup();
+    r.accounts.find((a) => a.id === 'gmail-22222222')!.check = { state: 'error', message: 'Google refused the login (invalid_grant)', ms: 3 };
+    const out = render(r, d, { tty: true });
+    expect(out).toContain('\u001b[31m✗\u001b[0m Private  fritz@example.test');
+    expect(out).toMatch(/ {2}\u001b\[31m✗\u001b\[0m Gmail {6}gmail-22222222 +\u001b\[31mFAILED\u001b\[0m\n {4}\u001b\[31mGoogle refused the login \(invalid_grant\)\u001b\[0m\n/);
+    expect(out).toMatch(/ {2}\u001b\[32m☑\u001b\[0m Drive /);
+  });
+
+  it('separately connected Google accounts keep their own sections and hints; no unconnected Google line', () => {
+    const d = baseStore();
+    d.gmail.push({ id: 'gmail-0000000a', label: 'Old', email: 'w@example.test', clientId: 'c', clientSecret: 'DUMMY-secret', refreshToken: SECRETS[2]!, scopes: [GMAIL_READONLY_SCOPE], createdAt: AT, updatedAt: AT });
+    const r = baseReport();
+    r.accounts.push({ family: 'mail', id: 'gmail-0000000a', label: 'Old', provider: 'gmail', identity: 'w@example.test', permissions: 'read', connectedAt: AT });
+    const out = render(r, d);
+    expect(out).toMatch(/── Mail · Gmail ─+\n☑ Old  w@example\.test/);
+    expect(out).toContain('    perch gmail remove gmail-0000000a && perch google add --label Old --services gmail --allow-drafts --login-hint w@example.test\n');
+    expect(out).not.toContain('☐ Google (Drive');
+    expect(out).not.toContain('perch google access');
+    expect(formatStatusText(r)).not.toContain('Google (Drive, Gmail, Calendar, Contacts): none');
+  });
+
+  it('plain renderer lists a group with its members and no empty Google family lines', () => {
+    const { r } = withGroup();
+    const plain = formatStatusText(r);
+    expect(plain).toContain('Google accounts (one login each)\n  ggroup-1a2b3c4d  "Private"  fritz@example.test  services: drive, gmail, calendar  since 2026-10-20\n');
+    expect(plain).toContain('    Mail: ✓ gmail-22222222  "Private"  fritz@example.test  [gmail: read, draft, send]');
+    expect(plain).not.toMatch(/^(Google Drive|Google Calendar\/Contacts|Google \(Drive)/m);
+  });
 });
+
+/** baseStore/baseReport plus one Google account group: Drive read, Gmail write, Calendar read, no Contacts. */
+function withGroup(): { d: StoreData; r: StatusReport } {
+  const d = baseStore();
+  const gid = 'ggroup-1a2b3c4d';
+  const member = { label: 'Private', email: 'fritz@example.test', groupId: gid, createdAt: AT, updatedAt: AT };
+  d.googleGroups.push({ id: gid, label: 'Private', email: 'fritz@example.test', sub: '1001', clientId: 'c', clientSecret: 'DUMMY-group-secret', refreshToken: 'DUMMY-group-refresh', scopes: [], createdAt: AT, updatedAt: AT });
+  d.google.push({ id: 'google-11111111', ...member, scopes: ['https://www.googleapis.com/auth/drive.readonly'] });
+  d.gmail.push({ id: 'gmail-22222222', ...member, scopes: [GMAIL_READONLY_SCOPE, 'https://www.googleapis.com/auth/gmail.compose', 'https://www.googleapis.com/auth/gmail.modify'] });
+  d.googleProductivity.push({ id: 'gprod-33333333', ...member, sub: '1001', scopes: ['openid', 'https://www.googleapis.com/auth/calendar.readonly'], services: ['calendar'], allowCalendarWrite: false });
+  const r = baseReport();
+  const acc = { label: 'Private', identity: 'fritz@example.test', connectedAt: AT, groupId: gid };
+  r.accounts.push(
+    { family: 'drive', id: 'google-11111111', provider: 'google', permissions: 'read', ...acc, check: { state: 'ok', ms: 5 } },
+    { family: 'mail', id: 'gmail-22222222', provider: 'gmail', permissions: 'read, draft, send', ...acc, check: { state: 'ok', ms: 6 } },
+    { family: 'calendar', id: 'gprod-33333333', provider: 'google', permissions: 'calendar read', ...acc, check: { state: 'ok', ms: 7 } },
+  );
+  r.googleGroups = [{ id: gid, label: 'Private', email: 'fritz@example.test', services: ['drive', 'gmail', 'calendar'], accountIds: ['google-11111111', 'gmail-22222222', 'gprod-33333333'], connectedAt: AT }];
+  return { d, r };
+}

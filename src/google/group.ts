@@ -250,6 +250,11 @@ export async function registerGoogleGroup(
     grant: AuthorizationResult;
     request: GoogleGroupRequest;
     confirmUpdate?: (group: GoogleAccountGroup, services: GoogleService[]) => Promise<boolean>;
+    /**
+     * `perch google access`: the login must belong to this group's Google account (matched on `sub`); any other
+     * account is refused and nothing is stored (no new group, no change to another one).
+     */
+    expectGroupId?: string;
   },
 ): Promise<GroupRegistration> {
   const label = validateLabel(input.label);
@@ -260,6 +265,14 @@ export async function registerGoogleGroup(
   const conflict = identityConflict(before, identity);
   if (conflict) throw conflict;
   const existing = before.googleGroups.find((g) => sameAccount(g, identity));
+  if (input.expectGroupId && existing?.id !== input.expectGroupId) {
+    const target = before.googleGroups.find((g) => g.id === input.expectGroupId);
+    throw new PerchError(
+      `You signed in to Google as ${identity.email}, but ${input.expectGroupId} belongs to ${target?.email ?? 'another Google account'}. ` +
+        'Nothing was stored. Sign in with that account and retry.',
+      'account_conflict',
+    );
+  }
   if (existing && input.confirmUpdate) {
     if (!(await input.confirmUpdate(existing, groupServices(before, existing.id)))) {
       throw new PerchError(`Nothing changed: ${existing.id} (${existing.email}) was left as it is.`, 'aborted');
@@ -277,8 +290,8 @@ export async function registerGoogleGroup(
     const raced = identityConflict(data, identity);
     if (raced) throw raced;
     let group = data.googleGroups.find((g) => sameAccount(g, identity));
-    if (existing && group?.id !== existing.id) {
-      throw new PerchError(`Google account group ${existing.id} was removed or changed meanwhile; retry`, 'account_changed');
+    if ((existing || input.expectGroupId) && group?.id !== (existing?.id ?? input.expectGroupId)) {
+      throw new PerchError(`Google account group ${existing?.id ?? input.expectGroupId} was removed or changed meanwhile; retry`, 'account_changed');
     }
     const updated = Boolean(group);
     // `sub` is set only on a new group: an existing group matched on it, so it never changes.

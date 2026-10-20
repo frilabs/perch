@@ -147,8 +147,10 @@ describe('perch google add (one login for every service)', () => {
     expect(d.gmail).toEqual([]);
     expect(d.google[0]!.scopes).toEqual([DRIVE_RO]);
     expect(d.googleProductivity[0]).toMatchObject({ services: ['calendar', 'contacts'], allowCalendarWrite: true });
-    expect(out).toMatch(/Not granted by Google \(checkbox not ticked on the consent screen\): Gmail\. Not connected\. To add later: perch google add --label Partial --services gmail --login-hint dummy\.partial@example\.test/);
-    expect(out).toMatch(/Not granted by Google: Drive write .*Drive is connected read-only\. To add it: perch google add --label Partial --services drive --allow-write --login-hint/);
+    const gid = d.googleGroups[0]!.id;
+    expect(out).toContain(`Not granted by Google (checkbox not ticked on the consent screen): Gmail. Not connected. To add later: perch google access ${gid} --add gmail\n`);
+    expect(out).toMatch(new RegExp(`Not granted by Google: Drive write .*Drive is connected read-only\\. To add it: perch google access ${gid} --service drive --write\\n`));
+    expect(out).toContain(`Change the read/write access of single services: perch google access ${gid}\n`);
     // Granted Gmail write scopes without gmail.readonly do not connect Gmail.
     expect(JSON.stringify(d.googleGroups[0]!.scopes)).toContain(GMAIL_COMPOSE);
   });
@@ -459,7 +461,7 @@ describe('perch status with Google account groups', () => {
     return { d: await read(), ctx: createPerchContext(await openStore(), google.transport) };
   }
 
-  it('groups the members in json, plain text and the terminal view; hints suggest perch google add', async () => {
+  it('groups the members in json, plain text and the terminal view; hints suggest perch google access', async () => {
     const { d, ctx } = await connected();
     const g = d.googleGroups[0]!;
     const report = await collectStatus(ctx, { live: true });
@@ -471,15 +473,15 @@ describe('perch status with Google account groups', () => {
     const plain = formatStatusText(report);
     expect(plain).toMatch(new RegExp(`Google accounts \\(one login each\\)\\n  ${g.id}  "Private"  dummy\\.status@example\\.test  services: drive, gmail, calendar`));
     expect(plain).toMatch(/\n    Google Drive: ✓ google-/);
-    expect(plain).toMatch(/\nGoogle Drive: only in Google account groups\n/);
+    expect(plain).not.toMatch(/^Google Drive/m);
 
     const term = formatStatusTerminal(report, accountCapabilities(await read()), { tty: false, env: {} });
     expect(term).toMatch(/── Google · Private ─+\n☑ Private  dummy\.status@example\.test +one login · 3 services\n/);
-    expect(term).toMatch(/☑ Drive {3}☑ Gmail {3}☑ Calendar\n {2}☐ Contacts \(read contacts\)\n {4}perch google add --label Private --services drive,gmail,calendar,contacts --login-hint dummy\.status@example\.test\n/);
-    expect(term).toMatch(/☑ Gmail  dummy\.status@example\.test +ok · \d+ ms/);
-    // Missing write permission of a member: update the group in place (no remove, same ids).
-    expect(term).toContain('    perch google add --label Private --services drive,gmail,calendar --allow-write --login-hint dummy.status@example.test\n');
-    expect(term).not.toMatch(/perch google remove google-/);
+    expect(term).toContain(`  ☐ Contacts   not connected (read contacts)\n      perch google access ${g.id} --add contacts\n`);
+    expect(term).toMatch(new RegExp(`☑ Gmail {6}${d.gmail[0]!.id} +ok · \\d+ ms\\n {4}☑ read {3}☐ drafts {3}☐ send {3}☐ organize\\n {6}perch google access ${g.id} --service gmail --write\\n`));
+    // Missing write permission of a member: changed through perch google access (same ids, no remove, no re-add).
+    expect(term).toContain(`      perch google access ${g.id} --service drive --write\n`);
+    expect(term).not.toMatch(/perch google (add|remove)/);
     expect(term).not.toMatch(/── Google Drive ─/);
     expect(term).not.toMatch(/☐ Google Drive /);
 
@@ -658,5 +660,217 @@ describe('review fixes', () => {
     const gid = d.googleGroups[0]!.id;
     expect(await runCli(['client', 'add', '--label', 'X', '--allow', 'read', '--account', gid, '--token-file', `${dirs.root}/config/clients/x.token`], io())).toBe(1);
     expect(err).toContain(`${gid} is a Google account group; grant its member ids: ${d.google[0]!.id}, ${d.gmail[0]!.id}`);
+  });
+});
+
+// Nachtrag 2026-10-21: per-service read/write through `perch google access`.
+describe('perch google access', () => {
+  const access = (args: string[], extra: Partial<CliIo> = {}) => runCli(['google', 'access', ...args], io(extra));
+  const grantAccess = (person: MockGooglePerson, args: string[], extra: Partial<CliIo> = {}) =>
+    runCli(['google', 'access', '--timeout', '10', ...args], io({ stderr: approving(person), ...extra }));
+
+  /** One group: Drive read, Gmail read, Calendar read (no Contacts). */
+  async function group(email = 'dummy.access@example.test') {
+    const p = google.addPerson(email);
+    expect(await add(p, ['--label', 'Private', '--services', 'drive,gmail,calendar', '--read-only']), err).toBe(0);
+    const d = await read();
+    out = '';
+    err = '';
+    return { p, d, gid: d.googleGroups[0]!.id };
+  }
+  const noSecrets = (p: MockGooglePerson) => {
+    for (const s of [p.refreshToken, dummySecret('S')]) expect(out + err).not.toContain(s);
+  };
+
+  it('shows the rights per service for a group id or a member id, without a login', async () => {
+    const { p, d, gid } = await group();
+    const calls = google.calls.length;
+    expect(await access([gid]), err).toBe(0);
+    expect(out).toContain(`Google account group ${gid} "Private" (dummy.access@example.test), one login:\n`);
+    expect(out).toMatch(new RegExp(`  ☑ Drive +${d.google[0]!.id} +☑ read   ☐ write\\n`));
+    expect(out).toMatch(new RegExp(`  ☑ Gmail +${d.gmail[0]!.id} +☑ read   ☐ drafts   ☐ send   ☐ organize\\n`));
+    expect(out).toMatch(new RegExp(`  ☑ Calendar +${d.googleProductivity[0]!.id} +☑ read   ☐ write\\n`));
+    expect(out).toContain(`  ☐ Contacts  not connected`);
+    expect(out).toContain(`add: perch google access ${gid} --add contacts`);
+    expect(out).toContain(`Change: perch google access ${gid} --service drive|gmail|calendar --write | --read-only`);
+    out = '';
+    expect(await access([d.gmail[0]!.id]), err).toBe(0);
+    expect(out).toContain(`Google account group ${gid} "Private"`);
+    expect(google.calls.length).toBe(calls);
+    expect(await read()).toEqual(d);
+    noSecrets(p);
+  });
+
+  it('--service gmail --write logs in once for the same group with the union of scopes; ids stay', async () => {
+    const { p, d, gid } = await group();
+    expect(await grantAccess(p, [gid, '--service', 'gmail', '--write']), err).toBe(0);
+    const params = google.lastAuthParams!;
+    expect(params.get('scope')!.split(' ')).toEqual(['openid', 'email', DRIVE_RO, GMAIL_RO, GMAIL_COMPOSE, GMAIL_MODIFY, SCOPE.calendarRead]);
+    expect(params.get('login_hint')).toBe(p.email);
+    expect(params.get('include_granted_scopes')).toBe('true');
+    const after = await read();
+    expect(after.googleGroups).toHaveLength(1);
+    expect(after.googleGroups[0]).toMatchObject({ id: gid, refreshToken: p.refreshToken, sub: p.sub });
+    expect(after.google).toEqual([expect.objectContaining({ id: d.google[0]!.id, scopes: [DRIVE_RO] })]);
+    expect(after.gmail).toEqual([expect.objectContaining({ id: d.gmail[0]!.id, scopes: [GMAIL_RO, GMAIL_COMPOSE, GMAIL_MODIFY] })]);
+    expect(after.googleProductivity).toEqual([expect.objectContaining({ id: d.googleProductivity[0]!.id, services: ['calendar'], allowCalendarWrite: false })]);
+    expect(out).toContain(`Updated Google account group ${gid}`);
+    expect(out).toMatch(/☑ Gmail +gmail-[a-f0-9]{8} +☑ read   ☑ drafts   ☑ send   ☑ organize/);
+    expect(out).toContain('Writes still need a client grant');
+    noSecrets(p);
+
+    // Already write: nothing to do, no login.
+    const tokens = google.tokenRequests.length;
+    out = '';
+    expect(await access([gid, '--service', 'gmail', '--write']), err).toBe(0);
+    expect(out).toContain('Gmail of ' + gid + ' already has write access; nothing changed.');
+    expect(google.tokenRequests.length).toBe(tokens);
+  });
+
+  it('--service calendar --write and drive --write; a member id selects the group too', async () => {
+    const { p, d, gid } = await group();
+    expect(await grantAccess(p, [d.googleProductivity[0]!.id, '--service', 'calendar', '--write']), err).toBe(0);
+    let after = await read();
+    expect(after.googleProductivity[0]).toMatchObject({ id: d.googleProductivity[0]!.id, allowCalendarWrite: true });
+    expect(after.googleProductivity[0]!.scopes).toContain(SCOPE.calendarOwned);
+    expect(after.gmail[0]!.scopes).toEqual([GMAIL_RO]);
+    expect(await grantAccess(p, [gid, '--service', 'drive', '--write']), err).toBe(0);
+    after = await read();
+    expect(after.google[0]!.scopes).toEqual([DRIVE_RO, DRIVE]);
+    // The earlier calendar write stays (part of the union request).
+    expect(after.googleProductivity[0]!.allowCalendarWrite).toBe(true);
+    expect(after.googleGroups).toHaveLength(1);
+  });
+
+  it('a login with another Google account is refused; nothing is stored', async () => {
+    const { gid } = await group();
+    const before = await read();
+    const other = google.addPerson('dummy.other@example.test');
+    expect(await grantAccess(other, [gid, '--service', 'gmail', '--write'])).toBe(1);
+    expect(err).toContain(`You signed in to Google as dummy.other@example.test, but ${gid} belongs to dummy.access@example.test. Nothing was stored.`);
+    expect(await read()).toEqual(before);
+  });
+
+  it('--read-only is local: scopes and opt-ins dropped on the member, no login, and it survives a later grant', async () => {
+    const p = google.addPerson('dummy.revoke@example.test');
+    expect(await add(p, ['--label', 'RW', '--services', 'drive,gmail,calendar', '--write'])).toBe(0);
+    const d = await read();
+    const gid = d.googleGroups[0]!.id;
+    const tokens = google.tokenRequests.length;
+    const auth = google.lastAuthParams;
+    out = '';
+    for (const s of ['gmail', 'calendar', 'drive']) expect(await access([gid, '--service', s, '--read-only']), err).toBe(0);
+    expect(google.tokenRequests.length).toBe(tokens);
+    expect(google.lastAuthParams).toBe(auth);
+    expect(google.revoked).toEqual([]);
+    let after = await read();
+    expect(after.gmail[0]!.scopes).toEqual([GMAIL_RO]);
+    expect(after.googleProductivity[0]).toMatchObject({ allowCalendarWrite: false });
+    expect(after.googleProductivity[0]!.scopes).not.toContain(SCOPE.calendarOwned);
+    expect(after.google[0]!.scopes).toEqual([DRIVE_RO]);
+    // The login itself is untouched.
+    expect(after.googleGroups[0]).toEqual(d.googleGroups[0]);
+    expect(out).toContain(`Gmail of ${gid} is now read-only in Perch (no login needed)`);
+    expect(out).toContain('stays granted at Google until the next login');
+    noSecrets(p);
+    out = '';
+    expect(await access([gid, '--service', 'gmail', '--read-only']), err).toBe(0);
+    expect(out).toContain(`Gmail of ${gid} is already read-only; nothing changed.`);
+    // A later grant for Drive keeps Gmail and Calendar read-only.
+    expect(await grantAccess(p, [gid, '--service', 'drive', '--write']), err).toBe(0);
+    after = await read();
+    expect(after.google[0]!.scopes).toEqual([DRIVE_RO, DRIVE]);
+    expect(after.gmail[0]!.scopes).toEqual([GMAIL_RO]);
+    expect(after.googleProductivity[0]!.allowCalendarWrite).toBe(false);
+  });
+
+  it('--add contacts and --add gmail --write connect a service through a login for the same group', async () => {
+    const p = google.addPerson('dummy.addsvc@example.test');
+    expect(await add(p, ['--label', 'Small', '--services', 'calendar', '--read-only'])).toBe(0);
+    const d = await read();
+    const gid = d.googleGroups[0]!.id;
+    expect(await grantAccess(p, [gid, '--add', 'contacts']), err).toBe(0);
+    expect(google.lastAuthParams!.get('scope')!.split(' ')).toEqual(['openid', 'email', SCOPE.calendarRead, SCOPE.contactsRead]);
+    let after = await read();
+    expect(after.googleProductivity).toEqual([expect.objectContaining({ id: d.googleProductivity[0]!.id, services: ['calendar', 'contacts'] })]);
+    out = '';
+    expect(await grantAccess(p, [gid, '--add', 'gmail', '--write']), err).toBe(0);
+    after = await read();
+    expect(after.gmail).toEqual([expect.objectContaining({ groupId: gid, scopes: [GMAIL_RO, GMAIL_COMPOSE, GMAIL_MODIFY] })]);
+    expect(after.googleGroups).toHaveLength(1);
+    // Without a terminal and without --write/--read-only, --add connects read-only.
+    err = '';
+    expect(await grantAccess(p, [gid, '--add', 'drive']), err).toBe(0);
+    expect(err).toContain('No interactive terminal: adding Drive read-only');
+    expect((await read()).google[0]!.scopes).toEqual([DRIVE_RO]);
+    // Adding a connected service changes nothing.
+    out = '';
+    expect(await access([gid, '--add', 'gmail']), err).toBe(0);
+    expect(out).toContain('Gmail is already connected in');
+  });
+
+  it('interactive on a terminal: pick a service, then r/w', async () => {
+    const { p, gid } = await group();
+    const answers = ['gmail', 'w', ''];
+    const questions: string[] = [];
+    const readLine = async (q: string) => {
+      questions.push(q);
+      return answers.shift()!;
+    };
+    expect(await grantAccess(p, [gid], { readLine }), err).toBe(0);
+    expect(questions[0]).toMatch(/Change a service\?/);
+    expect(questions[1]).toMatch(/Gmail: \[r\]ead only, or read \+ \[w\]rite\?/);
+    expect(questions[2]).toMatch(/Set Gmail to read \+ write \(needs a Google login for dummy\.access@example\.test\)\? \[Y\/n\]/);
+    expect((await read()).gmail[0]!.scopes).toEqual([GMAIL_RO, GMAIL_COMPOSE, GMAIL_MODIFY]);
+    // Enter at the first question changes nothing.
+    const before = await read();
+    expect(await access([gid], { readLine: async () => '' }), err).toBe(0);
+    expect(await read()).toEqual(before);
+  });
+
+  it('refusals: contacts write, unknown id, separate legacy account, bad flag combinations, unconnected service', async () => {
+    const { p, gid } = await group();
+    const before = await read();
+    expect(await access([gid, '--service', 'contacts', '--write'])).toBe(1);
+    expect(err).toContain('Contacts are read-only in Perch (contacts.readonly); there is no write access to grant.');
+    err = '';
+    expect(await access([gid, '--add', 'contacts', '--write'])).toBe(1);
+    expect(err).toContain('Contacts are read-only in Perch');
+    err = '';
+    expect(await access(['ggroup-00000000'])).toBe(1);
+    expect(err).toContain('Unknown Google account group or account: ggroup-00000000');
+    err = '';
+    expect(await access([gid, '--service', 'contacts', '--read-only']), err).toBe(1);
+    expect(err).toContain(`${gid} does not connect Contacts. Add it: perch google access ${gid} --add contacts`);
+    err = '';
+    expect(await access([gid, '--write'])).toBe(2);
+    expect(err).toContain('--write and --read-only need --service SERVICE');
+    err = '';
+    expect(await access([gid, '--service', 'gmail', '--add', 'contacts'])).toBe(2);
+    err = '';
+    expect(await access([gid, '--service', 'gmail', '--write', '--read-only'])).toBe(2);
+    err = '';
+    expect(await access([gid, '--service', 'gmail,drive', '--write'])).toBe(2);
+    err = '';
+    expect(await access([])).toBe(2);
+    expect(await read()).toEqual(before);
+
+    // A separately connected Gmail account (own login): pointed to its own commands or to a re-add as a group.
+    const q = google.addPerson('dummy.legacy@example.test');
+    expect(await runCli(['gmail', 'add', '--label', 'Old', '--read-only', '--timeout', '10'], io({ stderr: approving(q) })), err).toBe(0);
+    const legacy = (await read()).gmail.find((a) => !a.groupId)!;
+    err = '';
+    expect(await access([legacy.id, '--service', 'gmail', '--write'])).toBe(1);
+    expect(err).toContain(`${legacy.id} is connected separately (its own login, not a Google account group)`);
+    expect(err).toContain(`perch gmail remove ${legacy.id}`);
+    expect(err).toContain('perch google add --label NAME');
+    noSecrets(p);
+    expect(out + err).not.toContain(q.refreshToken);
+  });
+
+  it('help: perch google add points to perch google access', async () => {
+    expect(await runCli(['--help'], io())).toBe(0);
+    expect(out).toMatch(/perch google add[\s\S]*Read\/write per service: perch google access/);
+    expect(out).toContain('perch google access ggroup-ID [--service drive|gmail|calendar|contacts --write | --read-only]');
   });
 });

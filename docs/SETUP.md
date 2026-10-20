@@ -109,7 +109,7 @@ install -m 600 ~/Downloads/client_secret_XXXX.json ~/.config/perch/google-client
 perch google add --label "Privat" --port 8766
 ```
 
-1. Perch fragt, welche Dienste verbunden werden (Standard: alle; ohne Terminal alle) und dann einmal **„[r]ead only, or read + [w]rite?“**. Ohne Fragen: `--services drive,gmail,calendar,contacts` und `--read-only` bzw. `--write`. Die bisherigen Feinschalter gelten weiter: `--allow-write` (Drive), `--allow-drafts`, `--allow-send`, `--allow-modify` (Gmail), `--allow-calendar-write`.
+1. Perch fragt einmal, welche Dienste verbunden werden (Standard: alle; ohne Terminal alle), und einmal für alle **„[r]ead only, or read + [w]rite?“**. Ohne Fragen: `--services drive,gmail,calendar,contacts` und `--read-only` bzw. `--write`. Lesen/Schreiben **pro Dienst** stellt danach `perch google access` ein (unten). Die bisherigen Feinschalter `--allow-write` (Drive), `--allow-drafts`, `--allow-send`, `--allow-modify` (Gmail), `--allow-calendar-write` gelten weiter, werden aber selten gebraucht.
 2. Perch gibt **eine** Google-Auth-URL mit allen Scopes der gewählten Dienste aus (`include_granted_scopes=true`). Die URL im Browser öffnen und das gewünschte Konto wählen.
 3. Google leitet auf `http://127.0.0.1:8766/oauth2/callback` um. **Ohne Tunnel:** Läuft der Browser auf dem Laptop, zeigt er danach „Seite nicht erreichbar“. Die komplette Adresse aus der Adresszeile kopieren und ins Terminal einfügen (verdeckte Eingabe). Perch wartet gleichzeitig auf den Callback und auf die eingefügte Adresse; was zuerst kommt, gewinnt, das andere wird beendet. Die Adresse wird so streng geprüft wie der Callback: Host `127.0.0.1`/`localhost`/`[::1]`, genau der erwartete Port und Pfad, `state` (konstante Zeit), dann wird `code` übernommen; `error=` bricht ab. Eine abgelehnte Adresse (z. B. alter Login-Versuch) wird gemeldet, Perch wartet weiter. PKCE, `state` und Redirect-URI bleiben unverändert. Das gilt für alle Browser-Logins (Google, Gmail, Calendar/Contacts, Outlook, Luma).
 
@@ -133,9 +133,22 @@ ssh -N -L 8766:127.0.0.1:8766 homeserver
 
 Wiedererkannt wird das Konto an seiner Google-ID (`sub`), nicht an der E-Mail. Gehört dieselbe Adresse inzwischen zu einem anderen Google-Konto, lehnt Perch ab; erst die alte Gruppe entfernen (`perch google remove ggroup-…`), dann neu hinzufügen.
 
+**Rechte pro Dienst: `perch google access`.** Zeigt und ändert, was jeder Dienst eines Google-Kontos darf (Gruppen- oder Mitglieds-ID):
+
 ```bash
-perch google add --label "Privat" --services gmail --allow-send --port 8766   # Gmail senden nachrüsten
+perch google access ggroup-1a2b3c4d                                   # Rechte pro Dienst; im Terminal: Dienst wählen, dann r/w
+perch google access ggroup-1a2b3c4d --service gmail --write           # Gmail: Entwürfe + Senden + Organisieren
+perch google access ggroup-1a2b3c4d --service calendar --write        # Kalender: eigene Termine, Einladungen
+perch google access ggroup-1a2b3c4d --service drive --read-only       # Drive-Schreiben abschalten (ohne Login)
+perch google access ggroup-1a2b3c4d --add contacts                    # Dienst ergänzen (Login); mit --write/--read-only
 ```
+
+- **Schreiben pro Dienst:** Drive `drive` (anlegen, bearbeiten, teilen, Papierkorb); Gmail `gmail.compose` + `gmail.modify` (Entwürfe, Senden, Organisieren); Kalender `calendar.events.owned` und das Opt-in für Kalender-Schreiben. Kontakte sind in Perch nur lesend; `--service contacts --write` wird mit klarer Meldung abgelehnt.
+- **Erteilen** (`--write`, `--add`) startet einen Google-Login für **dieselbe Gruppe**: Perch fragt alle Scopes an, die die Gruppe danach braucht (die bisherigen Rechte der anderen Dienste plus die Änderung), gleiche Konto-IDs, keine Dubletten. Der Login muss zum selben Google-Konto gehören (`sub`); mit einem anderen Konto lehnt Perch ab und speichert nichts. Login wie oben (eingefügte Adresse oder Tunnel), `--port`/`--timeout`/`--login-hint` wie bei `add`; fehlt der OAuth-Client, startet die geführte Einrichtung.
+- **Entziehen** (`--read-only`) braucht keinen Login: Perch nimmt die Schreib-Scopes aus dem Mitglied (Kalender: auch das Opt-in), die Schreib-Tools lehnen sofort ab. Die Berechtigung bleibt bei Google bis zum nächsten Login gewährt; ganz widerrufen: `perch google remove ggroup-… --revoke`.
+- Ohne Flags und ohne Terminal zeigt der Befehl nur die Rechte. `--add` ohne `--write`/`--read-only` fragt im Terminal nach r/w, ohne Terminal nur lesend. `--yes`: im interaktiven Modus die gewählte Änderung ohne Rückfrage anwenden.
+- Ein Dienst entfernen: wie bisher `perch google remove ggroup-… --service gmail`.
+- **Einzeln verbundene Konten** (ohne Gruppe) gehen nicht über `perch google access`; die Meldung nennt ihre eigenen Befehle (`perch gmail remove …` / `perch google-productivity remove …` und neu hinzufügen) oder den Weg als Gruppe (`perch google add --label …`).
 
 **Weitere Konten:** Jedes Google-Konto ist eine eigene Gruppe mit eigenem Label.
 
@@ -161,10 +174,10 @@ perch google remove ggroup-1a2b3c4d --service gmail    # nur einen Dienst entfer
 
 ### 3.3 Schreiben (Drive)
 
-Standardmäßig ist Drive nur lesend verbunden (`drive.readonly`). Für Schreiben das Konto mit vollem Drive-Zugriff verbinden (Scope `drive`; im Consent-Screen der Google-Cloud-App muss dieser Scope eingetragen sein). Für ein Gruppenkonto genügt erneutes Hinzufügen (gleiche IDs):
+Standardmäßig ist Drive nur lesend verbunden (`drive.readonly`). Für Schreiben das Konto mit vollem Drive-Zugriff verbinden (Scope `drive`; im Consent-Screen der Google-Cloud-App muss dieser Scope eingetragen sein). Für ein Gruppenkonto (gleiche IDs):
 
 ```bash
-perch google add --label "Privat" --services drive --allow-write --port 8766
+perch google access ggroup-1a2b3c4d --service drive --write --port 8766
 perch client add --label "Laptop" --allow drive_read,drive_write --account google-1a2b3c4d
 ```
 
@@ -739,7 +752,7 @@ perch status --json       # maschinenlesbar
 perch status --plain      # bisherige schlichte Ausgabe (eine Zeile pro Konto)
 ```
 
-- **Darstellung:** Abschnitte pro Dienst mit Checkboxen. Verbundene Konten stehen als `☑` (oder `✗` bei fehlgeschlagenem Check) mit Label, Adresse und Ergebnis da. Darunter die **Fähigkeiten** des Kontos: aktivierte als `☑` (z. B. lesen, Entwürfe, senden), mögliche, aber nicht aktivierte als `☐` mit dem genauen Befehl, der sie freischaltet (Mail/Drive/Kalender: Konto entfernen und mit der zusätzlichen Option neu verbinden, bestehende Optionen bleiben im Befehl; Slack: App mit aktuellem Manifest neu installieren). Neu verbinden vergibt eine neue Konto-ID; Clients mit Kontoliste bekommen sie nicht automatisch (Hinweis in der Ausgabe). Nicht verbundene Dienste stehen als `☐` mit `perch … add`-Befehl. Danach Zugänge (Clients, öffentlicher Zugang, WhatsApp-Bridge), Sende-Speicher als Balken, Audit-Zähler, die Onboarding-Checkliste (`Onboarding N/4`) und das Gesamtergebnis.
+- **Darstellung:** Abschnitte pro Dienst mit Checkboxen. Verbundene Konten stehen als `☑` (oder `✗` bei fehlgeschlagenem Check) mit Label, Adresse und Ergebnis da. Darunter die **Fähigkeiten** des Kontos: aktivierte als `☑` (z. B. lesen, Entwürfe, senden), mögliche, aber nicht aktivierte als `☐` mit dem genauen Befehl, der sie freischaltet (Mail/Drive/Kalender: Konto entfernen und mit der zusätzlichen Option neu verbinden, bestehende Optionen bleiben im Befehl; Slack: App mit aktuellem Manifest neu installieren). Neu verbinden vergibt eine neue Konto-ID; Clients mit Kontoliste bekommen sie nicht automatisch (Hinweis in der Ausgabe). Nicht verbundene Dienste stehen als `☐` mit `perch … add`-Befehl. **Google ist ein Dienst:** ohne Google-Konto eine Zeile „☐ Google (Drive, Gmail, Calendar, Contacts)“ mit `perch google add --label NAME`; verbunden ein Block pro Google-Konto (`── Google · LABEL`) mit den Diensten darunter, je Dienst Konto-ID, Live-Check und die Rechte als `☑`/`☐` (z. B. `☑ read   ☐ write`). Fehlende Rechte und nicht verbundene Dienste nennen den `perch google access …`-Befehl (gleiche IDs). Einzeln verbundene Google-Konten (ohne Gruppe) behalten eigene Abschnitte und ihre bisherigen Hinweise. `--plain` zeigt ohne Google-Konto ebenfalls nur eine Zeile `Google (Drive, Gmail, Calendar, Contacts): none`; die `--json`-Felder sind unverändert. Danach Zugänge (Clients, öffentlicher Zugang, WhatsApp-Bridge), Sende-Speicher als Balken, Audit-Zähler, die Onboarding-Checkliste (`Onboarding N/4`) und das Gesamtergebnis.
 - **Farbe** nur für Status (grün ok, rot Fehler, gelb Hinweis) und nur im Terminal; mit `NO_COLOR=1` oder umgeleiteter Ausgabe ohne Farbe, die Checkboxen bleiben. Die Breite folgt dem Terminal (mindestens 60 Zeichen), lange Werte werden gekürzt, Befehle nie.
 
 - Pro Konto prüft Perch **nur lesend**, ob der Zugang noch funktioniert: Drive `about`, Gmail-Profil, Graph `/me`, Google `userinfo`, Notion `users/me`, Slack `auth.test`, IMAP-/SMTP-Login, GOWA-Gerätestatus.
