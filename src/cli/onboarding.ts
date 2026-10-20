@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import type { PerchConfig } from '../config.js';
 import { PerchError } from '../errors.js';
+import { GOOGLE_SERVICES, parseGoogleServices, type GoogleService } from '../google/group.js';
 
 /**
  * Easier onboarding (2026-10-20):
@@ -12,7 +13,9 @@ import { PerchError } from '../errors.js';
 
 /** Provider opt-in flags that "write" turns on, per command (services without provider-side scopes are absent). */
 export const WRITE_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  google: ['allow-write'],
+  // One Google login for every service: "write" turns on each selected service's write opt-in (perch google add
+  // ignores the flags of services that were not selected).
+  google: ['allow-write', 'allow-drafts', 'allow-send', 'allow-modify', 'allow-calendar-write'],
   gmail: ['allow-drafts', 'allow-send', 'allow-modify'],
   microsoft: ['allow-drafts', 'allow-send', 'allow-modify'],
   imap: ['allow-drafts', 'allow-send', 'allow-modify'],
@@ -56,7 +59,24 @@ export async function chooseAccess(cmd: string, values: Record<string, unknown>,
   throw new PerchError('Answer r (read only) or w (read + write)', 'usage');
 }
 
-const yes = (a: string, def = false) => {
+/**
+ * Services for `perch google add`: --services wins; otherwise asked (Enter = all); without a terminal all of them.
+ */
+export async function chooseGoogleServices(values: Record<string, unknown>, ask: Ask | undefined, note: (s: string) => void): Promise<GoogleService[]> {
+  if (typeof values.services === 'string') return parseGoogleServices(values.services.split(','));
+  const all = [...GOOGLE_SERVICES];
+  let answer: string;
+  try {
+    if (!ask) throw new PerchError('no terminal', 'no_tty');
+    answer = await ask(`Google services to connect [${all.join(',')}] (Enter = all): `);
+  } catch {
+    note(`No interactive terminal: connecting all Google services (${all.join(', ')}); choose with --services.\n`);
+    return all;
+  }
+  return answer.trim() ? parseGoogleServices(answer.split(/[\s,]+/)) : all;
+}
+
+export const yes = (a: string, def = false) => {
   const v = a.trim().toLowerCase();
   return v === '' ? def : v === 'y' || v === 'yes' || v === 'j' || v === 'ja';
 };
@@ -64,6 +84,8 @@ const yes = (a: string, def = false) => {
 interface SetupService {
   cmd: string;
   title: string;
+  /** Wording of the "connect another …?" question (default: another <title> account). */
+  another?: string;
   /** Shown before the first account: what has to exist already. */
   needs: (config: PerchConfig) => string | undefined;
   /** Extra arguments for `add` (asked interactively). */
@@ -103,25 +125,15 @@ const tunnel = (port: number) =>
 
 const SERVICES: readonly SetupService[] = [
   {
+    // One step and one Google login for Drive, Gmail, Calendar and Contacts (docs/GOOGLE_UNIFIED_SPEC.md).
     cmd: 'google',
-    title: 'Google Drive',
+    title: 'Google account (Drive, Gmail, Calendar, Contacts)',
+    another: 'another Google account',
     needs: (c) =>
       c.googleClientFile && existsSync(c.googleClientFile)
         ? tunnel(8766)
         : 'Needs a Google Cloud OAuth client of type "Desktop app" (docs/SETUP.md §3.1) saved as a 0600 file, and PERCH_GOOGLE_CLIENT_FILE set to it in .env. Skip for now if you have not done that.\n',
     args: async () => ['--port', '8766'],
-  },
-  {
-    cmd: 'gmail',
-    title: 'Gmail',
-    needs: (c) => (c.googleClientFile && existsSync(c.googleClientFile) ? tunnel(8766) : 'Needs the same Google OAuth client as Drive (PERCH_GOOGLE_CLIENT_FILE).\n'),
-    args: async () => ['--port', '8766'],
-  },
-  {
-    cmd: 'google-productivity',
-    title: 'Google Calendar and Contacts',
-    needs: (c) => (c.googleClientFile && existsSync(c.googleClientFile) ? tunnel(8766) : 'Needs the same Google OAuth client as Drive (PERCH_GOOGLE_CLIENT_FILE).\n'),
-    args: async () => ['--services', 'calendar,contacts', '--port', '8766'],
   },
   {
     cmd: 'microsoft',
@@ -200,7 +212,7 @@ export async function runSetup(
     }
     const hint = s.needs(config);
     if (hint) io.stdout(hint);
-    for (let more = true; more; more = yes(await ask(`Connect another ${s.title} account? [y/N] `))) {
+    for (let more = true; more; more = yes(await ask(`Connect ${s.another ?? `another ${s.title} account`}? [y/N] `))) {
       const label = (await ask('  Label for this account (e.g. Private, Work): ')).trim() || 'Private';
       try {
         const code = await run([s.cmd, 'add', '--label', label, ...(await s.args(ask))]);

@@ -128,9 +128,7 @@ describe('perch client add --full', () => {
 describe('perch setup', () => {
   it('walks through the services, connects the chosen ones and creates one full-access client', async () => {
     const answers = [
-      'n', // Google Drive
-      'n', // Gmail
-      'n', // Calendar/Contacts
+      'n', // Google account (Drive, Gmail, Calendar, Contacts)
       'n', // Outlook
       'y', // GMX/IMAP
       'Private', // label

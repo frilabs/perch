@@ -44,6 +44,7 @@ function baseStore(): StoreData {
     whatsappInstance: { origin: 'http://127.0.0.1:3000', username: 'perch', password: SECRETS[1]!, createdAt: AT, updatedAt: AT },
     whatsapp: [{ id: 'whatsapp-c3da7b43', label: 'Whatsapp', deviceId: 'perch-0123456789abcdef', jid: '4366012345678@s.whatsapp.net', createdAt: AT, updatedAt: AT }],
     luma: [],
+    googleGroups: [],
   };
 }
 
@@ -57,6 +58,7 @@ function baseReport(): StatusReport {
       { family: 'mail', id: 'imap-fac20c59', label: 'GMX', provider: 'imap (gmx)', identity: 'fritz@example.org', permissions: 'read, draft, send', connectedAt: AT, check: { state: 'ok', ms: 732 } },
       { family: 'whatsapp', id: 'whatsapp-c3da7b43', label: 'Whatsapp', provider: 'gowa', identity: '+4366012345678', permissions: 'read, send', connectedAt: AT, check: { state: 'ok', ms: 16 } },
     ],
+    googleGroups: [],
     clients: [{ id: 'client-5cda7d00', label: 'Claude Code Mac', capabilities: ['read'], accountIds: [], full: true, createdAt: AT }],
     whatsappBridge: { origin: 'http://127.0.0.1:3000', configuredAt: AT },
     ledger: { sends: 0, maxSends: 1000, pending: 0, auditEvents: 0, auditDropped: 0 },
@@ -160,17 +162,17 @@ describe('perch status terminal rendering', () => {
     const caps = accountCapabilities(d);
     const off = (id: string) => caps[id]!.filter((c) => !c.enabled).map((c) => [c.name, c.enable]);
     expect(off('gmail-0000000a')).toEqual([
-      ['drafts', 'perch gmail remove gmail-0000000a && perch gmail add --label \'Work Gmail\' --allow-drafts --login-hint w@example.test'],
-      ['send', 'perch gmail remove gmail-0000000a && perch gmail add --label \'Work Gmail\' --allow-send --login-hint w@example.test'],
-      ['organize', 'perch gmail remove gmail-0000000a && perch gmail add --label \'Work Gmail\' --allow-modify --login-hint w@example.test'],
+      ['drafts', 'perch gmail remove gmail-0000000a && perch google add --label \'Work Gmail\' --services gmail --allow-drafts --login-hint w@example.test'],
+      ['send', 'perch gmail remove gmail-0000000a && perch google add --label \'Work Gmail\' --services gmail --allow-send --login-hint w@example.test'],
+      ['organize', 'perch gmail remove gmail-0000000a && perch google add --label \'Work Gmail\' --services gmail --allow-modify --login-hint w@example.test'],
     ]);
     // Mail.ReadWrite covers drafts and organizing; the stored Mail.Send is kept in the command.
     expect(off('microsoft-0000000a')).toEqual([
       ['drafts', 'perch microsoft remove microsoft-0000000a && perch microsoft add --label Outlook --allow-drafts --allow-send --login-hint o@example.test'],
       ['organize', 'perch microsoft remove microsoft-0000000a && perch microsoft add --label Outlook --allow-send --allow-modify --login-hint o@example.test'],
     ]);
-    expect(off('google-0000000a')).toEqual([['write', 'perch google remove google-0000000a && perch google add --label Drive --allow-write --login-hint d@example.test']]);
-    const cal = 'perch google-productivity remove gprod-0000000a && perch google-productivity add --label Calendar --services calendar';
+    expect(off('google-0000000a')).toEqual([['write', 'perch google remove google-0000000a && perch google add --label Drive --services drive --allow-write --login-hint d@example.test']]);
+    const cal = 'perch google-productivity remove gprod-0000000a && perch google add --label Calendar --services calendar';
     expect(off('gprod-0000000a')).toEqual([
       ['contacts', `${cal},contacts --login-hint c@example.test`],
       ['calendar write', `${cal} --allow-calendar-write --login-hint c@example.test`],
@@ -185,11 +187,11 @@ describe('perch status terminal rendering', () => {
     const out = render(baseReport(), baseStore());
     const block = out.slice(out.indexOf('── Not connected'), out.indexOf('── Access'));
     for (const [title, cmd] of [
-      ['Google Drive', 'perch google add --label NAME [--allow-write]'],
+      ['Google Drive', 'perch google add --label NAME --services drive [--allow-write]'],
       ['Notion', 'perch notion add --label NAME'],
-      ['Gmail', 'perch gmail add --label NAME [--allow-drafts] [--allow-send] [--allow-modify]'],
+      ['Gmail', 'perch google add --label NAME --services gmail [--allow-drafts] [--allow-send] [--allow-modify]'],
       ['Outlook / Microsoft 365', 'perch microsoft add --label NAME'],
-      ['Google Calendar/Contacts', 'perch google-productivity add --label NAME --services calendar,contacts [--allow-calendar-write]'],
+      ['Google Calendar/Contacts', 'perch google add --label NAME --services calendar,contacts [--allow-calendar-write]'],
       ['Slack', 'perch slack manifest, then perch slack add --label NAME'],
       ['Luma', 'perch luma add --label NAME'],
     ]) {

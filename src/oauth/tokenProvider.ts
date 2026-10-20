@@ -12,8 +12,16 @@ export interface TokenGrantResponse {
 
 export interface RefreshableAccount {
   id: string;
-  refreshToken: string;
+  /** Absent only for members of a shared login (see TokenProviderConfig.shared). */
+  refreshToken?: string;
   updatedAt: string;
+}
+
+/** Access tokens of a shared login (e.g. a Google account group), keyed by the shared login's id. */
+export interface SharedTokenSource {
+  getAccessToken(id: string): Promise<string>;
+  lastGrantedScopes(id: string): string[] | undefined;
+  invalidate(id: string): void;
 }
 
 export interface TokenProviderConfig<A extends RefreshableAccount> {
@@ -21,10 +29,16 @@ export interface TokenProviderConfig<A extends RefreshableAccount> {
   name: string;
   /** The store section holding these accounts (mutable reference inside store.update). */
   list: (data: StoreData) => A[];
-  /** Performs the refresh_token grant against the fixed token endpoint. */
-  refresh: (account: A) => Promise<TokenGrantResponse>;
+  /** Performs the refresh_token grant against the fixed token endpoint with the account's stored refresh token. */
+  refresh: (account: A, refreshToken: string) => Promise<TokenGrantResponse>;
   /** Shell commands that reconnect the account. Never includes user-supplied labels. */
   reconnect: (id: string) => string;
+  /**
+   * Accounts whose login is shared (no refresh token of their own): `of` names the shared login, `source`
+   * hands out its access tokens. All members then use one cache, one single-flight refresh and one
+   * persisted refresh token, so a refresh or an invalid_grant applies to every member alike.
+   */
+  shared?: { of: (account: A) => string | undefined; source: SharedTokenSource };
 }
 
 const fingerprint = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -42,6 +56,8 @@ const RECONNECT_CODES = new Set(['invalid_grant', 'interaction_required', 'conse
 export class RefreshingTokenProvider<A extends RefreshableAccount> {
   private cache = new Map<string, { token: string; expiresAt: number; rtHash: string; scopes?: string[] }>();
   private inflight = new Map<string, Promise<string>>();
+  /** Member id -> shared login id, recorded on the member's last token request. */
+  private sharedOf = new Map<string, string>();
 
   constructor(
     private readonly store: CredentialStore,
@@ -52,6 +68,16 @@ export class RefreshingTokenProvider<A extends RefreshableAccount> {
   async getAccessToken(accountId: string): Promise<string> {
     const account = this.cfg.list(await this.store.read()).find((a) => a.id === accountId);
     if (!account) throw new PerchError(`Unknown ${this.cfg.name} account: ${accountId}`, 'unknown_account');
+    const shared = this.cfg.shared?.of(account);
+    if (shared) {
+      this.sharedOf.set(accountId, shared);
+      this.cache.delete(accountId);
+      return this.cfg.shared!.source.getAccessToken(shared);
+    }
+    this.sharedOf.delete(accountId);
+    if (!account.refreshToken) {
+      throw new PerchError(`${this.cfg.name} account ${accountId} has no stored login. Re-authorise: run ${this.cfg.reconnect(accountId)}.`, 'grant_invalid');
+    }
     const rtHash = fingerprint(account.refreshToken);
     const cached = this.cache.get(accountId);
     if (cached && cached.rtHash === rtHash && cached.expiresAt - 60_000 > this.now()) return cached.token;
@@ -59,7 +85,7 @@ export class RefreshingTokenProvider<A extends RefreshableAccount> {
     const key = `${accountId}:${rtHash}`;
     let p = this.inflight.get(key);
     if (!p) {
-      p = this.refresh(account, rtHash).finally(() => this.inflight.delete(key));
+      p = this.refresh(account as A & { refreshToken: string }, rtHash).finally(() => this.inflight.delete(key));
       this.inflight.set(key, p);
     }
     return p;
@@ -70,19 +96,23 @@ export class RefreshingTokenProvider<A extends RefreshableAccount> {
    * `scope`), or undefined when unknown. Lets callers fail closed when a scope was revoked upstream.
    */
   lastGrantedScopes(accountId: string): string[] | undefined {
+    const shared = this.sharedOf.get(accountId);
+    if (shared) return this.cfg.shared!.source.lastGrantedScopes(shared);
     return this.cache.get(accountId)?.scopes;
   }
 
-  /** Drops the cached access token (e.g. after the provider answered 401). */
+  /** Drops the cached access token (e.g. after the provider answered 401); for a shared login, for every member. */
   invalidate(accountId: string): void {
+    const shared = this.sharedOf.get(accountId);
+    if (shared) this.cfg.shared!.source.invalidate(shared);
     this.cache.delete(accountId);
   }
 
-  private async refresh(account: A, rtHash: string): Promise<string> {
+  private async refresh(account: A & { refreshToken: string }, rtHash: string): Promise<string> {
     const { name } = this.cfg;
     let tok: TokenGrantResponse;
     try {
-      tok = await this.cfg.refresh(account);
+      tok = await this.cfg.refresh(account, account.refreshToken);
     } catch (err) {
       if (err instanceof UpstreamError && err.upstreamCode && RECONNECT_CODES.has(err.upstreamCode)) {
         this.cache.delete(account.id);
@@ -108,7 +138,7 @@ export class RefreshingTokenProvider<A extends RefreshableAccount> {
         saved = await this.store.update((data) => {
           const a = this.cfg.list(data).find((x) => x.id === account.id);
           // Only replace the token we refreshed with; never resurrect a removed/re-added account.
-          if (!a || fingerprint(a.refreshToken) !== rtHash) return false;
+          if (!a?.refreshToken || fingerprint(a.refreshToken) !== rtHash) return false;
           a.refreshToken = newRefresh;
           a.updatedAt = new Date().toISOString();
           return true;
@@ -126,7 +156,7 @@ export class RefreshingTokenProvider<A extends RefreshableAccount> {
     } else {
       // Fail closed if the account was removed or replaced while the refresh was in flight.
       const now = this.cfg.list(await this.store.read()).find((a) => a.id === account.id);
-      if (!now || fingerprint(now.refreshToken) !== rtHash) throw changedMeanwhile();
+      if (!now?.refreshToken || fingerprint(now.refreshToken) !== rtHash) throw changedMeanwhile();
     }
     this.cache.set(account.id, {
       token: tok.access_token,

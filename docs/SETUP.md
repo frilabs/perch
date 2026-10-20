@@ -24,7 +24,7 @@ CLI-Aufruf: `node dist/cli.js …`. Optional global per `npm link`, dann heißt 
 perch setup
 ```
 
-Der Assistent legt Schlüssel, Speicher und Token an (wie `perch init`), fragt dann Dienst für Dienst „verbinden?“, zeigt die nötigen Vorbereitungen und Links und ruft die normalen `perch <dienst> add`-Befehle auf. Jedes `add` fragt **„nur lesen oder lesen + schreiben?“** und fordert die passenden Rechte beim Anbieter an (`--read-only` / `--write` überspringen die Frage; die `--allow-…`-Flags gehen weiter). Zum Schluss legt er auf Wunsch einen Client mit **vollem Zugriff** an (`perch client add --full`: alle Fähigkeiten, alle Konten, auch später verbundene) und zeigt den fertigen `claude mcp add`-Befehl für den Laptop.
+Der Assistent legt Schlüssel, Speicher und Token an (wie `perch init`), fragt dann Dienst für Dienst „verbinden?“ (Google ist **ein** Schritt für Drive, Gmail, Kalender und Kontakte, siehe Abschnitt 3), zeigt die nötigen Vorbereitungen und Links und ruft die normalen `perch <dienst> add`-Befehle auf. Jedes `add` fragt **„nur lesen oder lesen + schreiben?“** und fordert die passenden Rechte beim Anbieter an (`--read-only` / `--write` überspringen die Frage; die `--allow-…`-Flags gehen weiter). Zum Schluss legt er auf Wunsch einen Client mit **vollem Zugriff** an (`perch client add --full`: alle Fähigkeiten, alle Konten, auch später verbundene) und zeigt den fertigen `claude mcp add`-Befehl für den Laptop.
 
 Jeder weitere Claude- oder Codex-Account braucht nur noch einen Befehl auf dem Server: `perch client add --label NAME --full` (im Tailnet) oder `perch oauth pair` und bei der Frage „lesen oder voll“ `f` (claude.ai übers Internet).
 
@@ -70,13 +70,15 @@ Weitere Variablen stehen in `.env.example`. Laden geht zum Beispiel so: `node --
 
 ## 3. Google-Konten verbinden (Nutzeraufgabe: App-Credentials)
 
+Ein Google-Konto wird mit **einem** Befehl und **einem** Browser-Login für Drive, Gmail, Kalender und Kontakte verbunden (Spezifikation: `docs/GOOGLE_UNIFIED_SPEC.md`). **Nicht live verifiziert**; getestet nur gegen Mocks.
+
 ### 3.1 Google Cloud einmalig einrichten
 
 Diese Einrichtung macht Fritz selbst. Perch kann sie nicht übernehmen.
 
-1. In der Google Cloud Console ein Projekt anlegen und die **Google Drive API** aktivieren.
+1. In der Google Cloud Console ein Projekt anlegen und die APIs der gewünschten Dienste aktivieren: **Google Drive API**, **Gmail API**, **Google Calendar API**, **People API**.
 2. Auth-Plattform bzw. OAuth-Zustimmungsbildschirm einrichten:
-   - Den Scope `https://www.googleapis.com/auth/drive.readonly` eintragen.
+   - Scopes eintragen: `openid`, `email` (bzw. `.../auth/userinfo.email`), `.../auth/drive.readonly`, `.../auth/gmail.readonly`, `.../auth/calendar.readonly`, `.../auth/contacts.readonly`; für Schreiben zusätzlich `.../auth/drive`, `.../auth/gmail.compose`, `.../auth/gmail.send`, `.../auth/gmail.modify`, `.../auth/calendar.events.owned`.
    - Im Status „Testing“ jedes Google-Konto als Testnutzer hinzufügen.
 3. Einen OAuth-Client vom Typ **„Desktop app“** erstellen und die JSON-Datei herunterladen, dann:
 
@@ -87,8 +89,8 @@ export PERCH_GOOGLE_CLIENT_FILE=~/.config/perch/google-client.json
 
 **Hinweise zu Google** (Stand der Google-Dokumentation, bitte dort prüfen):
 
-- `drive.readonly` ist ein *restricted scope*.
-- Im Status „Testing“ laufen Refresh-Tokens nach 7 Tagen ab. Danach das Konto entfernen und neu hinzufügen.
+- `drive.readonly`, `gmail.readonly`, `gmail.compose` und `gmail.modify` sind *restricted scopes*.
+- Im Status „Testing“ laufen Refresh-Tokens nach 7 Tagen ab. Danach das Konto mit demselben Befehl neu hinzufügen (aktualisiert die Gruppe, gleiche IDs).
 - Für eine veröffentlichte App mit restricted scope verlangt Google eine Verifizierung. Ohne sie erscheint ein Warnhinweis „unverified app“.
 
 ### 3.2 Ein Konto hinzufügen (einmal pro Google-Konto)
@@ -97,36 +99,60 @@ export PERCH_GOOGLE_CLIENT_FILE=~/.config/perch/google-client.json
 perch google add --label "Privat" --port 8766
 ```
 
-1. Perch gibt eine Google-Auth-URL aus.
-2. Die URL im Browser öffnen, das gewünschte Konto wählen und **den Drive-Haken setzen**.
+1. Perch fragt, welche Dienste verbunden werden (Standard: alle; ohne Terminal alle) und dann einmal **„[r]ead only, or read + [w]rite?“**. Ohne Fragen: `--services drive,gmail,calendar,contacts` und `--read-only` bzw. `--write`. Die bisherigen Feinschalter gelten weiter: `--allow-write` (Drive), `--allow-drafts`, `--allow-send`, `--allow-modify` (Gmail), `--allow-calendar-write`.
+2. Perch gibt **eine** Google-Auth-URL mit allen Scopes der gewählten Dienste aus (`include_granted_scopes=true`). Die URL im Browser öffnen und das gewünschte Konto wählen.
 3. Google leitet auf `http://127.0.0.1:8766/oauth2/callback` um. Läuft der Browser auf dem Laptop und nicht auf dem Server, vorher auf dem Laptop den Port weiterleiten:
 
 ```bash
 ssh -N -L 8766:127.0.0.1:8766 homeserver
 ```
 
+**Ergebnis:** eine **Google-Konto-Gruppe** (`ggroup-…`) mit den gewohnten Konten darunter: `google-…` (Drive), `gmail-…` (Gmail), `gprod-…` (Kalender und Kontakte). Grants, Tools und `perch client add --account` arbeiten wie bisher mit diesen IDs. Die Gruppe hält **ein** Refresh-Token (einmal gespeichert); Token-Refresh und Fehler wie ein widerrufener Grant (`invalid_grant`) gelten für alle Dienste der Gruppe gleich, ein Refresh läuft nie doppelt.
+
+**Granulare Zustimmung:** Google lässt einzelne Häkchen abwählen. Perch verbindet nur, was Google tatsächlich gewährt hat, und sagt, was fehlt und mit welchem Befehl es sich nachholen lässt. Fehlt ein Lese-Scope, wird der Dienst nicht verbunden; fehlt ein Schreib-Scope, ist der Dienst nur lesend verbunden. Ohne einen einzigen gewährten Dienst wird nichts gespeichert.
+
 **Was Perch prüft:**
 - Pfad, `state` (zufällig, wird vor dem Code-Tausch geprüft), PKCE S256 und Timeout (Default 300 s, `--timeout` 1–3600 s)
 - Ob ein Refresh-Token vorhanden ist
-- Ob `drive.readonly` tatsächlich gewährt wurde
+- Identität über `https://openidconnect.googleapis.com/v1/userinfo` (`sub`, `email_verified: true`)
+- Welche Scopes gewährt wurden (pro Dienst)
 
-**Weitere Konten:** Jedes Konto ist ein eigener Grant mit eigenem Label.
+**Neu verbinden / Rechte erweitern:** Derselbe Befehl für ein schon verbundenes Konto fragt, ob die bestehende Gruppe aktualisiert werden soll (`--yes` ohne Frage). Dann ersetzt Perch das Refresh-Token, ergänzt neue Dienste und Rechte und behält alle Konto-IDs, Client-Grants bleiben gültig. Es entstehen keine Dubletten.
+
+```bash
+perch google add --label "Privat" --services gmail --allow-send --port 8766   # Gmail senden nachrüsten
+```
+
+**Weitere Konten:** Jedes Google-Konto ist eine eigene Gruppe mit eigenem Label.
 
 ```bash
 perch google add --label "Arbeit" --port 8766
+perch google list
 ```
 
-Die Identität (E-Mail) liest Perch über die Drive-API aus. Ein zweiter Grant für dieselbe E-Mail wird abgelehnt.
+**Entfernen:**
+
+```bash
+perch google remove ggroup-1a2b3c4d                    # ganze Gruppe lokal löschen (auch per Konto-ID eines Mitglieds)
+perch google remove ggroup-1a2b3c4d --revoke           # zusätzlich EINMAL bei Google widerrufen: trifft alle Dienste
+perch google remove ggroup-1a2b3c4d --service gmail    # nur einen Dienst entfernen, ohne Widerruf
+```
+
+- Ein Widerruf trifft immer alle Dienste der Gruppe, weil sie sich die Anmeldung teilen. `--service` mit `--revoke` wird deshalb abgelehnt; `perch gmail remove gmail-… --revoke` für ein Gruppenmitglied ebenso.
+- Wird der letzte Dienst einer Gruppe entfernt, verschwindet die Gruppe samt gespeicherter Anmeldung.
+
+**Einzeln verbundene Konten** (vor diesem Stand oder mit `perch gmail add` / `perch google-productivity add`) bleiben gültig und unverändert; es gibt keine automatische Migration. Sie erscheinen in `perch status` als eigene Einträge. Für dieselbe E-Mail lässt `perch google add` einen schon einzeln verbundenen Dienst unverändert und meldet ihn; zum Zusammenführen das einzelne Konto entfernen und `perch google add … --services <dienst>` ausführen. `--services drive` ergibt das frühere `perch google add` (nur Drive).
 
 ### 3.3 Schreiben (Drive)
 
-Standardmäßig ist Drive nur lesend verbunden (`drive.readonly`). Für Schreiben das Konto mit vollem Drive-Zugriff verbinden (Scope `drive`; im Consent-Screen der Google-Cloud-App muss dieser Scope eingetragen sein):
+Standardmäßig ist Drive nur lesend verbunden (`drive.readonly`). Für Schreiben das Konto mit vollem Drive-Zugriff verbinden (Scope `drive`; im Consent-Screen der Google-Cloud-App muss dieser Scope eingetragen sein). Für ein Gruppenkonto genügt erneutes Hinzufügen (gleiche IDs):
 
 ```bash
-perch google remove google-1a2b3c4d          # bestehendes Konto, nur falls schon lesend verbunden
-perch google add --label "Privat" --allow-write --port 8766
+perch google add --label "Privat" --services drive --allow-write --port 8766
 perch client add --label "Laptop" --allow drive_read,drive_write --account google-1a2b3c4d
 ```
+
+Ein einzeln verbundenes Drive-Konto (ohne Gruppe) vorher mit `perch google remove google-1a2b3c4d` entfernen.
 
 - Schreiben dürfen **nur Client-Grants mit `drive_write`** für genau dieses Konto. Das globale Token und `serve --stdio` bleiben lesend.
 - Fehlt beim Anbieter der Scope `drive`, scheitert jeder Schreibaufruf mit `provider_scope_missing` (Hinweis: neu verbinden mit `--allow-write`), bevor etwas an Google geht.
@@ -175,7 +201,11 @@ Grundregel: **Standard ist Lesen.** Entwürfe und Senden brauchen zwei Freigaben
 
 Das globale HTTP-Token und `serve --stdio` ohne Client-Token bleiben read-only.
 
-### 4a.1 Gmail (eigener Grant pro Konto, getrennt von Drive)
+### 4a.1 Gmail
+
+**Standardweg:** `perch google add --label "Privat"` (Abschnitt 3.2) verbindet Gmail zusammen mit Drive, Kalender und Kontakten über eine Anmeldung; nur Gmail: `perch google add --label "Privat" --services gmail [--allow-drafts] [--allow-send] [--allow-modify]`.
+
+Der bisherige Befehl `perch gmail add` funktioniert weiter und legt ein Gmail-Konto mit **eigenem Grant** an (getrennt von Drive):
 
 1. Im selben Google-Cloud-Projekt wie für Drive die **Gmail API** aktivieren.
 2. Im Consent Screen die Scopes eintragen:
@@ -192,7 +222,7 @@ perch gmail list
 perch gmail remove gmail-1a2b3c4d [--revoke]
 ```
 
-Fehlt nach dem Consent ein angefragter Scope, z. B. weil ein Häkchen entfernt wurde, bricht `add` ab.
+Fehlt nach dem Consent ein angefragter Scope, z. B. weil ein Häkchen entfernt wurde, bricht `perch gmail add` ab. (`perch google add` verbindet stattdessen, was gewährt wurde, und meldet den Rest.)
 
 ### 4a.2 Outlook.com / Microsoft 365 (Microsoft Graph, delegiert)
 
@@ -290,7 +320,7 @@ Spezifikation und Testnachweise: `docs/GOOGLE_PRODUCTIVITY_MILESTONE.md`. **Nich
 
 1. Im selben Google-Cloud-Projekt die **Google Calendar API** und/oder die **People API** aktivieren.
 2. Im Consent Screen die Scopes eintragen: `openid`, `email` (bzw. `.../auth/userinfo.email`), `.../auth/calendar.readonly`, `.../auth/contacts.readonly` und nur bei Bedarf `.../auth/calendar.events.owned`. Testnutzer eintragen; im Testing-Status laufen Refresh-Tokens nach 7 Tagen ab.
-3. Konto verbinden. Das ist ein **eigener Grant**, getrennt von Drive und Gmail; dafür ist weder eine Drive- noch eine Gmail-Freigabe nötig. Der Desktop-Client aus `PERCH_GOOGLE_CLIENT_FILE` wird wiederverwendet. `--services` ist Pflicht und wählt die Dienste ausdrücklich:
+3. Konto verbinden. **Standardweg:** `perch google add --label "Privat" --services calendar,contacts [--allow-calendar-write]` (Abschnitt 3.2, eine Anmeldung mit Drive und Gmail; die Konten heißen wie bisher `gprod-…`). Der bisherige Befehl legt einen **eigenen Grant** an, getrennt von Drive und Gmail; dafür ist weder eine Drive- noch eine Gmail-Freigabe nötig. Der Desktop-Client aus `PERCH_GOOGLE_CLIENT_FILE` wird wiederverwendet. `--services` ist Pflicht und wählt die Dienste ausdrücklich:
 
 ```bash
 perch google-productivity add --label "Privat" --services calendar            # calendar.readonly
@@ -301,7 +331,7 @@ perch google-productivity list
 perch google-productivity remove gprod-1a2b3c4d [--revoke]
 ```
 
-- Perch prüft nach dem Consent: Refresh-Token vorhanden, jeder angefragte Scope gewährt (ein entferntes Häkchen bricht `add` ab), E-Mail über den festen Endpunkt `https://openidconnect.googleapis.com/v1/userinfo` mit `email_verified: true`. Ein zweiter Grant für dasselbe Google-Konto (`sub`) wird abgelehnt.
+- `perch google-productivity add` prüft nach dem Consent: Refresh-Token vorhanden, jeder angefragte Scope gewährt (ein entferntes Häkchen bricht `add` ab), E-Mail über den festen Endpunkt `https://openidconnect.googleapis.com/v1/userinfo` mit `email_verified: true`. Ein zweiter Grant für dasselbe Google-Konto (`sub`) wird abgelehnt.
 - **Schreiben** braucht drei Freigaben: `--allow-calendar-write` beim Verbinden, den von Google tatsächlich gewährten Scope `calendar.events.owned` (zusätzlich beim Token-Refresh erneut geprüft) und einen Client-Grant mit `calendar_write`. Termine mit Gästen (jede Änderung daran), Einladungen und Antworten brauchen zusätzlich `calendar_invite` (gleicher Google-Scope; `--full` enthält es).
 - **Client-Grants** für Calendar/Contacts gelten nur für `gprod-…`-Konten und geben keinen Mail-Zugriff:
 
@@ -692,15 +722,18 @@ perch status --plain      # bisherige schlichte Ausgabe (eine Zeile pro Konto)
 
 ```bash
 perch accounts
-perch google remove google-1a2b3c4d            # nur lokal löschen
-perch google remove google-1a2b3c4d --revoke   # zusätzlich Grant bei Google widerrufen
+perch google remove ggroup-1a2b3c4d            # Google-Konto-Gruppe nur lokal löschen (alle Dienste)
+perch google remove ggroup-1a2b3c4d --revoke   # zusätzlich Grant bei Google widerrufen (einmal, alle Dienste)
+perch google remove ggroup-1a2b3c4d --service calendar   # nur einen Dienst der Gruppe entfernen
+perch google remove google-1a2b3c4d            # einzeln verbundenes Drive-Konto
 perch notion remove notion-1a2b3c4d            # nur lokal trennen
 ```
 
 | Aktion | Wirkung |
 | --- | --- |
-| `google remove` | Refresh-Token und Client-Daten werden aus der DB gelöscht. Der Grant bei Google bleibt bestehen, bis er unter <https://myaccount.google.com/permissions> widerrufen wird. |
-| `google remove --revoke` | Wie oben, zusätzlich `POST https://oauth2.googleapis.com/revoke`. Damit ist der Grant ungültig. |
+| `google remove` | Refresh-Token und Client-Daten werden aus der DB gelöscht (bei einer Gruppe samt allen Mitgliedskonten). Der Grant bei Google bleibt bestehen, bis er unter <https://myaccount.google.com/permissions> widerrufen wird. |
+| `google remove --revoke` | Wie oben, zusätzlich `POST https://oauth2.googleapis.com/revoke`. Damit ist der Grant ungültig, bei einer Gruppe für Drive, Gmail, Kalender und Kontakte zugleich. |
+| `google remove ID --service X` | Nur dieser Dienst verlässt die Gruppe; nie widerrufen, weil die Anmeldung geteilt ist. Der letzte Dienst nimmt die Gruppe mit. |
 | `notion remove` | Das PAT wird aus der DB gelöscht. Das Token selbst bleibt gültig, bis es in Notion widerrufen wird. Nach dem Widerruf ist der Zugriff weg. |
 | Grant extern widerrufen oder abgelaufen | Tool-Aufrufe für dieses Konto liefern eine klare Fehlermeldung, die anderen Konten laufen weiter (`partial`). |
 

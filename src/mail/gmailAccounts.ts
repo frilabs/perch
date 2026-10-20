@@ -1,8 +1,9 @@
 import type { AuthorizationResult, GoogleClientCredentials } from '../google/oauth.js';
-import { refreshAccessToken, revokeToken } from '../google/oauth.js';
+import { ownClient, refreshAccessToken, revokeToken } from '../google/oauth.js';
+import { detachGroupMember, sharedGoogleLogin, sharedRevokeRefused } from '../google/groupStore.js';
 import { PerchError } from '../errors.js';
 import { newAccountId, validateLabel } from '../ids.js';
-import { RefreshingTokenProvider } from '../oauth/tokenProvider.js';
+import { RefreshingTokenProvider, type SharedTokenSource } from '../oauth/tokenProvider.js';
 import type { CredentialStore, GmailAccount } from '../store/credentialStore.js';
 import { UpstreamError, type Upstream } from '../upstream.js';
 
@@ -54,7 +55,9 @@ export async function registerGmailAccount(
     const dup = data.gmail.find((g) => g.email.toLowerCase() === email.toLowerCase());
     if (dup) {
       throw new PerchError(
-        `Gmail account ${email} is already connected as ${dup.id} ("${dup.label}"). Remove it first to re-authorise.`,
+        dup.groupId
+          ? `Gmail account ${email} is already connected as ${dup.id} in group ${dup.groupId}. To change its permissions run perch google add for the same account (updates the group).`
+          : `Gmail account ${email} is already connected as ${dup.id} ("${dup.label}"). Remove it first to re-authorise.`,
         'duplicate_account',
       );
     }
@@ -75,17 +78,25 @@ export async function registerGmailAccount(
   });
 }
 
-/** Removes the account locally. With `revoke`, also revokes the grant at Google first. */
+/**
+ * Removes the account locally. With `revoke`, also revokes the grant at Google first. A member of a Google account
+ * group only leaves its group (the shared login stays for the other services; revoking it is refused).
+ */
 export async function removeGmailAccount(
   store: CredentialStore,
   upstream: Upstream,
   id: string,
   opts: { revoke?: boolean },
-): Promise<{ revoked: boolean }> {
+): Promise<{ revoked: boolean; groupId?: string; groupRemoved?: boolean }> {
   const account = (await store.read()).gmail.find((g) => g.id === id);
   if (!account) throw new PerchError(`Unknown Gmail account: ${id}`, 'unknown_account');
+  if (account.groupId) {
+    if (opts.revoke) throw sharedRevokeRefused(id, account.groupId);
+    const r = await store.update((data) => detachGroupMember(data, 'gmail', id));
+    return { revoked: false, groupId: r.groupId, groupRemoved: r.groupRemoved };
+  }
   let revoked = false;
-  if (opts.revoke) {
+  if (opts.revoke && account.refreshToken) {
     try {
       await revokeToken(upstream, account.refreshToken);
       revoked = true;
@@ -105,15 +116,17 @@ export function createGmailTokenProvider(
   store: CredentialStore,
   upstream: Upstream,
   now: () => number = Date.now,
+  group?: SharedTokenSource,
 ): RefreshingTokenProvider<GmailAccount> {
   return new RefreshingTokenProvider<GmailAccount>(
     store,
     {
       name: 'Gmail',
       list: (d) => d.gmail,
-      refresh: (a) => refreshAccessToken(upstream, a, a.refreshToken),
+      refresh: (a, rt) => refreshAccessToken(upstream, ownClient(a), rt),
       // The label is user-supplied, so the command only ever contains the generated id.
-      reconnect: (id) => `\`perch gmail remove ${id}\`, then \`perch gmail add --label <label>\``,
+      reconnect: (id) => `\`perch gmail remove ${id}\`, then \`perch google add --label <label> --services gmail\``,
+      shared: sharedGoogleLogin(store, upstream, group),
     },
     now,
   );

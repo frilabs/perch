@@ -31,17 +31,21 @@ const SCOPE_OF: Record<Need, string> = {
   calendarWrite: CALENDAR_EVENTS_OWNED_SCOPE,
 };
 
-const reconnect = (id: string, opt: string) => `perch google-productivity remove ${id}, then perch google-productivity add --label <label> ${opt}`;
+/** Members of a Google account group are updated in place by re-adding the account; separate ones are replaced. */
+const reconnect = (a: { id: string; groupId?: string }, opt: string) =>
+  a.groupId
+    ? `perch google add --label <label> ${opt} (updates group ${a.groupId}, same account ids)`
+    : `perch google-productivity remove ${a.id}, then perch google add --label <label> ${opt}`;
 
-function notConnected(id: string, need: Need): PerchError {
+function notConnected(a: { id: string; groupId?: string }, need: Need): PerchError {
   if (need === 'calendarWrite') {
     return new PerchError(
-      `Account ${id} was not authorised for calendar writes at Google. Reconnect: ${reconnect(id, '--services calendar --allow-calendar-write')}`,
+      `Account ${a.id} was not authorised for calendar writes at Google. Reconnect: ${reconnect(a, '--services calendar --allow-calendar-write')}`,
       'provider_scope_missing',
     );
   }
   const service = need === 'calendarRead' ? 'calendar' : 'contacts';
-  return new PerchError(`Account ${id} is not connected for ${service}. Reconnect: ${reconnect(id, `--services ${service}`)}`, 'provider_scope_missing');
+  return new PerchError(`Account ${a.id} is not connected for ${service}. Reconnect: ${reconnect(a, `--services ${service}`)}`, 'provider_scope_missing');
 }
 
 /**
@@ -60,7 +64,7 @@ export class ProductivityAccess {
     assertProductivityCapability(principal, accountId, cap);
     const account = (await this.store.read()).googleProductivity.find((a) => a.id === accountId);
     if (!account) throw new PerchError(`Unknown Google productivity account: ${accountId}`, 'unknown_account');
-    if (!productivityCapabilities(account)[NEED[cap]]) throw notConnected(account.id, NEED[cap]);
+    if (!productivityCapabilities(account)[NEED[cap]]) throw notConnected(account, NEED[cap]);
     return account;
   }
 
@@ -81,7 +85,7 @@ export class ProductivityAccess {
     if (!productivityCapabilities(account, live)[need]) {
       throw new PerchError(
         `Google no longer reports the ${SCOPE_OF[need]} permission for ${account.id}; no request was made. Reconnect: ` +
-          reconnect(account.id, need === 'calendarWrite' ? '--services calendar --allow-calendar-write' : `--services ${need === 'calendarRead' ? 'calendar' : 'contacts'}`),
+          reconnect(account, need === 'calendarWrite' ? '--services calendar --allow-calendar-write' : `--services ${need === 'calendarRead' ? 'calendar' : 'contacts'}`),
         'provider_scope_missing',
       );
     }

@@ -849,9 +849,7 @@ describe('perch whatsapp install / perch setup [MOCK GOWA]', () => {
 
   it('perch setup offers the install when no bridge is configured, then pairs', async () => {
     const answers = [
-      'n', // Google Drive
-      'n', // Gmail
-      'n', // Calendar/Contacts
+      'n', // Google account (Drive, Gmail, Calendar, Contacts)
       'n', // Outlook
       'n', // IMAP
       'n', // Notion
@@ -876,7 +874,7 @@ describe('perch whatsapp install / perch setup [MOCK GOWA]', () => {
   });
 
   it('perch setup skips WhatsApp when the install is declined', async () => {
-    const answers = ['n', 'n', 'n', 'n', 'n', 'n', 'n', 'y', 'n', 'n', 'n'];
+    const answers = ['n', 'n', 'n', 'n', 'n', 'y', 'n', 'n', 'n'];
     expect(await runCli(['setup'], io(answers)), cliErr).toBe(0);
     expect(answers).toHaveLength(0);
     expect(cliOut).toMatch(/Skipping WhatsApp/);

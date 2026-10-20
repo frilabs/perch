@@ -1,9 +1,11 @@
 import { PerchError } from '../errors.js';
 import { newAccountId, validateLabel } from '../ids.js';
-import { RefreshingTokenProvider } from '../oauth/tokenProvider.js';
+import { RefreshingTokenProvider, type SharedTokenSource } from '../oauth/tokenProvider.js';
+import { detachGroupMember, sharedGoogleLogin, sharedRevokeRefused } from './groupStore.js';
 import type { CredentialStore, GoogleProductivityAccount } from '../store/credentialStore.js';
 import { UpstreamError, type Upstream } from '../upstream.js';
 import {
+  ownClient,
   refreshAccessToken,
   revokeToken,
   runLoopbackAuthorization,
@@ -146,7 +148,9 @@ export async function registerProductivityAccount(
     const dup = data.googleProductivity.find((a) => a.sub === identity.sub || a.email.toLowerCase() === identity.email.toLowerCase());
     if (dup) {
       throw new PerchError(
-        `Google account ${identity.email} is already connected for Calendar/Contacts as ${dup.id}. Remove it first to re-authorise with other services.`,
+        dup.groupId
+          ? `Google account ${identity.email} is already connected for Calendar/Contacts as ${dup.id} in group ${dup.groupId}. To change its services or permissions run perch google add for the same account (updates the group).`
+          : `Google account ${identity.email} is already connected for Calendar/Contacts as ${dup.id}. Remove it first to re-authorise with other services.`,
         'duplicate_account',
       );
     }
@@ -170,17 +174,25 @@ export async function registerProductivityAccount(
   });
 }
 
-/** Removes the account locally. With `revoke`, also revokes the grant at Google first. */
+/**
+ * Removes the account locally. With `revoke`, also revokes the grant at Google first. A member of a Google account
+ * group only leaves its group (the shared login stays for the other services; revoking it is refused).
+ */
 export async function removeProductivityAccount(
   store: CredentialStore,
   upstream: Upstream,
   id: string,
   opts: { revoke?: boolean },
-): Promise<{ revoked: boolean }> {
+): Promise<{ revoked: boolean; groupId?: string; groupRemoved?: boolean }> {
   const account = (await store.read()).googleProductivity.find((a) => a.id === id);
   if (!account) throw new PerchError(`Unknown Google productivity account: ${id}`, 'unknown_account');
+  if (account.groupId) {
+    if (opts.revoke) throw sharedRevokeRefused(id, account.groupId);
+    const r = await store.update((data) => detachGroupMember(data, 'googleProductivity', id));
+    return { revoked: false, groupId: r.groupId, groupRemoved: r.groupRemoved };
+  }
   let revoked = false;
-  if (opts.revoke) {
+  if (opts.revoke && account.refreshToken) {
     try {
       await revokeToken(upstream, account.refreshToken);
       revoked = true;
@@ -219,15 +231,17 @@ export function createProductivityTokenProvider(
   store: CredentialStore,
   upstream: Upstream,
   now: () => number = Date.now,
+  group?: SharedTokenSource,
 ): RefreshingTokenProvider<GoogleProductivityAccount> {
   return new RefreshingTokenProvider<GoogleProductivityAccount>(
     store,
     {
       name: 'Google Calendar/Contacts',
       list: (d) => d.googleProductivity,
-      refresh: (a) => refreshAccessToken(upstream, a, a.refreshToken),
+      refresh: (a, rt) => refreshAccessToken(upstream, ownClient(a), rt),
       // The label is user-supplied, so the command only ever contains the generated id.
-      reconnect: (id) => `\`perch google-productivity remove ${id}\`, then \`perch google-productivity add --label <label> --services ...\``,
+      reconnect: (id) => `\`perch google-productivity remove ${id}\`, then \`perch google add --label <label> --services calendar,contacts\``,
+      shared: sharedGoogleLogin(store, upstream, group),
     },
     now,
   );

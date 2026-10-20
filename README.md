@@ -50,13 +50,15 @@ Capabilities, per account family:
 | Notion (`notion-…`) | `notion_read`, `notion_write` |
 | Luma (`luma-…`) | `luma_read`, `luma_events`, `luma_guests`, `luma_blast` |
 
+**One Google login:** `perch google add --label NAME` connects a Google account for Drive, Gmail, Calendar and Contacts with one browser login (asks which services, default all). The accounts keep their ids per family (`google-…`, `gmail-…`, `gprod-…`) and form one *Google account group* (`ggroup-…`) that stores the refresh token once; a refresh or a revoked grant applies to all of them together. Google lets you untick single permissions: Perch connects what was granted and names what is missing. Running the same command again for the same account updates the group (same ids). `perch gmail add` and `perch google-productivity add` still connect one service with its own login.
+
 **Provider permissions:** when you connect an account, `perch <service> add` asks *"read only, or read + write?"* and requests the matching permissions from Google, Microsoft or the mail server (`--read-only` / `--write` skip the question). A client can only write where the account was connected with write permissions.
 
 Perch re-checks the grant before every tool call, so `perch client remove ID` takes effect immediately, even on open connections. Every send needs a `requestId`: repeating the same request never sends twice. All calls are written to a body-free audit log (`perch audit list`). 
 
 ## Features
 
-- **Google Drive** (`drive.readonly`, or `drive` with `perch google add --allow-write`; a separate OAuth grant per account):
+- **Google Drive** (`drive.readonly`, or `drive` with `perch google add --allow-write`; part of the Google account's one login, `docs/SETUP.md` §3):
   - search and list, optionally across all accounts
   - metadata, sharing entries and comments
   - read text, base64 download
@@ -72,7 +74,7 @@ Perch re-checks the grant before every tool call, so `perch client remove ID` ta
   - databases, data sources and data source queries, page comments
   - with a client grant holding `notion_write`: create pages (under a page or as a data source row), change properties and blocks, append blocks, move pages and blocks to the trash and restore pages (never permanent deletion), add comments; creating writes are idempotent per `requestId`
 - **Mail** (`docs/EMAIL_MILESTONE.md`):
-  - Gmail: its own OAuth grant, `gmail.readonly` by default, opt-in `gmail.send`/`gmail.compose`
+  - Gmail: through the Google account's one login (`perch google add`) or its own grant (`perch gmail add`), `gmail.readonly` by default, opt-in `gmail.send`/`gmail.compose`
   - Microsoft Graph: delegated with PKCE, `Mail.Read` by default, opt-in `Mail.ReadWrite`/`Mail.Send`
   - IMAP/SMTP (GMX presets): password only through a masked prompt, TLS ≥ 1.2 with certificate verification
   - search, read, attachments; drafts and sending from an explicitly chosen sender account
@@ -82,7 +84,7 @@ Perch re-checks the grant before every tool call, so `perch client remove ID` ta
   - reply, reply all and forward (`mail_reply`, `mail_forward`; recipients and threading derived from the original, forwards keep the original attachments up to 10 MiB): a draft by default (`draft`), sent directly with `send: true` (`send`, idempotent per `requestId`)
   - IMAP files every sent message in the Sent folder (off per account with `--no-sent-copy`; not for Gmail/Outlook SMTP, which file it themselves)
 - **Google Calendar/Contacts** (`docs/GOOGLE_PRODUCTIVITY_MILESTONE.md`):
-  - its own OAuth grant, services chosen explicitly with `--services calendar,contacts`, `calendar.readonly`/`contacts.readonly` by default, opt-in `calendar.events.owned`
+  - through the Google account's one login (`perch google add --services calendar,contacts`) or its own grant (`perch google-productivity add`), `calendar.readonly`/`contacts.readonly` by default, opt-in `calendar.events.owned`
   - read calendars and events; create events (idempotent per `requestId`) and change them (`If-Match`): private and silent by default
   - with `calendar_invite`: guests and invitations (`sendUpdates`), answer invitations (`calendar_respond_event`); also recurring series (RRULE), Google Meet links, any visibility
   - delete events or whole series permanently (`calendar_delete_event`); single occurrences of a series cannot be changed
@@ -129,7 +131,7 @@ Perch is self-hosted, so there is no central Perch app that Google or Microsoft 
 | **Outlook / Microsoft 365** | [Entra admin center](https://entra.microsoft.com) → App registrations → New: "Perch", include personal Microsoft accounts, platform *Mobile and desktop applications* with redirect `http://localhost`, no secret → API permissions (delegated): `User.Read`, `Mail.Read`, `Mail.ReadWrite`, `Mail.Send` → copy the *Application (client) ID* into `.env` as `PERCH_MICROSOFT_CLIENT_ID` | 10 min |
 | **WhatsApp** (unofficial) | nothing beforehand: `perch whatsapp install` (or choosing WhatsApp in `perch setup`) downloads the pinned GOWA bridge from GitHub, checks its SHA-256, runs it as a systemd user service on 127.0.0.1 and stores it in Perch (Linux, asks first; manual way in `docs/SETUP.md` §4f.1a) | 2 min |
 
-Notes: Google sign-ins of a project in *Testing* expire after 7 days (reconnect then). WhatsApp via GOWA is an unofficial linked-device integration and can get the account restricted, more likely when sending.
+Notes: Google sign-ins of a project in *Testing* expire after 7 days (reconnect then: `perch google add` again updates the account's group). The Google services of one account share one login: revoking it (`perch google remove ggroup-… --revoke` or at myaccount.google.com) disconnects all of them. WhatsApp via GOWA is an unofficial linked-device integration and can get the account restricted, more likely when sending.
 
 ### 2. Install and connect the accounts (server)
 
@@ -144,8 +146,8 @@ perch setup
 
 `perch setup` creates the key, store and token, then asks service by service:
 
-- *Connect …?* → a label (e.g. Private, Work) → the login: Google, Outlook and Luma open a browser page; Notion and Slack tokens and the IMAP password are asked hidden; WhatsApp first offers to install the GOWA bridge if none is configured (warning and `[y/N]`, same as `perch whatsapp install`), then shows a pairing code for the phone (WhatsApp → Linked devices → Link with phone number).
-- *Access: read only, or read + write?* (Google, Gmail, Calendar, Outlook, IMAP) → choose `w` where Claude should be able to change things.
+- *Connect …?* → a label (e.g. Private, Work) → the login: Google (one step and one login for Drive, Gmail, Calendar and Contacts; asks which of them), Outlook and Luma open a browser page; Notion and Slack tokens and the IMAP password are asked hidden; WhatsApp first offers to install the GOWA bridge if none is configured (warning and `[y/N]`, same as `perch whatsapp install`), then shows a pairing code for the phone (WhatsApp → Linked devices → Link with phone number).
+- *Access: read only, or read + write?* (Google, Outlook, IMAP) → choose `w` where Claude should be able to change things.
 - At the end: *create a client with full access?* → it prints the ready-to-paste `claude mcp add` command.
 
 If the browser runs on your laptop, open a tunnel there before a browser login and keep it open: `ssh -N -L 8766:127.0.0.1:8766 <server>` (Luma: port 8768).
@@ -213,7 +215,7 @@ npm run smoke     # builds and tests dist/cli.js over stdio and HTTP
 | `src/store/` | encrypted credential store, lock |
 | `src/secureFs.ts` | permissions, symlinks, atomic writes |
 | `src/upstream.ts` | fixed origins, allowlist with capability tags, timeouts and size limits, sanitised errors |
-| `src/google/` | OAuth (loopback and PKCE), token refresh, Drive, Calendar, Contacts, productivity grant |
+| `src/google/` | OAuth (loopback and PKCE), token refresh, Drive, Calendar, Contacts, productivity grant, Google account groups (one login: `group.ts`, `groupStore.ts`) |
 | `src/notion/` | Notion (PAT, `Notion-Version: 2026-03-11`) |
 | `src/fanout.ts` | queries across several accounts, composite cursors, partial results |
 | `src/mcp/` | MCP tools, HTTP server |

@@ -155,7 +155,9 @@ export class DriveWriteService {
     if (!a.scopes.includes(DRIVE_SCOPE)) {
       throw new PerchError(
         `Google account ${a.id} was connected read-only at Google. To allow writes, reconnect it: ` +
-          `perch google remove ${a.id}, then perch google add --label "${a.label}" --allow-write`,
+          (a.groupId
+            ? `perch google add --label "${a.label}" --services drive --allow-write (updates group ${a.groupId}, same account ids)`
+            : `perch google remove ${a.id}, then perch google add --label "${a.label}" --services drive --allow-write`),
         'provider_scope_missing',
       );
     }

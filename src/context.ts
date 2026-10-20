@@ -1,5 +1,6 @@
 import { AuditLog } from './audit/audit.js';
 import { GoogleTokenProvider } from './google/accounts.js';
+import { googleGroupTokens } from './google/groupStore.js';
 import { CalendarService } from './google/calendar.js';
 import { ContactsService } from './google/contacts.js';
 import { DriveService } from './google/drive.js';
@@ -14,7 +15,7 @@ import { SendWorkflow } from './mail/workflow.js';
 import { MailWorkflowLedger } from './mail/workflowLedger.js';
 import { NotionService } from './notion/notion.js';
 import { SlackService } from './slack/slack.js';
-import type { CredentialStore, GmailAccount, GoogleProductivityAccount, LumaAccount, MicrosoftAccount } from './store/credentialStore.js';
+import type { CredentialStore, GmailAccount, GoogleAccountGroup, GoogleProductivityAccount, LumaAccount, MicrosoftAccount } from './store/credentialStore.js';
 import { createFetchTransport, Upstream, type UpstreamTransport } from './upstream.js';
 import { WhatsappService } from './whatsapp/whatsapp.js';
 import { LumaMcp } from './luma/client.js';
@@ -41,6 +42,8 @@ export interface PerchContext {
     microsoft: RefreshingTokenProvider<MicrosoftAccount>;
     productivity: RefreshingTokenProvider<GoogleProductivityAccount>;
     luma: RefreshingTokenProvider<LumaAccount>;
+    /** Shared logins of Google account groups; the drive, gmail and productivity providers delegate group members here. */
+    googleGroups: RefreshingTokenProvider<GoogleAccountGroup>;
   };
   /** Body-free audit trail of this namespace (in its mail workflow ledger), written by the MCP tool runner. */
   audit: AuditLog;
@@ -58,12 +61,14 @@ export function createPerchContext(
   lumaMcp?: LumaMcp,
 ): PerchContext {
   const upstream = new Upstream(transport);
-  const tokens = new GoogleTokenProvider(store, upstream);
+  // One login per Google account group: Drive, Gmail and Calendar/Contacts members share its cache and refresh.
+  const groupTokens = googleGroupTokens(store, upstream);
+  const tokens = new GoogleTokenProvider(store, upstream, Date.now, groupTokens);
   // One token provider for Calendar and Contacts: they share the account's single grant.
-  const productivityTokens = createProductivityTokenProvider(store, upstream);
+  const productivityTokens = createProductivityTokenProvider(store, upstream, Date.now, groupTokens);
   // One ledger per namespace: idempotent sends and the audit trail share mail-workflow.enc.
   const ledger = new MailWorkflowLedger(store);
-  const gmailTokens = createGmailTokenProvider(store, upstream);
+  const gmailTokens = createGmailTokenProvider(store, upstream, Date.now, groupTokens);
   const microsoftTokens = createMicrosoftTokenProvider(store, upstream);
   const audit = new AuditLog(ledger);
   // Slack and WhatsApp sends use the same idempotent workflow (and send-record ledger) as mail.
@@ -81,7 +86,7 @@ export function createPerchContext(
     slack: new SlackService(store, upstream, workflow, audit),
     whatsapp: new WhatsappService(store, upstream, workflow, audit),
     luma: new LumaService(store, workflow, audit, lumaTokens, lumaMcp ?? new LumaMcp()),
-    tokens: { drive: tokens, gmail: gmailTokens, microsoft: microsoftTokens, productivity: productivityTokens, luma: lumaTokens },
+    tokens: { drive: tokens, gmail: gmailTokens, microsoft: microsoftTokens, productivity: productivityTokens, luma: lumaTokens, googleGroups: groupTokens },
     audit,
   };
 }

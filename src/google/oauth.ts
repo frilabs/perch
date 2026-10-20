@@ -87,6 +87,11 @@ export interface LoopbackOptions {
   loginHint?: string;
   /** Requested scopes (default: drive.readonly). All of them must be granted. */
   scopes?: string[];
+  /**
+   * include_granted_scopes=true (incremental authorization): the new grant also covers what this OAuth client
+   * was granted for the account before. Only the unified `perch google add` sets it; the separate grants keep false.
+   */
+  includeGrantedScopes?: boolean;
   /** Replaces the default "every requested scope granted" check (e.g. for scope aliases like `email`). */
   verify?: (tok: GoogleTokenResponse) => AuthorizationResult;
   onAuthUrl: (url: string) => void;
@@ -106,7 +111,7 @@ export async function runLoopbackAuthorization(opts: LoopbackOptions): Promise<A
       scope: scopes.join(' '),
       access_type: 'offline',
       prompt: 'consent',
-      include_granted_scopes: 'false',
+      include_granted_scopes: opts.includeGrantedScopes ? 'true' : 'false',
       ...(opts.loginHint ? { login_hint: opts.loginHint } : {}),
     },
     redirectHost: '127.0.0.1',
@@ -130,6 +135,12 @@ export async function runLoopbackAuthorization(opts: LoopbackOptions): Promise<A
       return opts.verify ? opts.verify(tok) : assertUsableGrant(tok, scopes);
     },
   });
+}
+
+/** The OAuth client of a record that holds its own login (connected separately, not through an account group). */
+export function ownClient(a: { id: string; clientId?: string; clientSecret?: string }): GoogleClientCredentials {
+  if (!a.clientId || !a.clientSecret) throw new PerchError(`Account ${a.id} has no OAuth client of its own`, 'grant_invalid');
+  return { clientId: a.clientId, clientSecret: a.clientSecret };
 }
 
 export async function refreshAccessToken(

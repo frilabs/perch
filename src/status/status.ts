@@ -1,6 +1,7 @@
 import { PerchError, safeMessage } from '../errors.js';
 import type { PerchContext } from '../context.js';
 import { fetchDriveIdentity } from '../google/accounts.js';
+import { groupServices } from '../google/groupStore.js';
 import { fetchVerifiedIdentity } from '../google/productivity.js';
 import { fetchGmailIdentity } from '../mail/gmailAccounts.js';
 import { verifyImapAccount } from '../mail/imapAccounts.js';
@@ -52,7 +53,21 @@ export interface AccountStatus {
   connectedAt: string;
   /** Non-fatal advice, e.g. scopes of the current manifest that the stored token lacks. */
   hint?: string;
+  /** Google account group (one shared login) this account belongs to. */
+  groupId?: string;
   check?: CheckResult;
+}
+
+/** A Google account group: one login shared by its Drive, Gmail and Calendar/Contacts accounts. */
+export interface GoogleGroupStatus {
+  id: string;
+  label: string;
+  email: string;
+  /** Connected services in canonical order (drive, gmail, calendar, contacts). */
+  services: string[];
+  /** Member account ids (google-…, gmail-…, gprod-…). */
+  accountIds: string[];
+  connectedAt: string;
 }
 
 export interface StatusReport {
@@ -61,6 +76,8 @@ export interface StatusReport {
   namespace: string;
   checked: boolean;
   accounts: AccountStatus[];
+  /** Google account groups; their members are in `accounts` with `groupId`. */
+  googleGroups: GoogleGroupStatus[];
   clients: Array<{ id: string; label: string; capabilities: string[]; accountIds: string[]; full?: boolean; createdAt: string }>;
   whatsappBridge?: { origin: string; configuredAt: string };
   ledger: { sends: number; maxSends: number; pending: number; auditEvents: number; auditDropped: number; lastActivityAt?: string } | { error: string };
@@ -77,13 +94,16 @@ const short = (scope: string) => scope.replace(/^https:\/\/www\.googleapis\.com\
 
 function accountsOf(d: StoreData): AccountStatus[] {
   const rows: AccountStatus[] = [];
-  for (const a of d.google) rows.push({ family: 'drive', id: a.id, label: a.label, provider: 'google', identity: a.email, permissions: 'read', connectedAt: a.createdAt });
+  const group = (a: { groupId?: string }) => (a.groupId ? { groupId: a.groupId } : {});
+  for (const a of d.google) {
+    rows.push({ family: 'drive', id: a.id, label: a.label, provider: 'google', identity: a.email, permissions: a.scopes.includes('https://www.googleapis.com/auth/drive') ? 'read, write' : 'read', connectedAt: a.createdAt, ...group(a) });
+  }
   for (const w of d.notion) {
     rows.push({ family: 'notion', id: w.id, label: w.label, provider: 'notion', ...(w.tokenOwner?.name ? { identity: w.tokenOwner.name } : {}), permissions: 'read', connectedAt: w.createdAt });
   }
   for (const a of d.gmail) {
     const p = ['read', ...(a.scopes.some((s) => s.endsWith('gmail.compose')) ? ['draft'] : []), ...(a.scopes.some((s) => s.endsWith('gmail.send') || s.endsWith('gmail.compose')) ? ['send'] : [])];
-    rows.push({ family: 'mail', id: a.id, label: a.label, provider: 'gmail', identity: a.email, permissions: p.join(', '), connectedAt: a.createdAt });
+    rows.push({ family: 'mail', id: a.id, label: a.label, provider: 'gmail', identity: a.email, permissions: p.join(', '), connectedAt: a.createdAt, ...group(a) });
   }
   for (const a of d.microsoft) {
     const p = ['read', ...(a.scopes.includes('Mail.ReadWrite') ? ['draft'] : []), ...(a.scopes.includes('Mail.Send') ? ['send'] : [])];
@@ -95,7 +115,7 @@ function accountsOf(d: StoreData): AccountStatus[] {
   }
   for (const a of d.googleProductivity) {
     const p = [...a.services.map((s) => `${s} read`), ...(a.allowCalendarWrite ? ['calendar write'] : [])];
-    rows.push({ family: 'calendar', id: a.id, label: a.label, provider: 'google', identity: a.email, permissions: p.join(', '), connectedAt: a.createdAt });
+    rows.push({ family: 'calendar', id: a.id, label: a.label, provider: 'google', identity: a.email, permissions: p.join(', '), connectedAt: a.createdAt, ...group(a) });
   }
   for (const w of d.slack) {
     const p = [
@@ -265,6 +285,14 @@ export async function collectStatus(ctx: PerchContext, opts: StatusOptions = {})
     namespace: ctx.store.namespace,
     checked: live,
     accounts,
+    googleGroups: d.googleGroups.map((g) => ({
+      id: g.id,
+      label: g.label,
+      email: g.email,
+      services: groupServices(d, g.id),
+      accountIds: accounts.filter((a) => a.groupId === g.id).map((a) => a.id),
+      connectedAt: g.createdAt,
+    })),
     clients: d.clients.map((c) => ({ id: c.id, label: c.label, capabilities: [...c.capabilities], accountIds: [...c.accountIds], ...(c.full ? { full: true } : {}), createdAt: c.createdAt })),
     ...(d.whatsappInstance ? { whatsappBridge: { origin: d.whatsappInstance.origin, configuredAt: d.whatsappInstance.createdAt } } : {}),
     ledger: await ledgerStatus(ctx),
@@ -279,15 +307,25 @@ const day = (iso: string) => iso.slice(0, 10);
 /** Plain-text rendering for `perch status`. */
 export function formatStatusText(r: StatusReport): string {
   const lines = [`Perch ${r.version} · namespace ${r.namespace} · ${r.generatedAt.replace('T', ' ').slice(0, 16)} UTC${r.checked ? '' : ' · live checks skipped'}`, ''];
-  for (const family of Object.keys(FAMILY_TITLES) as AccountFamily[]) {
-    const rows = r.accounts.filter((a) => a.family === family);
-    lines.push(`${FAMILY_TITLES[family]}${rows.length ? '' : ': none'}`);
-    for (const a of rows) {
-      const mark = !a.check ? '·' : a.check.state === 'ok' ? '✓' : '✗';
-      const result = !a.check ? '' : a.check.state === 'ok' ? `  ok (${a.check.ms} ms)` : `  ERROR: ${a.check.message}`;
-      lines.push(`  ${mark} ${a.id}  "${a.label}"  ${a.identity ?? ''}  [${a.provider}: ${a.permissions}]  since ${day(a.connectedAt)}${result}`);
-      if (a.hint) lines.push(`      hint: ${a.hint}`);
+  const accountLine = (a: AccountStatus, indent: string) => {
+    const mark = !a.check ? '·' : a.check.state === 'ok' ? '✓' : '✗';
+    const result = !a.check ? '' : a.check.state === 'ok' ? `  ok (${a.check.ms} ms)` : `  ERROR: ${a.check.message}`;
+    lines.push(`${indent}${mark} ${a.id}  "${a.label}"  ${a.identity ?? ''}  [${a.provider}: ${a.permissions}]  since ${day(a.connectedAt)}${result}`);
+    if (a.hint) lines.push(`${indent}    hint: ${a.hint}`);
+  };
+  // Google account groups first: one login, the services as accounts below it.
+  if (r.googleGroups.length) {
+    lines.push('Google accounts (one login each)');
+    for (const g of r.googleGroups) {
+      lines.push(`  ${g.id}  "${g.label}"  ${g.email}  services: ${g.services.join(', ') || 'none'}  since ${day(g.connectedAt)}`);
+      for (const a of r.accounts.filter((x) => x.groupId === g.id)) accountLine(a, `    ${FAMILY_TITLES[a.family]}: `);
     }
+  }
+  for (const family of Object.keys(FAMILY_TITLES) as AccountFamily[]) {
+    const all = r.accounts.filter((a) => a.family === family);
+    const rows = all.filter((a) => !a.groupId);
+    lines.push(`${FAMILY_TITLES[family]}${rows.length ? '' : all.length ? ': only in Google account groups' : ': none'}`);
+    for (const a of rows) accountLine(a, '  ');
   }
   lines.push('', `Client grants${r.clients.length ? '' : ': none'}`);
   for (const c of r.clients) lines.push(c.full ? `  ${c.id}  "${c.label}"  FULL access → every account (also later ones)` : `  ${c.id}  "${c.label}"  ${c.capabilities.join(',')}  → ${c.accountIds.join(', ')}`);
