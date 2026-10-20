@@ -20,6 +20,7 @@ export type Service =
   | 'people'
   | 'openid'
   | 'slack'
+  | 'slackfiles'
   | 'gowa'
   | 'cimd'
   | 'telegram'
@@ -43,6 +44,8 @@ export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
   /** userinfo_endpoint of Google's OpenID Connect discovery document (hard-coded, never fetched). */
   openid: 'https://openidconnect.googleapis.com',
   slack: 'https://slack.com',
+  /** Slack file host: upload URLs from files.getUploadURLExternal and private file downloads (url_private_download). */
+  slackfiles: 'https://files.slack.com',
   /**
    * GOWA (self-hosted WhatsApp bridge) has no fixed origin: each call passes the configured instance
    * origin, which must pass validateGowaOrigin (loopback or a Tailscale address only). This placeholder
@@ -76,6 +79,7 @@ const SERVICE_NAMES: Record<Service, string> = {
   people: 'Google People API',
   openid: 'Google OpenID Connect',
   slack: 'Slack Web API',
+  slackfiles: 'Slack file host',
   gowa: 'WhatsApp bridge (GOWA)',
   cimd: 'OAuth client metadata document',
   telegram: 'Telegram Bot API',
@@ -109,6 +113,14 @@ const CONTACT_ID = 'c[0-9]{1,30}';
 /** Slack Web API ids: channels/groups/DMs (C/G/D…), message timestamps. */
 export const SLACK_CHANNEL_ID = /^[CGD][A-Z0-9]{2,30}$/;
 export const SLACK_TS = /^[0-9]{9,11}\.[0-9]{6}$/;
+/** Slack file ids (F…) and the opaque upload segment of files.getUploadURLExternal's upload_url. */
+export const SLACK_FILE_ID = /^F[A-Z0-9]{2,30}$/;
+export const SLACK_UPLOAD_PATH = /^\/upload\/v1\/[A-Za-z0-9_-]{1,2048}$/;
+/**
+ * url_private_download of a Slack file: /files-pri/<team>-<file>/download/<name> (or without "download/").
+ * The name may be percent-encoded but never an encoded '/', backslash or '.', and never contain '..'.
+ */
+export const SLACK_DOWNLOAD_PATH = /^\/files-pri\/[TE][A-Z0-9]{2,30}-(F[A-Z0-9]{2,30})\/(?:download\/)?(?!.*\.\.)(?!.*%(?:2[fFeE]|5[cC]))[A-Za-z0-9._~%()+-]{1,255}$/;
 /** WhatsApp JIDs Perch reads and writes to: people (phone or LID) and groups. Never status/newsletter/broadcast. */
 export const WHATSAPP_JID = /^(?:[0-9]{5,20}@s\.whatsapp\.net|[0-9]{5,20}@lid|[0-9]{5,20}(?:-[0-9]{5,20})?@g\.us)$/;
 const JID_PATH = '[0-9]{5,20}(?:-[0-9]{5,20})?%40(?:s\\.whatsapp\\.net|lid|g\\.us)';
@@ -198,7 +210,19 @@ const ROUTES: Record<Service, Route[]> = {
     ['GET', /^\/api\/conversations\.replies$/],
     ['GET', /^\/api\/users\.info$/],
     ['GET', /^\/api\/search\.messages$/],
+    ['GET', /^\/api\/files\.info$/],
     ['POST', /^\/api\/chat\.postMessage$/, 'slack_send'],
+    // Own messages only (Slack refuses others with cant_update_message). chat.delete, files.delete and
+    // files.sharedPublicURL are deliberately absent: Slack deletion is permanent, public links leak files.
+    ['POST', /^\/api\/chat\.update$/, 'slack_send'],
+    ['POST', /^\/api\/reactions\.add$/, 'slack_send'],
+    ['POST', /^\/api\/reactions\.remove$/, 'slack_send'],
+    ['POST', /^\/api\/files\.getUploadURLExternal$/, 'slack_send'],
+    ['POST', /^\/api\/files\.completeUploadExternal$/, 'slack_send'],
+  ],
+  slackfiles: [
+    ['GET', SLACK_DOWNLOAD_PATH],
+    ['POST', SLACK_UPLOAD_PATH, 'slack_send'],
   ],
   gowa: [
     ['GET', /^\/chats$/],

@@ -7,7 +7,7 @@ import { newAccountId, validateLabel } from '../ids.js';
 import type { SendWorkflow } from '../mail/workflow.js';
 import { messageSendStatus, sendMessageIdempotently, type MessageSendResult, type MessageSendView } from '../messaging/send.js';
 import type { CredentialStore, SlackWorkspace } from '../store/credentialStore.js';
-import { SLACK_CHANNEL_ID, SLACK_TS, UpstreamError, type Upstream } from '../upstream.js';
+import { SLACK_CHANNEL_ID, SLACK_DOWNLOAD_PATH, SLACK_FILE_ID, SLACK_TS, SLACK_UPLOAD_PATH, UpstreamError, type Upstream } from '../upstream.js';
 
 /**
  * Slack Web API with a user token (xoxp-…) per workspace. Each workspace uses its own internal app
@@ -31,6 +31,10 @@ export const SLACK_USER_SCOPES = [
   'users:read',
   'search:read',
   'chat:write',
+  'reactions:read',
+  'reactions:write',
+  'files:read',
+  'files:write',
 ] as const;
 
 export const DEFAULT_SLACK_PAGE_SIZE = 50;
@@ -38,6 +42,11 @@ export const MAX_SLACK_PAGE_SIZE = 200;
 export const MAX_SLACK_SEARCH_PAGE_SIZE = 100;
 /** Slack truncates longer messages; Perch refuses instead. */
 export const MAX_SLACK_TEXT = 40_000;
+/** Upper bound for slack_upload_file (decoded bytes) and slack_get_file downloads. */
+export const MAX_SLACK_FILE_BYTES = 10 * 1024 * 1024;
+export const DEFAULT_SLACK_FILE_READ_BYTES = 48 * 1024;
+export const MAX_SLACK_FILENAME = 255;
+export const SLACK_EMOJI_NAME = /^[a-z0-9_+-]{1,100}$/;
 export const CONVERSATION_TYPES = ['public_channel', 'private_channel', 'mpim', 'im'] as const;
 export type ConversationType = (typeof CONVERSATION_TYPES)[number];
 
@@ -230,6 +239,98 @@ interface RetryBudget {
 }
 
 const newBudget = (): RetryBudget => ({ remaining: MAX_RETRIES_PER_CALL, lookups: MAX_USER_LOOKUPS_PER_CALL });
+
+export interface SlackUploadRequest {
+  workspaceId: string;
+  channelId: string;
+  filename: string;
+  contentBase64: string;
+  title?: string;
+  initialComment?: string;
+  threadTs?: string;
+  requestId: string;
+}
+
+/** Standard base64 with padding (linear check; the length must also be a multiple of 4). */
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+
+function filenameOf(v: unknown): string {
+  if (typeof v !== 'string' || !v.trim() || v.length > MAX_SLACK_FILENAME || /[\u0000-\u001f\u007f/\\]/.test(v) || v === '.' || v === '..') {
+    throw new PerchError(`filename must be 1-${MAX_SLACK_FILENAME} characters without slashes or control characters`, 'bad_argument');
+  }
+  return v;
+}
+
+function optionalText(v: unknown, what: string, max: number): string | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== 'string' || !v.trim() || v.length > max) throw new PerchError(`${what} must be 1-${max} characters`, 'bad_argument');
+  return v;
+}
+
+function emojiOf(v: unknown): string {
+  if (typeof v !== 'string' || !SLACK_EMOJI_NAME.test(v)) throw new PerchError('emoji must be a Slack emoji name without colons, e.g. thumbsup or white_check_mark', 'bad_argument');
+  return v;
+}
+
+function fileIdOf(v: unknown): string {
+  if (typeof v !== 'string' || !SLACK_FILE_ID.test(v)) throw new PerchError('fileId must be a Slack file id (F…)', 'bad_argument');
+  return v;
+}
+
+/** Decodes strict base64 and enforces the size limit (checked on the encoded length first, before decoding). */
+function bytesOf(v: unknown): Buffer {
+  if (typeof v !== 'string' || !v) throw new PerchError('contentBase64 must not be empty', 'bad_argument');
+  if (v.length > Math.ceil(MAX_SLACK_FILE_BYTES / 3) * 4) throw new PerchError(`The file exceeds ${MAX_SLACK_FILE_BYTES} bytes`, 'bad_argument');
+  if (v.length % 4 !== 0 || !BASE64.test(v)) throw new PerchError('contentBase64 must be standard base64', 'bad_argument');
+  const bytes = Buffer.from(v, 'base64');
+  if (bytes.length === 0) throw new PerchError('The file is empty', 'bad_argument');
+  if (bytes.length > MAX_SLACK_FILE_BYTES) throw new PerchError(`The file exceeds ${MAX_SLACK_FILE_BYTES} bytes`, 'bad_argument');
+  return bytes;
+}
+
+/** upload_url from files.getUploadURLExternal: exactly https://files.slack.com/upload/v1/<opaque segment>. */
+function uploadPathOf(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || raw.length > 4096) return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== 'https:' || url.hostname !== 'files.slack.com' || url.port || url.username || url.password || url.search || url.hash) return undefined;
+  return SLACK_UPLOAD_PATH.test(url.pathname) ? url.pathname : undefined;
+}
+
+/** url_private_download of file `fileId`: exactly https://files.slack.com/files-pri/<team>-<fileId>/…. */
+function downloadPathOf(raw: unknown, fileId: string): string | undefined {
+  if (typeof raw !== 'string' || raw.length > 2048) return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== 'https:' || url.hostname !== 'files.slack.com' || url.port || url.username || url.password || url.search || url.hash) return undefined;
+  const m = SLACK_DOWNLOAD_PATH.exec(url.pathname);
+  return m && m[1] === fileId ? url.pathname : undefined;
+}
+
+function fileMeta(f: Raw) {
+  const str = (k: string, max = 500) => (typeof f[k] === 'string' ? { [k]: (f[k] as string).slice(0, max) } : {});
+  const created = typeof f.created === 'number' ? new Date(f.created * 1000).toISOString() : undefined;
+  return {
+    fileId: String(f.id),
+    ...(typeof f.name === 'string' ? { name: f.name.slice(0, 500) } : {}),
+    ...str('title'),
+    ...str('mimetype', 200),
+    ...str('filetype', 50),
+    ...(typeof f.size === 'number' ? { size: f.size } : {}),
+    ...(created ? { created } : {}),
+    ...(typeof f.user === 'string' ? { user: f.user } : {}),
+    ...(typeof f.is_external === 'boolean' ? { isExternal: f.is_external } : {}),
+    ...str('permalink', 1000),
+  };
+}
 
 export interface SlackSendRequest {
   workspaceId: string;
@@ -554,6 +655,224 @@ export class SlackService {
     return { ...this.prov(ws), ...rest, ...(ts ? { messageTs: ts } : {}) };
   }
 
+  private assertScope(ws: SlackWorkspace, scope: (typeof SLACK_USER_SCOPES)[number]): void {
+    if (!ws.scopes.includes(scope)) {
+      throw new PerchError(
+        `Workspace ${ws.id} was connected without the ${scope} scope. Reinstall the app with the new manifest (docs/slack-app-manifest.json) and run perch slack add again`,
+        'provider_scope_missing',
+      );
+    }
+  }
+
+  /**
+   * One plain (non-idempotent, harmless to repeat) write: grant for slack_send, then right before the call
+   * the grant, namespace guard and token scope are checked again against the stored state. No retries.
+   */
+  private async plainWrite(p: Principal, workspaceId: unknown, scope: (typeof SLACK_USER_SCOPES)[number], method: string, body: { json?: unknown; form?: Record<string, string> }): Promise<Raw> {
+    await this.guard?.();
+    if (typeof workspaceId !== 'string') throw new PerchError('workspaceId is required', 'bad_argument');
+    assertSlackCapability(p, workspaceId, 'slack_send');
+    this.assertScope(await this.workspace(workspaceId), scope);
+    await this.stillAllowed(p, workspaceId);
+    const ws = await this.workspace(workspaceId);
+    this.assertScope(ws, scope);
+    const res = await this.upstream.json<Raw>('slack', { method: 'POST', path: `/api/${method}`, capability: 'slack_send', headers: auth(ws.token), ...body });
+    return res;
+  }
+
+  /** Adds an emoji reaction as the token's user; an existing reaction counts as success. */
+  async addReaction(p: Principal, input: { workspaceId: string; channelId: string; ts: string; emoji: string }) {
+    const channel = channelIdOf(input?.channelId);
+    const ts = tsOf(input?.ts, 'ts');
+    const name = emojiOf(input?.emoji);
+    const body = await this.plainWrite(p, input?.workspaceId, 'reactions:write', 'reactions.add', { form: { channel, timestamp: ts, name } });
+    if (body.ok !== true && body.error !== 'already_reacted') throw slackFailure(body.error);
+    const ws = await this.workspace(input.workspaceId);
+    return { ...this.prov(ws), channelId: channel, ts, emoji: name, status: body.ok === true ? 'added' : 'already_present' };
+  }
+
+  /** Removes the token user's own emoji reaction; a missing reaction counts as success. */
+  async removeReaction(p: Principal, input: { workspaceId: string; channelId: string; ts: string; emoji: string }) {
+    const channel = channelIdOf(input?.channelId);
+    const ts = tsOf(input?.ts, 'ts');
+    const name = emojiOf(input?.emoji);
+    const body = await this.plainWrite(p, input?.workspaceId, 'reactions:write', 'reactions.remove', { form: { channel, timestamp: ts, name } });
+    if (body.ok !== true && body.error !== 'no_reaction') throw slackFailure(body.error);
+    const ws = await this.workspace(input.workspaceId);
+    return { ...this.prov(ws), channelId: channel, ts, emoji: name, status: body.ok === true ? 'removed' : 'not_present' };
+  }
+
+  /** Edits a message (chat.update). Slack only allows the token user's own messages. */
+  async editMessage(p: Principal, input: { workspaceId: string; channelId: string; ts: string; text: string }) {
+    const channel = channelIdOf(input?.channelId);
+    const ts = tsOf(input?.ts, 'ts');
+    if (typeof input?.text !== 'string' || !input.text.trim()) throw new PerchError('text must not be empty', 'bad_argument');
+    if (input.text.length > MAX_SLACK_TEXT) throw new PerchError(`text exceeds ${MAX_SLACK_TEXT} characters`, 'bad_argument');
+    const body = await this.plainWrite(p, input.workspaceId, 'chat:write', 'chat.update', { json: { channel, ts, text: input.text } });
+    if (body.ok !== true) {
+      if (body.error === 'cant_update_message' || body.error === 'edit_window_closed') {
+        throw new PerchError(
+          body.error === 'cant_update_message'
+            ? 'Slack refused the edit: only messages written by the connected user can be edited (cant_update_message)'
+            : 'Slack refused the edit: the workspace no longer allows editing this message (edit_window_closed)',
+          'provider_rejected',
+        );
+      }
+      throw slackFailure(body.error);
+    }
+    const ws = await this.workspace(input.workspaceId);
+    return { ...this.prov(ws), channelId: channel, ts, status: 'updated' };
+  }
+
+  /**
+   * Uploads a file and shares it into a conversation (files.getUploadURLExternal, POST bytes to the
+   * returned files.slack.com URL, files.completeUploadExternal). Idempotent per requestId like send().
+   * The file only becomes visible with the final step, so every failure before it means "not shared".
+   */
+  async uploadFile(p: Principal, req: SlackUploadRequest) {
+    let ws: SlackWorkspace | undefined;
+    let channel = '';
+    let bytes: Buffer = Buffer.alloc(0);
+    let threadTs: string | undefined;
+    let title: string | undefined;
+    let comment: string | undefined;
+    const view = await sendMessageIdempotently({
+      workflow: this.workflow,
+      audit: this.audit,
+      actor: actorOf(p),
+      provider: 'slack',
+      accountId: req?.workspaceId,
+      prepare: async () => {
+        await this.guard?.();
+        if (typeof req?.workspaceId !== 'string') throw new PerchError('workspaceId is required', 'bad_argument');
+        assertSlackCapability(p, req.workspaceId, 'slack_send');
+        ws = await this.workspace(req.workspaceId);
+        this.assertScope(ws, 'files:write');
+        channel = channelIdOf(req.channelId);
+        const filename = filenameOf(req.filename);
+        bytes = bytesOf(req.contentBase64);
+        title = optionalText(req.title, 'title', MAX_SLACK_FILENAME);
+        comment = optionalText(req.initialComment, 'initialComment', MAX_SLACK_TEXT);
+        threadTs = req.threadTs === undefined ? undefined : tsOf(req.threadTs, 'threadTs');
+        const digest = createHash('sha256').update(bytes).digest('hex');
+        const canonical = JSON.stringify(['perch-slack-upload-v1', ws.id, channel, filename, digest, title ?? null, comment ?? null, threadTs ?? null]);
+        return { accountId: ws.id, requestId: req.requestId, canonical, binding: bindingParts(ws) };
+      },
+      attempt: (binding) => this.uploadAttempt(p, req, { channel, bytes, threadTs, title, comment }, binding),
+    });
+    const { providerMessageId, ...rest } = view;
+    return { ...this.prov(ws!), ...rest, channelId: channel, ...(providerMessageId && SLACK_FILE_ID.test(providerMessageId) ? { fileId: providerMessageId } : {}) };
+  }
+
+  private async uploadAttempt(
+    p: Principal,
+    req: SlackUploadRequest,
+    f: { channel: string; bytes: Buffer; threadTs?: string; title?: string; comment?: string },
+    binding: string,
+  ): Promise<MessageSendResult> {
+    const notShared = (detail: string, reason: MessageSendResult['reason']): MessageSendResult => ({ status: 'rejected', detail: `Not shared: ${detail}`, reason });
+    try {
+      await this.stillAllowed(p, req.workspaceId);
+    } catch (err) {
+      return notShared(err instanceof PerchError ? err.message : 'the request is no longer authorised', 'not_submitted_authorization');
+    }
+    const current = (await this.store.read()).slack.find((w) => w.id === req.workspaceId);
+    if (!current || (await this.workflow.binding(bindingParts(current))) !== binding) {
+      return notShared('the workspace was removed or reconnected since this requestId was first used', 'not_submitted_account_changed');
+    }
+    try {
+      this.assertScope(current, 'files:write');
+    } catch (err) {
+      return notShared((err as PerchError).message, 'not_submitted_provider_precheck');
+    }
+    const failed = (step: string, err: unknown): MessageSendResult => {
+      if (err instanceof PerchError && err.code === 'route_not_allowed') return notShared(err.message, 'not_submitted_provider_precheck');
+      if (err instanceof UpstreamError) return notShared(`Slack refused ${step} (HTTP ${err.status})`, 'provider_rejected');
+      return notShared(`${step} failed before the file was shared`, 'provider_rejected');
+    };
+    // 1. Reserve an upload URL.
+    let fileId: string;
+    let uploadPath: string;
+    try {
+      const r = await this.upstream.json<Raw>('slack', {
+        method: 'POST',
+        path: '/api/files.getUploadURLExternal',
+        capability: 'slack_send',
+        headers: auth(current.token),
+        form: { filename: req.filename, length: String(f.bytes.length) },
+      });
+      if (r.ok !== true) return notShared(slackFailure(r.error).message, 'provider_rejected');
+      const path = uploadPathOf(r.upload_url);
+      if (!path || typeof r.file_id !== 'string' || !SLACK_FILE_ID.test(r.file_id)) {
+        return notShared('Slack returned an upload URL outside https://files.slack.com/upload/v1/; refusing to send the file there', 'not_submitted_provider_precheck');
+      }
+      fileId = r.file_id;
+      uploadPath = path;
+    } catch (err) {
+      return failed('the upload URL request', err);
+    }
+    // 2. Send the bytes (the pre-signed URL needs no token; the token never leaves slack.com).
+    try {
+      await this.upstream.raw('slackfiles', {
+        method: 'POST',
+        path: uploadPath,
+        capability: 'slack_send',
+        bytes: { contentType: 'application/octet-stream', data: f.bytes },
+        maxBytes: 64 * 1024,
+      });
+    } catch (err) {
+      return failed('the file upload', err);
+    }
+    // 3. Share it. From here on an unknown outcome is indeterminate.
+    let body: Raw;
+    try {
+      body = await this.upstream.json<Raw>('slack', {
+        method: 'POST',
+        path: '/api/files.completeUploadExternal',
+        capability: 'slack_send',
+        headers: auth(current.token),
+        form: {
+          files: JSON.stringify([{ id: fileId, title: f.title ?? req.filename }]),
+          channel_id: f.channel,
+          ...(f.threadTs ? { thread_ts: f.threadTs } : {}),
+          ...(f.comment ? { initial_comment: f.comment } : {}),
+        },
+      });
+    } catch (err) {
+      if (err instanceof UpstreamError && err.status < 500) return notShared(`Slack refused the request (HTTP ${err.status})`, 'provider_rejected');
+      if (err instanceof PerchError && err.code === 'route_not_allowed') return notShared(err.message, 'not_submitted_provider_precheck');
+      return { status: 'indeterminate', detail: 'The request to Slack failed after it may have been processed; the outcome is unknown.', reason: 'provider_unknown' };
+    }
+    if (body.ok !== true) return notShared(slackFailure(body.error).message, 'provider_rejected');
+    return { status: 'accepted', detail: 'File shared.', providerMessageId: fileId, reason: 'provider_accepted' };
+  }
+
+  /** File metadata (files.info) and, within maxBytes, its content as base64. Never truncates. */
+  async getFile(p: Principal, input: { workspaceId: string; fileId: string; maxBytes?: number }) {
+    const ws = await this.readable(p, input?.workspaceId);
+    this.assertScope(ws, 'files:read');
+    const fileId = fileIdOf(input.fileId);
+    const maxBytes = bounded('maxBytes', input.maxBytes, DEFAULT_SLACK_FILE_READ_BYTES, MAX_SLACK_FILE_BYTES);
+    const r = await this.call<{ file?: Raw }>(newBudget(), ws, 'files.info', { file: fileId });
+    const file = r.file ?? {};
+    if (file.id !== fileId) throw new PerchError('Slack returned a different file', 'upstream_bad_response');
+    const meta = fileMeta(file);
+    if (file.is_external === true || file.mode === 'tombstone' || file.mode === 'external') {
+      return { ...this.prov(ws), ...meta, content: null, note: 'This file has no downloadable content in Slack (external or deleted).' };
+    }
+    const path = downloadPathOf(file.url_private_download, fileId);
+    if (!path) throw new PerchError('Slack returned a download URL outside https://files.slack.com/files-pri/<team>-<file>/; refusing to fetch it', 'upstream_bad_response');
+    if (typeof file.size === 'number' && file.size > maxBytes) {
+      throw new PerchError(`The file has ${file.size} bytes, more than maxBytes (${maxBytes}); raise maxBytes (up to ${MAX_SLACK_FILE_BYTES}) to download it`, 'response_too_large');
+    }
+    const res = await this.upstream.raw('slackfiles', { method: 'GET', path, headers: { ...auth(ws.token), accept: '*/*' }, maxBytes });
+    const type = res.headers['content-type'] ?? '';
+    if (/^text\/html/i.test(type) && !/html/i.test(String(file.mimetype ?? ''))) {
+      throw new PerchError('Slack answered with a web page instead of the file (token lacks files:read or was revoked)', 'upstream_bad_response');
+    }
+    return { ...this.prov(ws), ...meta, contentBase64: res.body.toString('base64'), bytes: res.body.length };
+  }
+
   /** Workspaces visible to this principal (never tokens). */
   async listWorkspaces(p: Principal) {
     const data = await this.store.read();
@@ -566,6 +885,9 @@ export class SlackService {
         ...(w.userName ? { user: w.userName } : {}),
         canSearch: w.scopes.includes('search:read'),
         canPost: w.scopes.includes('chat:write'),
+        canReact: w.scopes.includes('reactions:write'),
+        canReadFiles: w.scopes.includes('files:read'),
+        canUploadFiles: w.scopes.includes('files:write'),
         granted: [...p.capabilities].filter((c) => c.startsWith('slack_')).sort(),
         connectedAt: w.createdAt,
       }));
