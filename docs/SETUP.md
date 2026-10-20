@@ -495,14 +495,18 @@ perch whatsapp remove ID --keep-device   # nur lokal entfernen
 
 ### 4f.3 Lesen und Senden
 
-- **Lesen** (`whatsapp_list_chats`, `whatsapp_get_messages`, `whatsapp_search`): globales Token und jeder Client mit `whatsapp_read`. Medien nur als Metadaten (Typ, Dateiname, Größe), keine Downloads.
-- **Senden** (`whatsapp_send_message`, `whatsapp_send_status`): nur Text, optional als Antwort, nur mit Client-Grant `whatsapp_send` und Pflichtfeld `requestId`:
+- **Lesen** (`whatsapp_list_chats`, `whatsapp_get_messages`, `whatsapp_search`): globales Token und jeder Client mit `whatsapp_read`. Medien erscheinen dort nur als Metadaten (Typ, Dateiname, Größe).
+- **Medien herunterladen** (`whatsapp_download_media`): globales Token und jeder Client mit `whatsapp_read`. Liefert die Datei einer Nachricht als Base64 mit MIME-Typ und Dateiname. Standardgrenze 48 KiB (`maxBytes`, höchstens 16 MiB); größere Dateien lehnt Perch ab, statt sie abzuschneiden. GOWA legt dabei eine Kopie unter `statics/media/…` auf seiner Platte ab; Perch liest nur diese Datei und nur von der konfigurierten GOWA-Adresse.
+- **Text senden** (`whatsapp_send_message`, `whatsapp_send_status`): nur Text, optional als Antwort, nur mit Client-Grant `whatsapp_send` und Pflichtfeld `requestId`:
 
   ```bash
   perch client add --label "Claude Code" --allow whatsapp_read,whatsapp_send --account whatsapp-1a2b3c4d
   ```
 
   Ergebnis `accepted` (von GOWA an WhatsApp übergeben), `rejected` (GOWA hat abgelehnt, nicht gesendet) oder `indeterminate` (Antwort verloren; nie automatisch wiederholt).
+- **Medien senden** (`whatsapp_send_media`): Bild, Video, Audio oder Datei (Dokument) als Base64, höchstens 16 MiB, optional mit Bildunterschrift (nicht bei Audio) oder als Antwort. Gleiche Regeln wie beim Text: nur mit `whatsapp_send` für das Konto, Pflichtfeld `requestId`, Status über `whatsapp_send_status`. Perch schickt nur die Datei selbst, nie eine URL (GOWA lädt also nichts aus dem Netz), und keine Zeitplanung oder Einmal-Ansicht.
+
+  **Achtung:** Medien zu senden erhöht das Risiko, dass WhatsApp das Konto einschränkt oder sperrt, noch stärker als Textnachrichten. Sparsam und nur an bekannte Kontakte verwenden.
 
 ## 4g. Luma über den offiziellen Luma-MCP (Luma-Meilenstein)
 

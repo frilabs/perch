@@ -111,7 +111,7 @@ describe('GOWA origin [mock bridge]', () => {
     expect(isAllowedRoute('gowa', 'DELETE', '/devices/perch-0123456789abcdef')).toBe(false);
     expect(isAllowedRoute('gowa', 'POST', '/devices/perch-0123456789abcdef/login/code', 'whatsapp_send')).toBe(false);
     expect(isAllowedRoute('gowa', 'POST', '/send/message', 'whatsapp_send')).toBe(true);
-    for (const p of ['/send/image', '/send/file', '/message/3EB0/revoke', '/message/3EB0/delete', '/group', '/user/my/contacts', '/app/logout', '/chat/1%40g.us/archive']) {
+    for (const p of ['/send/sticker', '/send/link', '/message/3EB0/revoke', '/message/3EB0/delete', '/group', '/user/my/contacts', '/app/logout', '/chat/1%40g.us/archive']) {
       expect(isAllowedRoute('gowa', 'POST', p, 'whatsapp_send')).toBe(false);
       expect(isAllowedRoute('gowa', 'GET', p)).toBe(false);
     }
