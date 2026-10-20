@@ -28,7 +28,7 @@ export type Service =
 /**
  * `admin` routes (GOWA device pairing/removal) are only ever passed by the local CLI, never by an MCP tool.
  */
-export type RouteCapability = 'read' | 'draft' | 'send' | 'calendar_write' | 'slack_send' | 'whatsapp_send' | 'admin' | 'notify';
+export type RouteCapability = 'read' | 'draft' | 'send' | 'calendar_write' | 'slack_send' | 'whatsapp_send' | 'admin' | 'notify' | 'drive_write' | 'notion_write' | 'mail_modify';
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
 export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
