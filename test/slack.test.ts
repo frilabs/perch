@@ -203,11 +203,13 @@ describe('Slack reads [mock Slack]', () => {
     expect(slack.calls.length).toBe(calls);
   });
 
-  it('allowlists only the read methods plus chat.postMessage behind slack_send', () => {
+  it('allowlists only the read methods plus the approved writes behind slack_send', () => {
     expect(isAllowedRoute('slack', 'GET', '/api/conversations.history')).toBe(true);
     expect(isAllowedRoute('slack', 'POST', '/api/chat.postMessage')).toBe(false);
     expect(isAllowedRoute('slack', 'POST', '/api/chat.postMessage', 'slack_send')).toBe(true);
-    for (const m of ['chat.delete', 'chat.update', 'conversations.create', 'conversations.invite', 'files.upload', 'admin.users.list']) {
+    expect(isAllowedRoute('slack', 'POST', '/api/chat.update')).toBe(false);
+    expect(isAllowedRoute('slack', 'POST', '/api/chat.update', 'slack_send')).toBe(true);
+    for (const m of ['chat.delete', 'files.delete', 'files.sharedPublicURL', 'conversations.create', 'conversations.invite', 'files.upload', 'admin.users.list']) {
       expect(isAllowedRoute('slack', 'POST', `/api/${m}`, 'slack_send')).toBe(false);
       expect(isAllowedRoute('slack', 'GET', `/api/${m}`)).toBe(false);
     }

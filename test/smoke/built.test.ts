@@ -23,7 +23,7 @@ import { CredentialStore } from '../../src/store/credentialStore.js';
 import { dummySecret, makeTempDirs, type TempDirs } from '../support/fixtures.js';
 
 /** Read-only tool count: every read tool (TOOL_NAMES) the global token sees. Write tools need a client grant. */
-const READ_ONLY_TOOLS = 32;
+const READ_ONLY_TOOLS = 33;
 
 const CLI = path.resolve('dist/cli.js');
 const GUARD = pathToFileURL(path.resolve('test/smoke/offlineGuard.mjs')).href;
