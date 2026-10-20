@@ -6,7 +6,7 @@ import { runCli, type CliIo } from '../src/cli/run.js';
 import { CredentialStore } from '../src/store/credentialStore.js';
 import type { UpstreamTransport } from '../src/upstream.js';
 import { dummySecret, makeTempDirs, type TempDirs } from './support/fixtures.js';
-import { MockGoogle } from './support/mockGoogle.js';
+import { MockGoogleUnified } from './support/mockGoogleUnified.js';
 import { MockNotion } from './support/mockNotion.js';
 
 let dirs: TempDirs;
@@ -93,10 +93,10 @@ describe('perch CLI', () => {
     expect(err.join('')).toMatch(/TTY/);
   });
 
-  it('google add runs the loopback flow and stores the account [mock Google]', async () => {
+  it('google add --services drive runs the loopback flow and stores a one-service group [mock Google]', async () => {
     await runCli(['init'], io());
-    const google = new MockGoogle();
-    const acct = google.addAccount('dummy.cli@example.test');
+    const google = new MockGoogleUnified();
+    const person = google.addPerson('dummy.cli@example.test');
     const clientFile = `${dirs.root}/client_secret_dummy.json`;
     const { writeFile } = await import('node:fs/promises');
     await writeFile(
@@ -116,26 +116,29 @@ describe('perch CLI', () => {
         if (m && !approved) {
           approved = true;
           const url = new URL(m[0]);
-          const code = google.approve(url.toString(), acct);
+          const code = google.approve(url.toString(), person);
           void fetch(`${url.searchParams.get('redirect_uri')}?code=${code}&state=${url.searchParams.get('state')}`);
         }
       },
     });
-    expect(await runCli(['google', 'add', '--label', 'Private', '--timeout', '10'], cliIo)).toBe(0);
-    expect(stderrLines.join('')).not.toContain(acct.refreshToken);
+    expect(await runCli(['google', 'add', '--label', 'Private', '--services', 'drive', '--timeout', '10'], cliIo)).toBe(0);
+    expect(stderrLines.join('')).not.toContain(person.refreshToken);
     const store = await CredentialStore.open({ dataDir: dirs.dataDir, keyFile: dirs.keyFile });
-    const [g] = (await store.read()).google;
-    expect(g).toMatchObject({ label: 'Private', email: 'dummy.cli@example.test', refreshToken: acct.refreshToken });
+    const data = await store.read();
+    expect(data.googleGroups[0]).toMatchObject({ label: 'Private', email: 'dummy.cli@example.test', refreshToken: person.refreshToken });
+    const [g] = data.google;
+    expect(g).toMatchObject({ label: 'Private', email: 'dummy.cli@example.test', groupId: data.googleGroups[0]!.id });
+    const token = person.refreshToken;
 
     out = [];
-    expect(await runCli(['google', 'remove', g!.id, '--revoke'], io({ transport }))).toBe(0);
-    expect(google.revoked).toEqual([acct.refreshToken]);
+    expect(await runCli(['google', 'remove', data.googleGroups[0]!.id, '--revoke'], io({ transport }))).toBe(0);
+    expect(google.revoked).toEqual([token]);
   });
 
   it('google add --allow-write requests and stores the full drive scope [mock Google]', async () => {
     await runCli(['init'], io());
-    const google = new MockGoogle({ grantedScope: 'https://www.googleapis.com/auth/drive' });
-    const acct = google.addAccount('dummy.write@example.test');
+    const google = new MockGoogleUnified();
+    const person = google.addPerson('dummy.write@example.test');
     const clientFile = `${dirs.root}/client_secret_dummy.json`;
     const { writeFile } = await import('node:fs/promises');
     await writeFile(clientFile, JSON.stringify({ installed: { client_id: dummySecret('CLIENT'), client_secret: dummySecret('CLIENT-SECRET') } }), { mode: 0o600 });
@@ -148,15 +151,15 @@ describe('perch CLI', () => {
         if (m && !requested) {
           const url = new URL(m[0]);
           requested = url.searchParams.get('scope') ?? '';
-          void fetch(`${url.searchParams.get('redirect_uri')}?code=${google.approve(url.toString(), acct)}&state=${url.searchParams.get('state')}`);
+          void fetch(`${url.searchParams.get('redirect_uri')}?code=${google.approve(url.toString(), person)}&state=${url.searchParams.get('state')}`);
         }
       },
     });
-    expect(await runCli(['google', 'add', '--label', 'Write', '--allow-write', '--timeout', '10'], cliIo)).toBe(0);
-    expect(requested).toBe('https://www.googleapis.com/auth/drive');
+    expect(await runCli(['google', 'add', '--label', 'Write', '--services', 'drive', '--allow-write', '--timeout', '10'], cliIo)).toBe(0);
+    expect(requested).toBe('openid email https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive');
     const store = await CredentialStore.open({ dataDir: dirs.dataDir, keyFile: dirs.keyFile });
-    expect((await store.read()).google[0]!.scopes).toEqual(['https://www.googleapis.com/auth/drive']);
-    expect(out.join('')).toMatch(/drive_write/);
+    expect((await store.read()).google[0]!.scopes).toEqual(['https://www.googleapis.com/auth/drive.readonly', 'https://www.googleapis.com/auth/drive']);
+    expect(out.join('')).toMatch(/client grant/);
   });
 
   it('serve --http fails closed without a token', async () => {

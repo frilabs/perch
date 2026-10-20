@@ -14,14 +14,46 @@ import { createLedgerFile } from '../mail/workflowLedger.js';
 import { decryptEnvelope, encryptEnvelope, generateKeyFileContents, parseKey } from './crypto.js';
 import { withFileLock } from './lock.js';
 
+export const GOOGLE_GROUP_ID_PATTERN = /^ggroup-[a-f0-9]{8}$/;
+
+/**
+ * Google account group (docs/GOOGLE_UNIFIED_SPEC.md): ONE Google login shared by the Drive (google-…), Gmail
+ * (gmail-…) and Calendar/Contacts (gprod-…) records of the same Google account. The OAuth client and the refresh
+ * token live only here (single source of truth); members carry `groupId` instead. `scopes` is everything Google
+ * reported for the grant at the last authorization (include_granted_scopes); members record the part they use.
+ */
+const GoogleAccountGroupSchema = z.object({
+  id: z.string().regex(GOOGLE_GROUP_ID_PATTERN),
+  label: z.string().min(1).max(100),
+  email: z.string().min(3).max(320),
+  /** OpenID Connect subject: stable Google account id, used to find the group again on re-add. */
+  sub: z.string().min(1).max(255),
+  clientId: z.string().min(1),
+  clientSecret: z.string().min(1),
+  refreshToken: z.string().min(1),
+  scopes: z.array(z.string()),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+/**
+ * Credentials of a Google member record: either its own (accounts connected separately, the only kind before
+ * account groups existed) or none plus `groupId` (the group holds them). Optional fields keep older stores valid;
+ * StoreDataSchema checks that exactly one of the two forms is used.
+ */
+const googleCredentialFields = {
+  groupId: z.string().regex(GOOGLE_GROUP_ID_PATTERN).optional(),
+  clientId: z.string().min(1).optional(),
+  clientSecret: z.string().min(1).optional(),
+  refreshToken: z.string().min(1).optional(),
+};
+
 const GoogleAccountSchema = z.object({
   id: z.string().regex(/^google-[a-f0-9]{8}$/),
   label: z.string().min(1).max(100),
   email: z.string().min(3),
   displayName: z.string().optional(),
-  clientId: z.string().min(1),
-  clientSecret: z.string().min(1),
-  refreshToken: z.string().min(1),
+  ...googleCredentialFields,
   scopes: z.array(z.string()),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -43,9 +75,7 @@ const GmailAccountSchema = z.object({
   id: z.string().regex(/^gmail-[a-f0-9]{8}$/),
   label: z.string().min(1).max(100),
   email: z.string().min(3),
-  clientId: z.string().min(1),
-  clientSecret: z.string().min(1),
-  refreshToken: z.string().min(1),
+  ...googleCredentialFields,
   scopes: z.array(z.string()),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -107,9 +137,7 @@ const GoogleProductivityAccountSchema = z.object({
   email: z.string().min(3).max(320),
   /** OpenID Connect subject: stable Google account id, used to detect duplicate grants. */
   sub: z.string().min(1).max(255),
-  clientId: z.string().min(1),
-  clientSecret: z.string().min(1),
-  refreshToken: z.string().min(1),
+  ...googleCredentialFields,
   scopes: z.array(z.string()),
   services: z.array(z.enum(['calendar', 'contacts'])).min(1),
   allowCalendarWrite: z.boolean(),
@@ -279,9 +307,29 @@ const StoreDataSchema = z.object({
   whatsapp: z.array(WhatsappAccountSchema).default([]),
   // Added by the Luma milestone.
   luma: z.array(LumaAccountSchema).default([]),
+  // Added by the unified Google onboarding (docs/GOOGLE_UNIFIED_SPEC.md).
+  googleGroups: z.array(GoogleAccountGroupSchema).default([]),
+}).superRefine((d, ctx) => {
+  const groups = new Set(d.googleGroups.map((g) => g.id));
+  if (groups.size !== d.googleGroups.length) ctx.addIssue({ code: 'custom', message: 'duplicate Google account group id' });
+  for (const [family, list] of [['google', d.google], ['gmail', d.gmail], ['googleProductivity', d.googleProductivity]] as const) {
+    const seen = new Set<string>();
+    for (const a of list as ReadonlyArray<{ id: string; groupId?: string; clientId?: string; clientSecret?: string; refreshToken?: string }>) {
+      if (a.groupId) {
+        // Single source of truth: a group member never carries its own credentials.
+        if (!groups.has(a.groupId)) ctx.addIssue({ code: 'custom', message: `${a.id} belongs to an unknown Google account group` });
+        if (a.clientId || a.clientSecret || a.refreshToken) ctx.addIssue({ code: 'custom', message: `${a.id} is a group member but stores its own credentials` });
+        if (seen.has(a.groupId)) ctx.addIssue({ code: 'custom', message: `two ${family} records in one Google account group` });
+        seen.add(a.groupId);
+      } else if (!a.clientId || !a.clientSecret || !a.refreshToken) {
+        ctx.addIssue({ code: 'custom', message: `${a.id} has no credentials` });
+      }
+    }
+  }
 });
 
 export type GoogleAccount = z.infer<typeof GoogleAccountSchema>;
+export type GoogleAccountGroup = z.infer<typeof GoogleAccountGroupSchema>;
 export type NotionWorkspace = z.infer<typeof NotionWorkspaceSchema>;
 export type GmailAccount = z.infer<typeof GmailAccountSchema>;
 export type MicrosoftAccount = z.infer<typeof MicrosoftAccountSchema>;
@@ -325,6 +373,7 @@ const emptyData = (): StoreData => ({
   slack: [],
   whatsapp: [],
   luma: [],
+  googleGroups: [],
   // initStore creates the ledger before the store, so a new store is born with it.
   mailWorkflowLedger: { createdAt: new Date().toISOString() },
 });

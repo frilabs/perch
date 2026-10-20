@@ -1,9 +1,11 @@
 import { PerchError } from '../errors.js';
 import { newAccountId, validateLabel } from '../ids.js';
-import { RefreshingTokenProvider } from '../oauth/tokenProvider.js';
+import { RefreshingTokenProvider, type SharedTokenSource } from '../oauth/tokenProvider.js';
 import type { CredentialStore, GoogleAccount } from '../store/credentialStore.js';
 import { UpstreamError, type Upstream } from '../upstream.js';
+import { detachGroupMember, revokeSeparateGrant, sharedGoogleLogin, sharedRevokeRefused, type SharedGrantHolder } from './groupStore.js';
 import {
+  ownClient,
   refreshAccessToken,
   revokeToken,
   type AuthorizationResult,
@@ -38,7 +40,9 @@ export async function registerGoogleAccount(
     const dup = data.google.find((g) => g.email.toLowerCase() === identity.email.toLowerCase());
     if (dup) {
       throw new PerchError(
-        `Google account ${identity.email} is already connected as ${dup.id} ("${dup.label}"). Remove it first to re-authorise.`,
+        dup.groupId
+          ? `Google account ${identity.email} is already connected as ${dup.id} in group ${dup.groupId}. To change its permissions run perch google add for the same account (updates the group).`
+          : `Google account ${identity.email} is already connected as ${dup.id} ("${dup.label}"). Remove it first to re-authorise.`,
         'duplicate_account',
       );
     }
@@ -60,29 +64,31 @@ export async function registerGoogleAccount(
   });
 }
 
-/** Removes the account locally. With `revoke`, also revokes the grant at Google first. */
+/**
+ * Removes the account locally. With `revoke`, also revokes the grant at Google first; refused while another stored
+ * login of the same Google account uses the same OAuth client (Google revokes the whole grant), unless `force`.
+ * A member of a Google account group only leaves its group (the shared login stays for the other services;
+ * revoking it is refused).
+ */
 export async function removeGoogleAccount(
   store: CredentialStore,
   upstream: Upstream,
   id: string,
-  opts: { revoke?: boolean },
-): Promise<{ revoked: boolean }> {
-  const account = (await store.read()).google.find((g) => g.id === id);
+  opts: { revoke?: boolean; force?: boolean },
+): Promise<{ revoked: boolean; alsoRevoked?: SharedGrantHolder[]; groupId?: string; groupRemoved?: boolean }> {
+  const data = await store.read();
+  const account = data.google.find((g) => g.id === id);
   if (!account) throw new PerchError(`Unknown Google account: ${id}`, 'unknown_account');
-  let revoked = false;
-  if (opts.revoke) {
-    try {
-      await revokeToken(upstream, account.refreshToken);
-      revoked = true;
-    } catch (err) {
-      // A token that is already invalid cannot be revoked; removal still proceeds.
-      if (!(err instanceof UpstreamError && err.status === 400)) throw err;
-    }
+  if (account.groupId) {
+    if (opts.revoke) throw sharedRevokeRefused(id, account.groupId);
+    const r = await store.update((data) => detachGroupMember(data, 'google', id));
+    return { revoked: false, groupId: r.groupId, groupRemoved: r.groupRemoved };
   }
+  const { revoked, alsoRevoked } = await revokeSeparateGrant(upstream, data, account, opts);
   await store.update((data) => {
     data.google = data.google.filter((g) => g.id !== id);
   });
-  return { revoked };
+  return { revoked, ...(alsoRevoked.length ? { alsoRevoked } : {}) };
 }
 
 /**
@@ -90,14 +96,16 @@ export async function removeGoogleAccount(
  * token returned by Google replaces the stored one; when Google omits it the old one is kept.
  */
 export class GoogleTokenProvider extends RefreshingTokenProvider<GoogleAccount> {
-  constructor(store: CredentialStore, upstream: Upstream, now: () => number = Date.now) {
+  /** `group` overrides the shared Google account group provider (default: the one of this store and upstream). */
+  constructor(store: CredentialStore, upstream: Upstream, now: () => number = Date.now, group?: SharedTokenSource) {
     super(
       store,
       {
         name: 'Google',
         list: (d) => d.google,
-        refresh: (a) => refreshAccessToken(upstream, a, a.refreshToken),
-        reconnect: (id) => `\`perch google remove ${id}\`, then \`perch google add --label <label>\``,
+        refresh: (a, rt) => refreshAccessToken(upstream, ownClient(a), rt),
+        reconnect: (id) => `\`perch google remove ${id}\`, then \`perch google add --label <label> --services drive\``,
+        shared: sharedGoogleLogin(store, upstream, group),
       },
       now,
     );

@@ -17,6 +17,7 @@ As of 2026-10-19 (`main` after PR #9). This is a completion checklist, **not a c
 | Write extensions (2026-10-20) | Drive create/edit/share/trash, Notion create/edit/trash/comments, mail organize + send drafts, Slack files/reactions/edit, WhatsApp media; all only with client grants, delete = trash only | `FULL_ACCESS_SPEC.md` (implemented subset) |
 | Public access over MCP OAuth | pairing windows, Google login + Perch code (TOTP), kill switch; two independent reviews | `PUBLIC_ACCESS_SPEC.md`, `SETUP.md` §6a |
 | Mail reply/forward, calendar invitations/series/delete, Slack DMs/scheduled (2026-10-20) | `mail_reply`, `mail_forward`, IMAP Sent copy; `calendar_invite`, `calendar_delete_event` (permanent), `calendar_respond_event`, RRULE, Meet; `slack_open_conversation`, `slack_schedule_message` | `MAIL_CALENDAR_SLACK_SPEC.md` |
+| One Google login (2026-10-21) | `perch google add` connects Drive, Gmail, Calendar and Contacts with one OAuth flow; account groups share one stored refresh token; granular consent; re-add updates in place | `GOOGLE_UNIFIED_SPEC.md`, `SETUP.md` §3 |
 | OSS licence | MIT, third-party notices, `npm run licenses:check` | `OSS_LICENSE_MILESTONE.md` |
 | User isolation | **removed** on purpose (one operator per installation) | `USER_ISOLATION_MILESTONE.md` (historical) |
 
@@ -26,6 +27,7 @@ Follow the README live test. Points that only a live run can answer:
 
 - Every connector once with a real account: Drive, Notion, Gmail, Outlook, GMX, Calendar/Contacts, Slack, WhatsApp/GOWA, Luma.
 - Google: refresh tokens expire after 7 days while the consent screen is in "Testing".
+- Google one login (`perch google add`): granular consent (unticking single scopes on the consent screen; is the token response `scope` exactly what was ticked?), `include_granted_scopes=true` (does the new grant report the earlier scopes of the same OAuth client, also those of separately connected Gmail/Calendar accounts; does a refresh return the combined `scope`?), whether re-adding the same account issues a new refresh token and keeps the old one valid, and whether one revoke really ends Drive, Gmail and Calendar access together.
 - WhatsApp: does the session stay stable with GOWA's daily presence pulse; actual history after pairing.
 - Luma: registration type (DCR or CIMD at `https://frilabs.dev/perch/luma-client.json`), refresh behaviour, the real tool list, response formats of `get_self` and `list_guests`, whether redirect URIs without port are accepted.
 - Public access: does claude.ai keep the up-to-10-minute pairing open; which CIMD URL the hosted Claude apps send; does Funnel pass the client IP (only then `PERCH_PUBLIC_TRUST_FORWARDED=on`); how Codex signs in.

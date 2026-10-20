@@ -151,7 +151,8 @@ function bindingParts(e: Entry): string[] {
   const base = [e.kind, e.account.id, e.account.email.toLowerCase(), e.account.createdAt];
   switch (e.kind) {
     case 'gmail':
-      return [...base, e.account.clientId];
+      // Members of a Google account group are bound to their group (the group holds the OAuth client).
+      return [...base, e.account.clientId ?? `group:${e.account.groupId ?? ''}`];
     case 'microsoft':
       return [...base, e.account.clientId, e.account.tenant];
     case 'imap': {
@@ -413,7 +414,9 @@ export class MailService {
     const caps = this.providerCaps(e);
     if (what === 'send_draft' ? caps.sendDraft : caps[what]) return;
     const id = e.account.id;
-    const reconnect = (opt: string) => RECONNECT[e.kind](id, opt);
+    const groupId = e.kind === 'gmail' ? e.account.groupId : undefined;
+    // A Google account group keeps its ids: re-adding the same Google account updates it in place.
+    const reconnect = (opt: string) => (groupId ? `perch google add --label <label> --services gmail ${opt} (updates group ${groupId})` : RECONNECT[e.kind](id, opt));
     const message = {
       send: `Account ${id} was not authorised to send at the provider. Reconnect with send permission: ${reconnect('--allow-send')}`,
       draft: `Account ${id} was not authorised for drafts at the provider. Reconnect: ${reconnect('--allow-drafts')}`,

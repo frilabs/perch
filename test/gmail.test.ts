@@ -106,7 +106,7 @@ describe('createGmailTokenProvider [MOCK token endpoint at oauth2.googleapis.com
     acct.refreshToken = dummySecret('REVOKED-ELSEWHERE');
     const err = await rejection(createGmailTokenProvider(store, new Upstream(gmail.transport)).getAccessToken(a.id));
     expect(err.message).toContain(`perch gmail remove ${a.id}`);
-    expect(err.message).toContain('perch gmail add --label <label>');
+    expect(err.message).toContain('perch google add --label <label> --services gmail');
     expect(err.message).not.toContain('$(touch x)');
     expect(err.message).not.toContain(stored);
   });
