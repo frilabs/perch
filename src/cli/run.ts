@@ -607,7 +607,7 @@ async function cmdSlack(config: PerchConfig, io: CliIo, sub: string | undefined,
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
   const token = await io.readSecret(`Slack user token (xoxp-…) for "${values.label}" (input hidden): `);
   const ws = await addSlackWorkspace(store, new Upstream(io.transport ?? createFetchTransport()), { label: values.label, token });
-  const missing = ['search:read', 'chat:write', 'reactions:read', 'reactions:write', 'files:read', 'files:write'].filter((s) => !ws.scopes.includes(s));
+  const missing = ['search:read', 'chat:write', 'reactions:read', 'reactions:write', 'files:read', 'files:write', 'im:write', 'mpim:write'].filter((s) => !ws.scopes.includes(s));
   io.stdout(
     `Connected Slack workspace ${ws.id} "${ws.label}" (${ws.teamName ?? ws.teamId}, user ${ws.userName ?? ws.userId}).\n` +
       (missing.length

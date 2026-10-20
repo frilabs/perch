@@ -7,6 +7,7 @@ import { verifyImapAccount } from '../mail/imapAccounts.js';
 import { MAX_SEND_RECORDS, MailWorkflowLedger } from '../mail/workflowLedger.js';
 import { fetchMicrosoftIdentity } from '../microsoft/accounts.js';
 import { NOTION_VERSION } from '../notion/notion.js';
+import { SLACK_USER_SCOPES } from '../slack/slack.js';
 import { ROOT_NAMESPACE, type ImapAccount, type StoreData } from '../store/credentialStore.js';
 import { expireDevices, isPublicLocked, OAuthStore } from '../access/state.js';
 import { PERCH_VERSION } from '../version.js';
@@ -49,6 +50,8 @@ export interface AccountStatus {
   /** Provider permissions in plain words, e.g. "read, send". */
   permissions: string;
   connectedAt: string;
+  /** Non-fatal advice, e.g. scopes of the current manifest that the stored token lacks. */
+  hint?: string;
   check?: CheckResult;
 }
 
@@ -95,8 +98,26 @@ function accountsOf(d: StoreData): AccountStatus[] {
     rows.push({ family: 'calendar', id: a.id, label: a.label, provider: 'google', identity: a.email, permissions: p.join(', '), connectedAt: a.createdAt });
   }
   for (const w of d.slack) {
-    const p = ['read', ...(w.scopes.includes('search:read') ? ['search'] : []), ...(w.scopes.includes('chat:write') ? ['post'] : [])];
-    rows.push({ family: 'slack', id: w.id, label: w.label, provider: 'slack', identity: [w.teamName ?? w.teamId, w.userName].filter(Boolean).join(' / '), permissions: p.join(', '), connectedAt: w.createdAt });
+    const p = [
+      'read',
+      ...(w.scopes.includes('search:read') ? ['search'] : []),
+      ...(w.scopes.includes('chat:write') ? ['post'] : []),
+      ...(w.scopes.includes('im:write') || w.scopes.includes('mpim:write') ? ['open dm'] : []),
+    ];
+    // Scopes as Slack reported them at connect time (x-oauth-scopes); a missing one is a hint, not a failure.
+    const missing = SLACK_USER_SCOPES.filter((s) => !w.scopes.includes(s));
+    rows.push({
+      family: 'slack',
+      id: w.id,
+      label: w.label,
+      provider: 'slack',
+      identity: [w.teamName ?? w.teamId, w.userName].filter(Boolean).join(' / '),
+      permissions: p.join(', '),
+      connectedAt: w.createdAt,
+      ...(missing.length
+        ? { hint: `token lacks ${missing.join(', ')}: reinstall the app with the current manifest (perch slack manifest), then perch slack remove ${w.id} and perch slack add` }
+        : {}),
+    });
   }
   for (const a of d.whatsapp) {
     const number = a.jid?.split('@')[0]?.split(':')[0];
@@ -265,6 +286,7 @@ export function formatStatusText(r: StatusReport): string {
       const mark = !a.check ? '·' : a.check.state === 'ok' ? '✓' : '✗';
       const result = !a.check ? '' : a.check.state === 'ok' ? `  ok (${a.check.ms} ms)` : `  ERROR: ${a.check.message}`;
       lines.push(`  ${mark} ${a.id}  "${a.label}"  ${a.identity ?? ''}  [${a.provider}: ${a.permissions}]  since ${day(a.connectedAt)}${result}`);
+      if (a.hint) lines.push(`      hint: ${a.hint}`);
     }
   }
   lines.push('', `Client grants${r.clients.length ? '' : ': none'}`);

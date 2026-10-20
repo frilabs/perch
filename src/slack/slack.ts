@@ -4,7 +4,7 @@ import { assertSlackCapability, currentPrincipal, type Principal } from '../auth
 import { PerchError } from '../errors.js';
 import { fanOut, type FanOutResult } from '../fanout.js';
 import { newAccountId, validateLabel } from '../ids.js';
-import type { SendWorkflow } from '../mail/workflow.js';
+import { validateRequestId, type SendWorkflow } from '../mail/workflow.js';
 import { messageSendStatus, sendMessageIdempotently, type MessageSendResult, type MessageSendView } from '../messaging/send.js';
 import type { CredentialStore, SlackWorkspace } from '../store/credentialStore.js';
 import { SLACK_CHANNEL_ID, SLACK_DOWNLOAD_PATH, SLACK_FILE_ID, SLACK_TS, SLACK_UPLOAD_PATH, UpstreamError, type Upstream } from '../upstream.js';
@@ -14,8 +14,9 @@ import { SLACK_CHANNEL_ID, SLACK_DOWNLOAD_PATH, SLACK_FILE_ID, SLACK_TS, SLACK_U
  * (docs/slack-app-manifest.json): internal apps keep Slack's normal rate tiers for conversations.history
  * and conversations.replies, which commercially distributed non-Marketplace apps do not.
  *
- * Reads are plain allowlisted GETs. Posting (chat.postMessage) needs a client grant with slack_send for
- * the workspace and goes through the idempotent send workflow (src/messaging/send.ts).
+ * Reads are plain allowlisted GETs. Posting (chat.postMessage) and scheduling (chat.scheduleMessage) need a
+ * client grant with slack_send for the workspace and go through the idempotent send workflow
+ * (src/messaging/send.ts).
  */
 
 /** User-token scopes of the bundled manifest (docs/slack-app-manifest.json). */
@@ -35,6 +36,8 @@ export const SLACK_USER_SCOPES = [
   'reactions:write',
   'files:read',
   'files:write',
+  'im:write',
+  'mpim:write',
 ] as const;
 
 export const DEFAULT_SLACK_PAGE_SIZE = 50;
@@ -47,6 +50,15 @@ export const MAX_SLACK_FILE_BYTES = 10 * 1024 * 1024;
 export const DEFAULT_SLACK_FILE_READ_BYTES = 48 * 1024;
 export const MAX_SLACK_FILENAME = 255;
 export const SLACK_EMOJI_NAME = /^[a-z0-9_+-]{1,100}$/;
+/** conversations.open: 1 user = DM, 2-8 users = group DM (Slack's limit for multi-person DMs). */
+export const MAX_SLACK_GROUP_DM_USERS = 8;
+/** chat.scheduleMessage window enforced by Perch (Slack allows up to 120 days ahead). */
+export const MIN_SCHEDULE_LEAD_SECONDS = 60;
+export const MAX_SCHEDULE_AHEAD_SECONDS = 120 * 24 * 60 * 60;
+export const DEFAULT_SCHEDULED_PAGE_SIZE = 50;
+export const MAX_SCHEDULED_PAGE_SIZE = 100;
+/** Slack scheduled message ids (Q…). */
+export const SLACK_SCHEDULED_ID = /^Q[A-Z0-9]{2,30}$/;
 export const CONVERSATION_TYPES = ['public_channel', 'private_channel', 'mpim', 'im'] as const;
 export type ConversationType = (typeof CONVERSATION_TYPES)[number];
 
@@ -332,6 +344,49 @@ function fileMeta(f: Raw) {
   };
 }
 
+/** 1-8 distinct Slack user ids (U…/W…) for conversations.open. */
+function usersOf(v: unknown): string[] {
+  if (!Array.isArray(v) || v.length < 1 || v.length > MAX_SLACK_GROUP_DM_USERS) {
+    throw new PerchError(`users must list 1 (DM) to ${MAX_SLACK_GROUP_DM_USERS} (group DM) Slack user ids`, 'bad_argument');
+  }
+  for (const u of v) if (typeof u !== 'string' || !SLACK_USER.test(u)) throw new PerchError('users must be Slack user ids (U… or W…), e.g. from slack_get_history', 'bad_argument');
+  if (new Set(v).size !== v.length) throw new PerchError('users must not contain duplicates', 'bad_argument');
+  return v as string[];
+}
+
+const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
+
+/** postAt as Unix seconds (integer) or RFC 3339 with offset, normalised to whole Unix seconds (format only). */
+function postAtOf(v: unknown): number {
+  if (typeof v === 'number') {
+    if (!Number.isSafeInteger(v) || v <= 0) throw new PerchError('postAt must be whole Unix seconds or an RFC 3339 timestamp with offset', 'bad_argument');
+    return v;
+  }
+  if (typeof v === 'string' && /^\d{9,11}$/.test(v)) return Number(v);
+  if (typeof v !== 'string' || !RFC3339.test(v)) {
+    throw new PerchError('postAt must be Unix seconds or an RFC 3339 timestamp with offset, e.g. 2026-10-21T09:00:00+02:00', 'bad_argument');
+  }
+  const ms = Date.parse(v);
+  if (!Number.isFinite(ms)) throw new PerchError('postAt is not a valid time', 'bad_argument');
+  return Math.floor(ms / 1000);
+}
+
+/** Throws unless postAt is at least 60 s and at most 120 days ahead of now. */
+function assertScheduleWindow(postAt: number, nowMs: number): void {
+  const now = Math.floor(nowMs / 1000);
+  if (postAt < now + MIN_SCHEDULE_LEAD_SECONDS) throw new PerchError(`postAt must be at least ${MIN_SCHEDULE_LEAD_SECONDS} seconds in the future`, 'bad_argument');
+  if (postAt > now + MAX_SCHEDULE_AHEAD_SECONDS) throw new PerchError('postAt must be at most 120 days in the future', 'bad_argument');
+}
+
+export interface SlackScheduleRequest {
+  workspaceId: string;
+  channelId: string;
+  text: string;
+  postAt: number | string;
+  threadTs?: string;
+  requestId: string;
+}
+
 export interface SlackSendRequest {
   workspaceId: string;
   channelId: string;
@@ -344,6 +399,7 @@ export interface SlackSendRequest {
 export class SlackService {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly guard?: () => Promise<void>;
+  private readonly now: () => number;
   private readonly users = new Map<string, string>();
 
   constructor(
@@ -351,10 +407,11 @@ export class SlackService {
     private readonly upstream: Upstream,
     private readonly workflow: SendWorkflow,
     private readonly audit: AuditLog,
-    opts: { sleep?: (ms: number) => Promise<void>; guard?: () => Promise<void> } = {},
+    opts: { sleep?: (ms: number) => Promise<void>; guard?: () => Promise<void>; now?: () => number } = {},
   ) {
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.guard = opts.guard;
+    this.now = opts.now ?? Date.now;
   }
 
   private async workspace(id: unknown): Promise<SlackWorkspace> {
@@ -873,6 +930,169 @@ export class SlackService {
     return { ...this.prov(ws), ...meta, contentBase64: res.body.toString('base64'), bytes: res.body.length };
   }
 
+  /**
+   * Opens (or finds) a DM with one user or a group DM with 2-8 users (conversations.open) and returns its
+   * id for slack_send_message / slack_schedule_message. Posts nothing; repeating it returns the same id.
+   */
+  async openConversation(p: Principal, input: { workspaceId: string; users: string[] }) {
+    const users = usersOf(input?.users);
+    const group = users.length > 1;
+    const body = await this.plainWrite(p, input?.workspaceId, group ? 'mpim:write' : 'im:write', 'conversations.open', {
+      form: { users: users.join(','), return_im: 'false' },
+    });
+    if (body.ok !== true) {
+      if (body.error === 'user_not_found' || body.error === 'user_not_visible' || body.error === 'user_disabled') {
+        throw new PerchError(`Slack refused: at least one user cannot be messaged (${String(body.error)})`, 'provider_rejected');
+      }
+      throw slackFailure(body.error);
+    }
+    const channel = (body.channel ?? {}) as Raw;
+    if (typeof channel.id !== 'string' || !SLACK_CHANNEL_ID.test(channel.id)) throw new PerchError('Slack returned an unexpected conversation id', 'upstream_bad_response');
+    const ws = await this.workspace(input.workspaceId);
+    return {
+      ...this.prov(ws),
+      channelId: channel.id,
+      type: group ? 'mpim' : 'im',
+      users,
+      alreadyOpen: body.already_open === true,
+    };
+  }
+
+  /**
+   * Schedules a message (chat.scheduleMessage) as the token's user, idempotent per requestId like send().
+   * postAt must be 60 s to 120 days ahead; a replay of a stored requestId is answered from the ledger even
+   * after that window has passed.
+   */
+  async scheduleMessage(p: Principal, req: SlackScheduleRequest) {
+    let ws: SlackWorkspace | undefined;
+    let channel = '';
+    let postAt = 0;
+    let threadTs: string | undefined;
+    const actor = actorOf(p);
+    const view = await sendMessageIdempotently({
+      workflow: this.workflow,
+      audit: this.audit,
+      actor,
+      provider: 'slack',
+      accountId: req?.workspaceId,
+      prepare: async () => {
+        await this.guard?.();
+        if (typeof req?.workspaceId !== 'string') throw new PerchError('workspaceId is required', 'bad_argument');
+        assertSlackCapability(p, req.workspaceId, 'slack_send');
+        ws = await this.workspace(req.workspaceId);
+        this.assertCanPost(ws);
+        channel = channelIdOf(req.channelId);
+        if (typeof req.text !== 'string' || !req.text.trim()) throw new PerchError('text must not be empty', 'bad_argument');
+        if (req.text.length > MAX_SLACK_TEXT) throw new PerchError(`text exceeds ${MAX_SLACK_TEXT} characters`, 'bad_argument');
+        postAt = postAtOf(req.postAt);
+        threadTs = req.threadTs === undefined ? undefined : tsOf(req.threadTs, 'threadTs');
+        try {
+          assertScheduleWindow(postAt, this.now());
+        } catch (err) {
+          // Outside the window: only a requestId that already has a record may continue (replay or conflict).
+          const { key } = await this.workflow.ids(actor, ws.id, validateRequestId(req.requestId));
+          if (!(await this.workflow.lookup(key))) throw err;
+        }
+        const canonical = JSON.stringify(['perch-slack-schedule-v1', ws.id, channel, req.text, postAt, threadTs ?? null]);
+        return { accountId: ws.id, requestId: req.requestId, canonical, binding: bindingParts(ws) };
+      },
+      attempt: (binding) => this.scheduleAttempt(p, req, { channel, postAt, threadTs }, binding),
+    });
+    const { providerMessageId, ...rest } = view;
+    return {
+      ...this.prov(ws!),
+      ...rest,
+      channelId: channel,
+      postAt: new Date(postAt * 1000).toISOString(),
+      ...(providerMessageId && SLACK_SCHEDULED_ID.test(providerMessageId) ? { scheduledMessageId: providerMessageId } : {}),
+    };
+  }
+
+  private async scheduleAttempt(p: Principal, req: SlackScheduleRequest, m: { channel: string; postAt: number; threadTs?: string }, binding: string): Promise<MessageSendResult> {
+    const notScheduled = (detail: string, reason: MessageSendResult['reason']): MessageSendResult => ({ status: 'rejected', detail: `Not scheduled: ${detail}`, reason });
+    try {
+      await this.stillAllowed(p, req.workspaceId);
+    } catch (err) {
+      return notScheduled(err instanceof PerchError ? err.message : 'the request is no longer authorised', 'not_submitted_authorization');
+    }
+    const current = (await this.store.read()).slack.find((w) => w.id === req.workspaceId);
+    if (!current || (await this.workflow.binding(bindingParts(current))) !== binding) {
+      return notScheduled('the workspace was removed or reconnected since this requestId was first used', 'not_submitted_account_changed');
+    }
+    try {
+      this.assertCanPost(current);
+      assertScheduleWindow(m.postAt, this.now());
+    } catch (err) {
+      return notScheduled((err as PerchError).message, 'not_submitted_provider_precheck');
+    }
+    let body: Raw;
+    try {
+      body = await this.upstream.json<Raw>('slack', {
+        method: 'POST',
+        path: '/api/chat.scheduleMessage',
+        capability: 'slack_send',
+        headers: auth(current.token),
+        form: { channel: m.channel, text: req.text, post_at: String(m.postAt), ...(m.threadTs ? { thread_ts: m.threadTs } : {}) },
+      });
+    } catch (err) {
+      if (err instanceof UpstreamError && err.status < 500) return notScheduled(`Slack refused the request (HTTP ${err.status})`, 'provider_rejected');
+      if (err instanceof PerchError && err.code === 'route_not_allowed') return notScheduled(err.message, 'not_submitted_provider_precheck');
+      return { status: 'indeterminate', detail: 'The request to Slack failed after it may have been processed; the outcome is unknown.', reason: 'provider_unknown' };
+    }
+    if (body.ok !== true) return notScheduled(slackFailure(body.error).message, 'provider_rejected');
+    const id = typeof body.scheduled_message_id === 'string' && SLACK_SCHEDULED_ID.test(body.scheduled_message_id) ? body.scheduled_message_id : undefined;
+    return {
+      status: 'accepted',
+      detail: id ? 'Scheduled.' : 'Scheduled, but Slack returned no usable scheduled message id; find it with slack_list_scheduled_messages.',
+      ...(id ? { providerMessageId: id } : {}),
+      reason: 'provider_accepted',
+    };
+  }
+
+  /** Messages scheduled by this workspace's app and user that Slack has not posted yet (chat.scheduledMessages.list). */
+  async listScheduledMessages(p: Principal, input: { workspaceId: string; channelId?: string; pageSize?: number; cursor?: string }) {
+    const ws = await this.readable(p, input?.workspaceId);
+    const channel = input.channelId === undefined ? undefined : channelIdOf(input.channelId);
+    const pageSize = bounded('pageSize', input.pageSize, DEFAULT_SCHEDULED_PAGE_SIZE, MAX_SCHEDULED_PAGE_SIZE);
+    const kind = `slack-scheduled:${ws.id}:${channel ?? ''}`;
+    const r = await this.call<{ scheduled_messages?: Raw[]; response_metadata?: { next_cursor?: string } }>(newBudget(), ws, 'chat.scheduledMessages.list', {
+      channel,
+      limit: pageSize,
+      cursor: input.cursor ? this.store.openCursor(kind, input.cursor) : undefined,
+    });
+    const messages = (r.scheduled_messages ?? [])
+      .filter((m) => typeof m.id === 'string' && SLACK_SCHEDULED_ID.test(m.id) && (!channel || m.channel_id === channel))
+      .slice(0, pageSize)
+      .map((m) => ({
+        scheduledMessageId: String(m.id),
+        ...(typeof m.channel_id === 'string' ? { channelId: m.channel_id } : {}),
+        ...(typeof m.post_at === 'number' ? { postAt: new Date(m.post_at * 1000).toISOString() } : {}),
+        ...(typeof m.date_created === 'number' ? { createdAt: new Date(m.date_created * 1000).toISOString() } : {}),
+        text: typeof m.text === 'string' ? m.text : '',
+      }));
+    const next = r.response_metadata?.next_cursor;
+    return { ...this.prov(ws), ...(channel ? { channelId: channel } : {}), messages, nextCursor: next ? this.store.sealCursor(kind, next) : null, hasMore: Boolean(next) };
+  }
+
+  /**
+   * Withdraws a scheduled message Slack has not posted yet (chat.deleteScheduledMessage). Posted messages
+   * are never deleted: chat.delete stays off the allowlist.
+   */
+  async cancelScheduledMessage(p: Principal, input: { workspaceId: string; channelId: string; scheduledMessageId: string }) {
+    const channel = channelIdOf(input?.channelId);
+    const id = input?.scheduledMessageId;
+    if (typeof id !== 'string' || !SLACK_SCHEDULED_ID.test(id)) throw new PerchError('scheduledMessageId must be a Slack scheduled message id (Q…) from slack_list_scheduled_messages', 'bad_argument');
+    const body = await this.plainWrite(p, input.workspaceId, 'chat:write', 'chat.deleteScheduledMessage', { form: { channel, scheduled_message_id: id } });
+    if (body.ok !== true) {
+      if (body.error === 'invalid_scheduled_message_id') {
+        throw new PerchError('Slack has no pending scheduled message with this id in this conversation: it was already posted, cancelled or never existed (invalid_scheduled_message_id)', 'provider_rejected');
+      }
+      throw slackFailure(body.error);
+    }
+    const ws = await this.workspace(input.workspaceId);
+    return { ...this.prov(ws), channelId: channel, scheduledMessageId: id, status: 'cancelled' };
+  }
+
   /** Workspaces visible to this principal (never tokens). */
   async listWorkspaces(p: Principal) {
     const data = await this.store.read();
@@ -888,6 +1108,8 @@ export class SlackService {
         canReact: w.scopes.includes('reactions:write'),
         canReadFiles: w.scopes.includes('files:read'),
         canUploadFiles: w.scopes.includes('files:write'),
+        canOpenDm: w.scopes.includes('im:write'),
+        canOpenGroupDm: w.scopes.includes('mpim:write'),
         granted: [...p.capabilities].filter((c) => c.startsWith('slack_')).sort(),
         connectedAt: w.createdAt,
       }));
