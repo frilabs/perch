@@ -1,6 +1,6 @@
 # Spezifikation: Volle Funktionen, standardmäßig freigeschaltet
 
-Stand 2026-10-20. **Entwurf, wartet auf Fritz' Freigabe.** Kein Code geändert.
+Stand 2026-10-20. **Teilweise umgesetzt.** Fritz hat am 2026-10-20 gezielt diesen Teil beauftragt (§3.1 Drive, §3.2 Notion, §3.3 Mail ohne Antworten/Weiterleiten, §3.6 Slack Dateien/Reaktionen/Bearbeiten, §3.7 WhatsApp Medien). Umgesetzt **mit dem bisherigen Rechtemodell** (Schreiben nur mit Client-Grant). **Nicht umgesetzt und weiter nur Entwurf:** §1 (standardmäßig alles, Policy-Schalter), §2 (Ledger-Rollover), §3.4 Kalender, §3.5 Kontakte, §3.8 Luma, bei Mail Antworten/Weiterleiten, bei Slack DMs öffnen/planen, bei WhatsApp Bearbeiten/Lesebestätigung/Verlauf nachladen.
 
 ## 0. Auftrag und Entscheidungen
 
