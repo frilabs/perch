@@ -90,14 +90,14 @@ Usage:
   perch google list | remove ID [--revoke]
   perch notion add --label NAME                PAT is read via a masked terminal prompt
   perch notion list | remove ID
-  perch gmail add --label NAME [--allow-drafts] [--allow-send] [--port N] [--timeout SECONDS] [--login-hint EMAIL]
+  perch gmail add --label NAME [--allow-drafts] [--allow-send] [--allow-modify] [--port N] [--timeout SECONDS] [--login-hint EMAIL]
   perch gmail list | remove ID [--revoke]
-  perch microsoft add --label NAME [--allow-drafts] [--allow-send] [--port N] [--timeout SECONDS]
+  perch microsoft add --label NAME [--allow-drafts] [--allow-send] [--allow-modify] [--port N] [--timeout SECONDS]
                       [--redirect-host localhost|127.0.0.1] [--login-hint EMAIL]
   perch microsoft list | remove ID
   perch imap add --label NAME --email ADDRESS [--username USER] [--preset gmx|gmx-com]
                  [--imap-host H --imap-port N --smtp-host H --smtp-port N --smtp-security tls|starttls]
-                 [--allow-drafts] [--allow-send] [--drafts-mailbox NAME]   password via masked prompt
+                 [--allow-drafts] [--allow-send] [--allow-modify] [--drafts-mailbox NAME]   password via masked prompt
   perch imap presets | list | remove ID
   perch google-productivity add --label NAME --services calendar,contacts [--allow-calendar-write]
                       [--port N] [--timeout SECONDS] [--login-hint EMAIL]
@@ -110,7 +110,7 @@ Usage:
   perch whatsapp add --label NAME --phone +43…  [--timeout SECONDS]   pair a new linked device by pairing code
   perch whatsapp list | status | remove ID [--keep-device]
   perch client add --label NAME --allow CAPS --account ID [--account ID ...] [--token-file PATH]
-                      CAPS: read,draft,send (mail accounts); calendar_read,calendar_write,contacts_read (gprod accounts);
+                      CAPS: read,draft,send,modify (mail accounts); calendar_read,calendar_write,contacts_read (gprod accounts);
                             slack_read,slack_send (slack accounts); whatsapp_read,whatsapp_send (whatsapp accounts);
                             luma_read,luma_events,luma_guests,luma_blast (luma accounts)
   perch client list | remove ID
@@ -188,7 +188,7 @@ function formatMail(data: StoreData, which: AccountSection): string[] {
       ? data.imap.map((a) => ({
           a,
           kind: 'imap',
-          extra: `${a.imap.host}/${a.smtp.host}; drafts ${a.allowDrafts ? 'on' : 'off'}, send ${a.allowSend ? 'on' : 'off'}`,
+          extra: `${a.imap.host}/${a.smtp.host}; drafts ${a.allowDrafts ? 'on' : 'off'}, send ${a.allowSend ? 'on' : 'off'}, organize ${a.allowModify ? 'on' : 'off'}`,
         }))
       : []),
   ];
@@ -400,7 +400,7 @@ function printAuthUrl(io: CliIo, what: string, url: string, timeoutMs: number) {
 }
 
 function describeOptIns(values: Record<string, unknown>): string {
-  const extra = [values['allow-drafts'] ? 'drafts' : '', values['allow-send'] ? 'send' : ''].filter(Boolean);
+  const extra = [values['allow-drafts'] ? 'drafts' : '', values['allow-send'] ? 'send' : '', values['allow-modify'] ? 'organize' : ''].filter(Boolean);
   return extra.length ? `read + ${extra.join(' + ')}` : 'read-only';
 }
 
@@ -423,7 +423,7 @@ async function cmdGmail(config: PerchConfig, io: CliIo, sub: string | undefined,
     throw new PerchError('Set PERCH_GOOGLE_CLIENT_FILE to the JSON of your Google "Desktop app" OAuth client', 'bad_config');
   }
   const client = parseClientFile((await readPrivateFile(config.googleClientFile)).toString('utf8'));
-  const scopes = gmailScopesFor({ send: Boolean(values['allow-send']), drafts: Boolean(values['allow-drafts']) });
+  const scopes = gmailScopesFor({ send: Boolean(values['allow-send']), drafts: Boolean(values['allow-drafts']), modify: Boolean(values['allow-modify']) });
   const grant = await runLoopbackAuthorization({
     client,
     upstream,
@@ -466,6 +466,7 @@ async function cmdMicrosoft(config: PerchConfig, io: CliIo, sub: string | undefi
     upstream,
     send: Boolean(values['allow-send']),
     drafts: Boolean(values['allow-drafts']),
+    modify: Boolean(values['allow-modify']),
     port,
     timeoutMs,
     redirectHost,
@@ -566,6 +567,7 @@ async function cmdImap(config: PerchConfig, io: CliIo, sub: string | undefined, 
       password,
       allowDrafts: Boolean(values['allow-drafts']),
       allowSend: Boolean(values['allow-send']),
+      allowModify: Boolean(values['allow-modify']),
       ...(str('username') ? { username: str('username')! } : {}),
       ...(str('preset') ? { preset: str('preset')! } : {}),
       ...(str('imap-host') ? { imapHost: str('imap-host')! } : {}),
@@ -579,7 +581,7 @@ async function cmdImap(config: PerchConfig, io: CliIo, sub: string | undefined, 
   );
   io.stdout(
     `Connected IMAP account ${account.id} (${account.email}) as "${account.label}" via ${account.imap.host}/${account.smtp.host} ` +
-      `(drafts ${account.allowDrafts ? 'on' : 'off'}, send ${account.allowSend ? 'on' : 'off'}).\n`,
+      `(drafts ${account.allowDrafts ? 'on' : 'off'}, send ${account.allowSend ? 'on' : 'off'}, organize ${account.allowModify ? 'on' : 'off'}).\n`,
   );
 }
 

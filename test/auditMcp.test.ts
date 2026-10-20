@@ -131,7 +131,7 @@ describe('mail workflow and audit over MCP [MOCK providers]', () => {
     const { token } = await grant(store, ['send'], ['imap-0000000a']);
     const c = await memory((await principalForClientToken(store, token))!);
     const tools = (await c.listTools()).tools;
-    expect(tools.map((t) => t.name).sort()).toEqual(['mail_send', 'mail_send_status', 'perch_list_accounts']);
+    expect(tools.map((t) => t.name).sort()).toEqual(['mail_send', 'mail_send_draft', 'mail_send_status', 'perch_list_accounts']);
     const sendTool = tools.find((t) => t.name === 'mail_send')!;
     expect(sendTool.inputSchema.required).toContain('requestId');
     expect(sendTool.description).toMatch(/requestId/);

@@ -37,7 +37,7 @@ Capabilities, per account family:
 
 | Accounts | Capabilities |
 | --- | --- |
-| Mail (`gmail-…`, `microsoft-…`, `imap-…`) | `read`, `draft`, `send` |
+| Mail (`gmail-…`, `microsoft-…`, `imap-…`) | `read`, `draft`, `send`, `modify` |
 | Google Calendar/Contacts (`gprod-…`) | `calendar_read`, `calendar_write`, `contacts_read` |
 | Slack (`slack-…`) | `slack_read`, `slack_send` |
 | WhatsApp (`whatsapp-…`) | `whatsapp_read`, `whatsapp_send` |
@@ -63,6 +63,8 @@ Perch re-checks the grant before every tool call, so `perch client remove ID` ta
   - IMAP/SMTP (GMX presets): password only through a masked prompt, TLS ≥ 1.2 with certificate verification
   - search, read, attachments; drafts and sending from an explicitly chosen sender account
   - threading headers; outcome `accepted`/`rejected`/`indeterminate`, never a blind retry
+  - organizing with the `modify` capability and the provider opt-in `--allow-modify` (`gmail.modify`, `Mail.ReadWrite`, IMAP opt-in): list folders and drafts, mark read/unread and starred, move, archive, trash and restore; deleting means trash only, never permanent deletion, emptying the trash, filters or forwarding rules
+  - send an existing draft (`mail_send_draft`, idempotent per `requestId`; IMAP sends without the Bcc header and files the draft in Sent)
 - **Google Calendar/Contacts** (`docs/GOOGLE_PRODUCTIVITY_MILESTONE.md`):
   - its own OAuth grant, services chosen explicitly with `--services calendar,contacts`, `calendar.readonly`/`contacts.readonly` by default, opt-in `calendar.events.owned`
   - read calendars and events; create private events (idempotent per `requestId`) and change them (`If-Match`), without attendees, invitations or notifications

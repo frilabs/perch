@@ -23,7 +23,18 @@ let google: MockGoogleProductivity;
 let a: MockProdAccount;
 let mailCalls: string[];
 
-const PR2_MAIL_SEND_TOOLS = ['mail_get_attachment', 'mail_read_message', 'mail_search', 'mail_send', 'mail_send_status', 'perch_list_accounts'];
+// Grows with the mail organize milestone: folders/drafts listing (read) and sending an existing draft (send).
+const PR2_MAIL_SEND_TOOLS = [
+  'mail_get_attachment',
+  'mail_list_drafts',
+  'mail_list_folders',
+  'mail_read_message',
+  'mail_search',
+  'mail_send',
+  'mail_send_draft',
+  'mail_send_status',
+  'perch_list_accounts',
+];
 const CAL_TOOLS = ['calendar_get_event', 'calendar_list_calendars', 'calendar_list_events'];
 
 function stubMail(): MailProviders {

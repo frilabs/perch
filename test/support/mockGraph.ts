@@ -32,6 +32,30 @@ export interface MockGraphMessage {
   attachments?: MockGraphAttachment[];
   /** MOCK only: answer with this HTML body even when the text Prefer header is sent. */
   htmlBody?: string;
+  isRead?: boolean;
+  flagStatus?: 'flagged' | 'notFlagged';
+}
+
+/** MOCK mail folder; `wellKnown` maps Graph's well-known names (inbox, deleteditems, ...) to this folder. */
+export interface MockGraphFolder {
+  id: string;
+  displayName: string;
+  wellKnown?: string;
+  parentId?: string;
+}
+
+/** Default folder tree: ids are long base64-like strings, like Graph's. */
+export function defaultGraphFolders(): MockGraphFolder[] {
+  const id = (n: string) => `AAMkAGFolder${n.padEnd(40, 'x')}AAA=`;
+  return [
+    { id: id('inbox'), displayName: 'Posteingang', wellKnown: 'inbox' },
+    { id: id('drafts'), displayName: 'Entwürfe', wellKnown: 'drafts' },
+    { id: id('sentitems'), displayName: 'Gesendete Elemente', wellKnown: 'sentitems' },
+    { id: id('deleteditems'), displayName: 'Gelöschte Elemente', wellKnown: 'deleteditems' },
+    { id: id('archive'), displayName: 'Archiv', wellKnown: 'archive' },
+    { id: id('projects'), displayName: 'Projekte' },
+    { id: id('projects-a'), displayName: 'Projekt A', parentId: id('projects') },
+  ];
 }
 
 export interface MockMsAccount {
@@ -65,6 +89,10 @@ export class MockGraph {
   readonly codes = new Map<string, { challenge: string; redirectUri: string; account: MockMsAccount }>();
   readonly accessTokens = new Map<string, MockMsAccount>();
   tokenCalls = 0;
+  readonly folders: MockGraphFolder[] = defaultGraphFolders();
+  /** Draft message ids sent with POST /me/messages/{id}/send. */
+  readonly sentDrafts: string[] = [];
+  private moves = 0;
   /** Created drafts / sent MIME bodies (decoded). */
   readonly drafts: string[] = [];
   readonly sent: string[] = [];
@@ -161,12 +189,80 @@ export class MockGraph {
       bodyPreview: m.body.slice(0, 50),
       hasAttachments: (m.attachments ?? []).some((a) => !a.isInline),
       internetMessageId: m.internetMessageId,
+      lastModifiedDateTime: m.receivedDateTime,
     };
+  }
+
+  /** Well-known name or id -> folder (messages store the well-known name when there is one, else the id). */
+  folder(ref: string): MockGraphFolder | undefined {
+    return this.folders.find((f) => f.wellKnown === ref.toLowerCase() || f.id === ref);
+  }
+
+  private folderKey(ref: string): string | undefined {
+    const f = this.folder(ref);
+    return f ? (f.wellKnown ?? f.id) : undefined;
+  }
+
+  private folderJson(f: MockGraphFolder) {
+    const children = this.folders.filter((c) => c.parentId === f.id).length;
+    return { id: f.id, displayName: f.displayName, childFolderCount: children, totalItemCount: 0, unreadItemCount: 0 };
+  }
+
+  private organize(req: UpstreamRequest, acct: MockMsAccount): UpstreamResponse | undefined {
+    const path = req.url.pathname;
+    const q = req.url.searchParams;
+    if (req.method === 'GET' && path === '/v1.0/me/mailFolders') {
+      return json(200, { value: this.folders.filter((f) => !f.parentId).map((f) => this.folderJson(f)) });
+    }
+    const children = /^\/v1\.0\/me\/mailFolders\/([^/]+)\/childFolders$/.exec(path);
+    if (req.method === 'GET' && children) {
+      const parent = this.folder(decodeURIComponent(children[1]!));
+      if (!parent) return graphError(404, 'ErrorItemNotFound');
+      return json(200, { value: this.folders.filter((f) => f.parentId === parent.id).map((f) => this.folderJson(f)) });
+    }
+    const oneFolder = /^\/v1\.0\/me\/mailFolders\/([^/]+)$/.exec(path);
+    if (req.method === 'GET' && oneFolder) {
+      const f = this.folder(decodeURIComponent(oneFolder[1]!));
+      return f ? json(200, { id: f.id }) : graphError(404, 'ErrorItemNotFound');
+    }
+    const op = /^\/v1\.0\/me\/messages\/([^/]+)(?:\/(move|send))?$/.exec(path);
+    if (!op) return undefined;
+    const m = acct.messages.find((x) => x.id === decodeURIComponent(op[1]!));
+    if (req.method === 'GET' && !op[2] && q.get('$select') === 'parentFolderId') {
+      if (!m) return graphError(404, 'ErrorItemNotFound');
+      return json(200, { parentFolderId: this.folder(m.folder)?.id });
+    }
+    if (req.method === 'PATCH' && !op[2]) {
+      if (!m) return graphError(404, 'ErrorItemNotFound');
+      const body = JSON.parse(req.body ?? '{}') as { isRead?: boolean; flag?: { flagStatus?: 'flagged' | 'notFlagged' } };
+      if (body.isRead !== undefined) m.isRead = body.isRead;
+      if (body.flag?.flagStatus) m.flagStatus = body.flag.flagStatus;
+      return json(200, { ...this.summary(m), isRead: m.isRead, flag: { flagStatus: m.flagStatus ?? 'notFlagged' } });
+    }
+    if (req.method === 'POST' && op[2] === 'move') {
+      if (!m) return graphError(404, 'ErrorItemNotFound');
+      const { destinationId } = JSON.parse(req.body ?? '{}') as { destinationId?: string };
+      const key = this.folderKey(destinationId ?? '');
+      if (!key) return graphError(400, 'ErrorInvalidIdMalformed');
+      // Graph creates the message in the destination with a NEW id.
+      m.folder = key;
+      m.id = `${m.id}-mv${++this.moves}`;
+      return json(201, this.summary(m));
+    }
+    if (req.method === 'POST' && op[2] === 'send') {
+      if (!m || m.folder !== 'drafts') return graphError(404, 'ErrorItemNotFound');
+      this.sentDrafts.push(m.id);
+      m.folder = 'sentitems';
+      return { status: 202, headers: {}, body: Buffer.alloc(0) };
+    }
+    return undefined;
   }
 
   private graph(req: UpstreamRequest): UpstreamResponse {
     const acct = this.accessTokens.get((req.headers.authorization ?? '').replace(/^Bearer /, ''));
     if (!acct) return graphError(401, 'InvalidAuthenticationToken');
+    const organized = this.organize(req, acct);
+    if (organized) return organized;
     const path = req.url.pathname;
     const q = req.url.searchParams;
     if (req.method === 'GET' && path === '/v1.0/me') {

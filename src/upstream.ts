@@ -145,6 +145,13 @@ const ROUTES: Record<Service, Route[]> = {
     ['GET', new RegExp(`^/gmail/v1/users/me/messages/${GMAIL_ID}/attachments/${GMAIL_ATTACHMENT_ID}$`)],
     ['POST', /^\/gmail\/v1\/users\/me\/drafts$/, 'draft'],
     ['POST', /^\/gmail\/v1\/users\/me\/messages\/send$/, 'send'],
+    // Organizing (gmail.modify). Never: DELETE routes, messages/batchDelete, batchModify, threads/*/trash,
+    // settings/filters or settings/forwardingAddresses (permanent deletion and mail rules are not offered).
+    ['GET', /^\/gmail\/v1\/users\/me\/labels$/],
+    ['GET', /^\/gmail\/v1\/users\/me\/drafts$/],
+    ['GET', new RegExp(`^/gmail/v1/users/me/drafts/${GMAIL_ID}$`)],
+    ['POST', new RegExp(`^/gmail/v1/users/me/messages/${GMAIL_ID}/(?:modify|trash|untrash)$`), 'mail_modify'],
+    ['POST', /^\/gmail\/v1\/users\/me\/drafts\/send$/, 'send'],
   ],
   graph: [
     ['GET', /^\/v1\.0\/me$/],
@@ -155,6 +162,14 @@ const ROUTES: Record<Service, Route[]> = {
     ['GET', new RegExp(`^/v1\\.0/me/messages/${GRAPH_ID}/attachments/${GRAPH_ID}$`)],
     ['POST', /^\/v1\.0\/me\/messages$/, 'draft'],
     ['POST', /^\/v1\.0\/me\/sendMail$/, 'send'],
+    // Organizing (Mail.ReadWrite). Never: DELETE routes, messages/{id}/permanentDelete, mailFolders writes
+    // or messageRules (permanent deletion and mail rules are not offered).
+    ['GET', /^\/v1\.0\/me\/mailFolders$/],
+    ['GET', new RegExp(`^/v1\\.0/me/mailFolders/${GRAPH_FOLDER}$`)],
+    ['GET', new RegExp(`^/v1\\.0/me/mailFolders/${GRAPH_FOLDER}/childFolders$`)],
+    ['PATCH', new RegExp(`^/v1\\.0/me/messages/${GRAPH_ID}$`), 'mail_modify'],
+    ['POST', new RegExp(`^/v1\\.0/me/messages/${GRAPH_ID}/move$`), 'mail_modify'],
+    ['POST', new RegExp(`^/v1\\.0/me/messages/${GRAPH_ID}/send$`), 'send'],
   ],
   msauth: [['POST', new RegExp(`^/${MS_TENANT}/oauth2/v2\\.0/token$`)]],
   calendar: [

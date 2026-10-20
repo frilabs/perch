@@ -196,7 +196,7 @@ perch imap remove imap-1a2b3c4d
 
 - **Transport:** IMAP nur mit implizitem TLS. SMTP mit implizitem TLS (465) oder STARTTLS mit Pflicht-TLS (587). TLS ≥ 1.2 mit Zertifikatsprüfung ist nicht abschaltbar. Nur Hostnamen, keine IP-Adressen.
 - **Prüfung beim Hinzufügen:** `add` meldet sich vor dem Speichern bei IMAP an (bei `--allow-send` zusätzlich SMTP-`verify`). Bei einem Fehler wird nichts gespeichert.
-- **Gesendet-Ordner:** Perch legt nach dem SMTP-Versand **keine Kopie in „Gesendet“** ab. Ob GMX das serverseitig tut, ist nicht verifiziert.
+- **Gesendet-Ordner:** Perch legt nach `mail_send` per SMTP **keine Kopie in „Gesendet“** ab. Ob GMX das serverseitig tut, ist nicht verifiziert. Ausnahme: `mail_send_draft` verschiebt den gesendeten Entwurf nach „Gesendet“ (Abschnitt 4a.5).
 
 ### 4a.4 Client-Grants für Entwürfe und Senden
 
@@ -219,6 +219,27 @@ perch client remove client-1a2b3c4d     # wirkt ab dem nächsten Tool-Aufruf, au
 - **Widerruf und Einschränkung:** Vor **jedem** Tool-Aufruf liest Perch den Grant neu aus dem Store (Grant-ID und Token-Hash). `perch client remove` oder ein eingeschränkter Grant gilt damit sofort, auch für eine laufende stdio-Session. Der Aufruf scheitert mit `grant_revoked` bzw. `capability_denied`, bevor ein Provider kontaktiert wird. Über HTTP wird ein entferntes Token zusätzlich mit `401` abgewiesen. Die Tool-Liste einer laufenden stdio-Session wird nicht aktualisiert.
 - **Betreiber:** Das globale HTTP-Token und `perch serve --stdio` ohne Client-Token behalten alle Read-only-Tools (Drive, Notion, Mail, seit dem Productivity-Meilenstein auch Calendar/Contacts lesend) für alle Konten. Schreib-Tools gibt es dort nie.
 - **Grenze:** Client-Grants schränken einen Client innerhalb **eines** Namespace ein. Die Trennung zwischen Personen leisten erst die vom Admin angelegten Nutzer (Abschnitt 4c).
+
+### 4a.5 Ordnen und Entwürfe senden
+
+Mails ordnen (gelesen/ungelesen, Stern/Flag, verschieben, archivieren, Papierkorb und zurück) und vorhandene Entwürfe senden. Löschen heißt immer **Papierkorb** (wiederherstellbar). Endgültiges Löschen, Papierkorb leeren, Filter und Weiterleitungsregeln bietet Perch nicht an; die Upstream-Allowlist enthält diese Routen nicht.
+
+- **Beim Anbieter freischalten** (`--allow-modify`, sonst `provider_scope_missing` mit Hinweis zum Neu-Verbinden):
+  - Gmail: `perch gmail add --label "Gmail" --allow-modify` fordert zusätzlich `gmail.modify` an (Labels, gelesen, Archiv, Papierkorb; kein endgültiges Löschen). Für die Google-Cloud-Einwilligung den Scope `.../auth/gmail.modify` ergänzen.
+  - Microsoft: `perch microsoft add --label "Outlook" --allow-modify` fordert `Mail.ReadWrite` an (dasselbe Recht wie `--allow-drafts`).
+  - IMAP: `perch imap add ... --allow-modify` speichert `allowModify: true`. Bestehende Konten bleiben ohne (Standard `false`).
+  - Bestehende Konten: entfernen und mit der Option neu hinzufügen.
+- **Client-Grant:** Ordnen braucht die Capability `modify` für das Konto, Entwurf senden braucht `send`:
+  `perch client add --label "Laptop" --allow read,modify,send --account gmail-1a2b3c4d`
+- **Tools:**
+  - `mail_list_folders`, `mail_list_drafts` (lesend, mit `read` und für das globale Token)
+  - `mail_mark_message` (`read`, `starred`), `mail_move_message` (`folderId` aus `mail_list_folders` oder `archive: true`), `mail_trash_message`, `mail_restore_message` (alle mit `modify`)
+  - `mail_send_draft` (mit `send` und `requestId`, idempotent wie `mail_send`; Stand über `mail_send_status`)
+- **Pro Anbieter:**
+  - Gmail: Verschieben setzt das Ziel-Label und entfernt `INBOX`, Archivieren entfernt nur `INBOX`, Papierkorb über `messages/{id}/trash`/`untrash`. Entwurf senden über `drafts/send` braucht `gmail.compose` oder `gmail.modify` (`gmail.send` allein reicht nicht).
+  - Microsoft: Papierkorb ist „Gelöschte Elemente“, Archivieren verschiebt nach „Archiv“, Wiederherstellen nur aus „Gelöschte Elemente“ zurück in den Posteingang. Nach jedem Verschieben hat die Mail eine **neue** `messageId` (steht in der Antwort). Entwurf senden braucht `Mail.Send`.
+  - IMAP: Papierkorb ist der Ordner mit Special-Use `\Trash`, Archiv `\Archive` (sonst `folderId` angeben). Verschoben wird nur mit `MOVE` oder `UIDPLUS`; ohne beides lehnt Perch ab, weil ein einfaches `EXPUNGE` andere als gelöscht markierte Mails endgültig entfernen könnte. Entwurf senden liest den Entwurf aus dem Entwurfsordner, verschickt ihn per SMTP **ohne Bcc-Kopfzeile** (Bcc nur im Envelope) und verschiebt ihn danach nach `\Sent`. Der `From` des Entwurfs muss die Kontoadresse sein.
+- **Audit:** Jeder Aufruf landet ohne Inhalte im Audit-Log; Schreibaufrufe mit `attempt` vor dem Anbieter-Aufruf.
 
 ## 4b. Google Calendar und Contacts verbinden (Productivity-Meilenstein)
 

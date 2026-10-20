@@ -23,7 +23,7 @@ import { CredentialStore } from '../../src/store/credentialStore.js';
 import { dummySecret, makeTempDirs, type TempDirs } from '../support/fixtures.js';
 
 /** Read-only tool count (Drive/Notion 14 + mail read 3 + Calendar read 3 + Contacts read 2 + Slack read 4 + WhatsApp read 3). Write tools need a client grant. */
-const READ_ONLY_TOOLS = 29;
+const READ_ONLY_TOOLS = 31; // +mail_list_folders, mail_list_drafts (mail organize)
 
 const CLI = path.resolve('dist/cli.js');
 const GUARD = pathToFileURL(path.resolve('test/smoke/offlineGuard.mjs')).href;
@@ -186,7 +186,7 @@ describe('built artifact', () => {
     );
     const names = (await client.listTools()).tools.map((t) => t.name);
     // A send-only client grant gets exactly the tools it needs: no Drive/Notion, no mail read tools.
-    expect(names.sort()).toEqual(['mail_send', 'mail_send_status', 'perch_list_accounts']);
+    expect(names.sort()).toEqual(['mail_send', 'mail_send_draft', 'mail_send_status', 'perch_list_accounts']);
     const other = await client.callTool({
       name: 'mail_send',
       arguments: { requestId: 'smoke-send-0001', accountId: 'imap-0000000b', to: ['x@example.test'], subject: 's', text: 't' },
@@ -334,7 +334,7 @@ describe('built artifact', () => {
       new StdioClientTransport({ command: process.execPath, args: [CLI, 'serve', '--stdio'], env: { ...env, PERCH_CLIENT_TOKEN_FILE: tokenFile }, stderr: 'pipe' }),
     );
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
-    expect(names).toEqual(['mail_get_attachment', 'mail_read_message', 'mail_search', 'perch_list_accounts']);
+    expect(names).toEqual(['mail_get_attachment', 'mail_list_drafts', 'mail_list_folders', 'mail_read_message', 'mail_search', 'perch_list_accounts']);
     const listed = text(await client.callTool({ name: 'perch_list_accounts', arguments: {} }));
     expect(listed).not.toMatch(/gprod-|googleProductivity/);
     await client.close();

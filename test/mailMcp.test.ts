@@ -228,7 +228,7 @@ describe('client grants are mail-only and least-privilege [MOCK providers]', () 
     const { token } = await grant('Send only', ['send'], ['imap-0000000a']);
     const client = await connect(token);
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
-    expect(names).toEqual(['mail_send', 'mail_send_status', 'perch_list_accounts']);
+    expect(names).toEqual(['mail_send', 'mail_send_draft', 'mail_send_status', 'perch_list_accounts']);
     for (const n of names) expect(n).not.toMatch(/^(drive|notion)_/);
     for (const [tool, args] of [
       ['drive_search', { query: 'x' }],

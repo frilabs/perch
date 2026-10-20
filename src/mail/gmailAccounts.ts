@@ -14,12 +14,18 @@ import { UpstreamError, type Upstream } from '../upstream.js';
 export const GMAIL_READONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
 export const GMAIL_SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send';
 export const GMAIL_COMPOSE_SCOPE = 'https://www.googleapis.com/auth/gmail.compose';
+/**
+ * gmail.modify (restricted): labels, read/unread, archive, trash and untrash; never permanent deletion
+ * (that needs the full https://mail.google.com/ scope, which Perch never requests). Opt-in only.
+ */
+export const GMAIL_MODIFY_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 
-export function gmailScopesFor(opts: { send?: boolean; drafts?: boolean }): string[] {
+export function gmailScopesFor(opts: { send?: boolean; drafts?: boolean; modify?: boolean }): string[] {
   const scopes = [GMAIL_READONLY_SCOPE];
   // compose includes sending, so gmail.send would only widen the consent screen.
   if (opts.drafts) scopes.push(GMAIL_COMPOSE_SCOPE);
   else if (opts.send) scopes.push(GMAIL_SEND_SCOPE);
+  if (opts.modify) scopes.push(GMAIL_MODIFY_SCOPE);
   return scopes;
 }
 
