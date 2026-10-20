@@ -70,7 +70,7 @@ export function createPerchContext(
     store,
     upstream,
     drive: new DriveService(store, upstream, tokens),
-    notion: new NotionService(store, upstream),
+    notion: new NotionService(store, upstream, { workflow, audit }),
     mail: new MailService(store, mailProviders ?? createMailProviders(store, upstream, { gmail: gmailTokens, microsoft: microsoftTokens }), ledger),
     calendar: new CalendarService(store, upstream, productivityTokens),
     contacts: new ContactsService(store, upstream, productivityTokens),

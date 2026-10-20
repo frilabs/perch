@@ -56,7 +56,8 @@ Perch re-checks the grant before every tool call, so `perch client remove ID` ta
 - **Notion** (one personal access token per workspace):
   - title search over pages and data sources (no full-text search)
   - pages and paginated, nested block content
-  - databases, data sources and data source queries
+  - databases, data sources and data source queries, page comments
+  - with a client grant holding `notion_write`: create pages (under a page or as a data source row), change properties and blocks, append blocks, move pages and blocks to the trash and restore pages (never permanent deletion), add comments; creating writes are idempotent per `requestId`
 - **Mail** (`docs/EMAIL_MILESTONE.md`):
   - Gmail: its own OAuth grant, `gmail.readonly` by default, opt-in `gmail.send`/`gmail.compose`
   - Microsoft Graph: delegated with PKCE, `Mail.Read` by default, opt-in `Mail.ReadWrite`/`Mail.Send`
