@@ -80,6 +80,11 @@ const ImapAccountSchema = z.object({
   /** IMAP has no OAuth scopes: drafts/send are explicit opt-ins recorded at onboarding. */
   allowDrafts: z.boolean(),
   allowSend: z.boolean(),
+  /**
+   * Organizing (flags, move/archive, trash/restore) is a separate opt-in. Optional so that stores written before it
+   * existed stay valid; absent means false (never inferred from allowDrafts/allowSend).
+   */
+  allowModify: z.boolean().optional(),
   draftsMailbox: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -181,7 +186,7 @@ const LumaAccountSchema = z.object({
 });
 
 /** Mail capabilities (email milestone) apply to mail accounts only. */
-export const MAIL_CAPABILITIES = ['read', 'draft', 'send'] as const;
+export const MAIL_CAPABILITIES = ['read', 'draft', 'send', 'modify'] as const;
 /** Calendar/Contacts capabilities apply to Google productivity accounts (gprod-…) only. */
 export const PRODUCTIVITY_CAPABILITIES = ['calendar_read', 'calendar_write', 'contacts_read'] as const;
 /** Slack capabilities apply to Slack workspaces (slack-…) only. */
@@ -190,7 +195,19 @@ export const SLACK_CAPABILITIES = ['slack_read', 'slack_send'] as const;
 export const WHATSAPP_CAPABILITIES = ['whatsapp_read', 'whatsapp_send'] as const;
 /** Luma capabilities apply to Luma accounts (luma-…) only (docs/LUMA_SPEC.md §5). */
 export const LUMA_CAPABILITIES = ['luma_read', 'luma_events', 'luma_guests', 'luma_blast'] as const;
-export const CAPABILITIES = [...MAIL_CAPABILITIES, ...PRODUCTIVITY_CAPABILITIES, ...SLACK_CAPABILITIES, ...WHATSAPP_CAPABILITIES, ...LUMA_CAPABILITIES] as const;
+/** Google Drive capabilities apply to Drive accounts (google-…) only. */
+export const DRIVE_CAPABILITIES = ['drive_read', 'drive_write'] as const;
+/** Notion capabilities apply to Notion workspaces (notion-…) only. */
+export const NOTION_CAPABILITIES = ['notion_read', 'notion_write'] as const;
+export const CAPABILITIES = [
+  ...MAIL_CAPABILITIES,
+  ...PRODUCTIVITY_CAPABILITIES,
+  ...SLACK_CAPABILITIES,
+  ...WHATSAPP_CAPABILITIES,
+  ...LUMA_CAPABILITIES,
+  ...DRIVE_CAPABILITIES,
+  ...NOTION_CAPABILITIES,
+] as const;
 
 /** Local per-client grant. Only the SHA-256 of the (high-entropy) client token is stored. */
 const ClientGrantSchema = z.object({
@@ -263,6 +280,8 @@ export type WhatsappAccount = z.infer<typeof WhatsappAccountSchema>;
 export type SlackCapability = (typeof SLACK_CAPABILITIES)[number];
 export type WhatsappCapability = (typeof WHATSAPP_CAPABILITIES)[number];
 export type LumaCapability = (typeof LUMA_CAPABILITIES)[number];
+export type DriveCapability = (typeof DRIVE_CAPABILITIES)[number];
+export type NotionCapability = (typeof NOTION_CAPABILITIES)[number];
 export type LumaAccount = z.infer<typeof LumaAccountSchema>;
 export type LumaToolSnapshot = z.infer<typeof LumaToolSnapshotSchema>;
 export type UserRecord = z.infer<typeof UserSchema>;

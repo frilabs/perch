@@ -37,7 +37,7 @@ Capabilities, per account family:
 
 | Accounts | Capabilities |
 | --- | --- |
-| Mail (`gmail-…`, `microsoft-…`, `imap-…`) | `read`, `draft`, `send` |
+| Mail (`gmail-…`, `microsoft-…`, `imap-…`) | `read`, `draft`, `send`, `modify` |
 | Google Calendar/Contacts (`gprod-…`) | `calendar_read`, `calendar_write`, `contacts_read` |
 | Slack (`slack-…`) | `slack_read`, `slack_send` |
 | WhatsApp (`whatsapp-…`) | `whatsapp_read`, `whatsapp_send` |
@@ -46,23 +46,29 @@ Perch re-checks the grant before every tool call, so `perch client remove ID` ta
 
 ## Features
 
-- **Google Drive** (`drive.readonly`, a separate OAuth grant per account):
+- **Google Drive** (`drive.readonly`, or `drive` with `perch google add --allow-write`; a separate OAuth grant per account):
   - search and list, optionally across all accounts
-  - metadata
+  - metadata, sharing entries and comments
   - read text, base64 download
   - export Docs, Sheets and Slides to validated formats
   - size limit: 48 KiB by default because of client output limits, up to 10 MiB on request
   - never written to disk
+  - client grants with `drive_read` read only their granted accounts
+  - writes (client grants with `drive_write` on accounts connected with `--allow-write` only): upload (up to 10 MiB), create folders and Google Docs/Sheets/Slides (empty or from text/CSV), replace content, rename, move, copy, share (user, group, domain, anyone with the link; reader/commenter/writer), unshare, comment, trash and restore
+  - creating, copying, sharing and commenting need a `requestId` and never run twice; deleting means trash only (no permanent delete, no empty trash, no ownership transfer)
 - **Notion** (one personal access token per workspace):
   - title search over pages and data sources (no full-text search)
   - pages and paginated, nested block content
-  - databases, data sources and data source queries
+  - databases, data sources and data source queries, page comments
+  - with a client grant holding `notion_write`: create pages (under a page or as a data source row), change properties and blocks, append blocks, move pages and blocks to the trash and restore pages (never permanent deletion), add comments; creating writes are idempotent per `requestId`
 - **Mail** (`docs/EMAIL_MILESTONE.md`):
   - Gmail: its own OAuth grant, `gmail.readonly` by default, opt-in `gmail.send`/`gmail.compose`
   - Microsoft Graph: delegated with PKCE, `Mail.Read` by default, opt-in `Mail.ReadWrite`/`Mail.Send`
   - IMAP/SMTP (GMX presets): password only through a masked prompt, TLS ≥ 1.2 with certificate verification
   - search, read, attachments; drafts and sending from an explicitly chosen sender account
   - threading headers; outcome `accepted`/`rejected`/`indeterminate`, never a blind retry
+  - organizing with the `modify` capability and the provider opt-in `--allow-modify` (`gmail.modify`, `Mail.ReadWrite`, IMAP opt-in): list folders and drafts, mark read/unread and starred, move, archive, trash and restore; deleting means trash only, never permanent deletion, emptying the trash, filters or forwarding rules
+  - send an existing draft (`mail_send_draft`, idempotent per `requestId`; IMAP sends without the Bcc header and files the draft in Sent)
 - **Google Calendar/Contacts** (`docs/GOOGLE_PRODUCTIVITY_MILESTONE.md`):
   - its own OAuth grant, services chosen explicitly with `--services calendar,contacts`, `calendar.readonly`/`contacts.readonly` by default, opt-in `calendar.events.owned`
   - read calendars and events; create private events (idempotent per `requestId`) and change them (`If-Match`), without attendees, invitations or notifications
@@ -70,10 +76,11 @@ Perch re-checks the grant before every tool call, so `perch client remove ID` ta
 - **Slack** (`docs/SLACK_WHATSAPP_MILESTONE.md`; one internal app with a user token per workspace, manifest in `docs/slack-app-manifest.json`):
   - list channels, private channels, DMs and group DMs; read history and threads; Slack search across all workspaces
   - post as the connected user (also in threads), only with a `slack_send` grant, idempotent per `requestId`
+  - read file metadata and content (`slack_get_file`, size-bounded, never truncated); with `slack_send`: add/remove reactions, edit own messages, upload files up to 10 MiB (idempotent per `requestId`). Never deletes messages or files. Needs the current manifest (`reactions:*`, `files:*`): reinstall the app and run `perch slack add` again
 - **WhatsApp** through GOWA (unofficial, self-hosted, localhost only):
   - pair with a pairing code from the CLI; several accounts in separate device slots
-  - list chats, read and search messages (search covers the most recent chats); media as metadata only
-  - send text messages only with a `whatsapp_send` grant, idempotent per `requestId`
+  - list chats, read and search messages (search covers the most recent chats); download one message's media with `whatsapp_download_media` (base64, default limit 48 KiB, max 16 MiB, refused rather than truncated)
+  - send text messages and media (`whatsapp_send_media`: image, video, audio or file as base64, max 16 MiB, never URLs) only with a `whatsapp_send` grant, idempotent per `requestId`. Sending media raises the risk of WhatsApp restricting the account even more than text
 - **One operator per installation:** Perch is self-hosted by the person whose accounts it serves. The earlier admin-provisioned users (`perch user add`, `PERCH_USER`) were removed; see `docs/SETUP.md` §4c for leftover files.
 - **Luma** through the official Luma MCP server (`perch luma add`, OAuth, no Luma Plus needed; mock-tested only): read calendars, events and guests; create and change events, invite and approve guests, send blasts only with `luma_events` / `luma_guests` / `luma_blast` grants. A fixed tool list with pinned schemas, idempotent writes, and blasts only after Perch has counted the recipients (`confirmRecipientCount`). See `docs/SETUP.md` §4g.
 - **Status:** `perch status` lists every connected account with a live, read-only check (exit code 1 if one fails), client grants, the send ledger fill level and recent activity. `GET /status` on the HTTP server shows the same as a read-only page (no secrets, no script; the global read-only token as the browser password; see `docs/SETUP.md` §5a).

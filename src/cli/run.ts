@@ -8,7 +8,7 @@ import { loadHttpToken, resolveConfig, type PerchConfig } from '../config.js';
 import { createPerchContext } from '../context.js';
 import { PerchError, safeMessage } from '../errors.js';
 import { registerGoogleAccount, removeGoogleAccount } from '../google/accounts.js';
-import { DEFAULT_AUTH_TIMEOUT_MS, MAX_AUTH_TIMEOUT_MS, parseClientFile, runLoopbackAuthorization } from '../google/oauth.js';
+import { DEFAULT_AUTH_TIMEOUT_MS, DRIVE_READONLY_SCOPE, DRIVE_SCOPE, MAX_AUTH_TIMEOUT_MS, parseClientFile, runLoopbackAuthorization } from '../google/oauth.js';
 import {
   parseServices,
   productivityScopesFor,
@@ -86,18 +86,18 @@ Usage:
   perch accounts                               list all connected accounts
   perch status [--no-check] [--json]           overview with a live check per account
                                                (exit code 1 if a check failed); the same page: GET /status on serve --http
-  perch google add --label NAME [--port N] [--timeout SECONDS] [--login-hint EMAIL]
+  perch google add --label NAME [--allow-write] [--port N] [--timeout SECONDS] [--login-hint EMAIL]
   perch google list | remove ID [--revoke]
   perch notion add --label NAME                PAT is read via a masked terminal prompt
   perch notion list | remove ID
-  perch gmail add --label NAME [--allow-drafts] [--allow-send] [--port N] [--timeout SECONDS] [--login-hint EMAIL]
+  perch gmail add --label NAME [--allow-drafts] [--allow-send] [--allow-modify] [--port N] [--timeout SECONDS] [--login-hint EMAIL]
   perch gmail list | remove ID [--revoke]
-  perch microsoft add --label NAME [--allow-drafts] [--allow-send] [--port N] [--timeout SECONDS]
+  perch microsoft add --label NAME [--allow-drafts] [--allow-send] [--allow-modify] [--port N] [--timeout SECONDS]
                       [--redirect-host localhost|127.0.0.1] [--login-hint EMAIL]
   perch microsoft list | remove ID
   perch imap add --label NAME --email ADDRESS [--username USER] [--preset gmx|gmx-com]
                  [--imap-host H --imap-port N --smtp-host H --smtp-port N --smtp-security tls|starttls]
-                 [--allow-drafts] [--allow-send] [--drafts-mailbox NAME]   password via masked prompt
+                 [--allow-drafts] [--allow-send] [--allow-modify] [--drafts-mailbox NAME]   password via masked prompt
   perch imap presets | list | remove ID
   perch google-productivity add --label NAME --services calendar,contacts [--allow-calendar-write]
                       [--port N] [--timeout SECONDS] [--login-hint EMAIL]
@@ -110,7 +110,7 @@ Usage:
   perch whatsapp add --label NAME --phone +43…  [--timeout SECONDS]   pair a new linked device by pairing code
   perch whatsapp list | status | remove ID [--keep-device]
   perch client add --label NAME --allow CAPS --account ID [--account ID ...] [--token-file PATH]
-                      CAPS: read,draft,send (mail accounts); calendar_read,calendar_write,contacts_read (gprod accounts);
+                      CAPS: read,draft,send,modify (mail accounts); calendar_read,calendar_write,contacts_read (gprod accounts);
                             slack_read,slack_send (slack accounts); whatsapp_read,whatsapp_send (whatsapp accounts);
                             luma_read,luma_events,luma_guests,luma_blast (luma accounts)
   perch client list | remove ID
@@ -188,7 +188,7 @@ function formatMail(data: StoreData, which: AccountSection): string[] {
       ? data.imap.map((a) => ({
           a,
           kind: 'imap',
-          extra: `${a.imap.host}/${a.smtp.host}; drafts ${a.allowDrafts ? 'on' : 'off'}, send ${a.allowSend ? 'on' : 'off'}`,
+          extra: `${a.imap.host}/${a.smtp.host}; drafts ${a.allowDrafts ? 'on' : 'off'}, send ${a.allowSend ? 'on' : 'off'}, organize ${a.allowModify ? 'on' : 'off'}`,
         }))
       : []),
   ];
@@ -333,16 +333,19 @@ async function cmdGoogle(config: PerchConfig, io: CliIo, sub: string | undefined
     throw new PerchError('Set PERCH_GOOGLE_CLIENT_FILE to the JSON of your Google "Desktop app" OAuth client', 'bad_config');
   }
   const client = parseClientFile((await readPrivateFile(config.googleClientFile)).toString('utf8'));
+  // --allow-write asks Google for full Drive access (create, edit, share, trash); writes still need a client grant with drive_write.
+  const allowWrite = Boolean(values['allow-write']);
   const grant = await runLoopbackAuthorization({
     client,
     upstream,
     port,
     timeoutMs,
+    scopes: [allowWrite ? DRIVE_SCOPE : DRIVE_READONLY_SCOPE],
     ...(typeof values['login-hint'] === 'string' ? { loginHint: values['login-hint'] } : {}),
     onAuthUrl: (url) => {
       const p = new URL(new URL(url).searchParams.get('redirect_uri')!).port;
       io.stderr(
-        `Open this URL in a browser and approve read-only Drive access for the account you want to add:\n\n${url}\n\n` +
+        `Open this URL in a browser and approve ${allowWrite ? 'full (read and write)' : 'read-only'} Drive access for the account you want to add:\n\n${url}\n\n` +
           `The browser must reach http://127.0.0.1:${p} on this machine. If the browser runs elsewhere, ` +
           `forward the port first: ssh -L ${p}:127.0.0.1:${p} <this-server>\n` +
           `Waiting up to ${Math.round(timeoutMs / 1000)}s...\n`,
@@ -350,7 +353,8 @@ async function cmdGoogle(config: PerchConfig, io: CliIo, sub: string | undefined
     },
   });
   const account = await registerGoogleAccount(store, upstream, { label: values.label, client, grant });
-  io.stdout(`Connected Google account ${account.id} (${account.email}) as "${account.label}".\n`);
+  io.stdout(`Connected Google account ${account.id} (${account.email}) as "${account.label}"${allowWrite ? ' with Drive write access at Google' : ''}.\n`);
+  if (allowWrite) io.stdout(`Writes still need a client grant: perch client add --label NAME --allow drive_read,drive_write --account ${account.id}\n`);
 }
 
 async function cmdNotion(config: PerchConfig, io: CliIo, sub: string | undefined, rest: string[], values: Record<string, unknown>) {
@@ -400,7 +404,7 @@ function printAuthUrl(io: CliIo, what: string, url: string, timeoutMs: number) {
 }
 
 function describeOptIns(values: Record<string, unknown>): string {
-  const extra = [values['allow-drafts'] ? 'drafts' : '', values['allow-send'] ? 'send' : ''].filter(Boolean);
+  const extra = [values['allow-drafts'] ? 'drafts' : '', values['allow-send'] ? 'send' : '', values['allow-modify'] ? 'organize' : ''].filter(Boolean);
   return extra.length ? `read + ${extra.join(' + ')}` : 'read-only';
 }
 
@@ -423,7 +427,7 @@ async function cmdGmail(config: PerchConfig, io: CliIo, sub: string | undefined,
     throw new PerchError('Set PERCH_GOOGLE_CLIENT_FILE to the JSON of your Google "Desktop app" OAuth client', 'bad_config');
   }
   const client = parseClientFile((await readPrivateFile(config.googleClientFile)).toString('utf8'));
-  const scopes = gmailScopesFor({ send: Boolean(values['allow-send']), drafts: Boolean(values['allow-drafts']) });
+  const scopes = gmailScopesFor({ send: Boolean(values['allow-send']), drafts: Boolean(values['allow-drafts']), modify: Boolean(values['allow-modify']) });
   const grant = await runLoopbackAuthorization({
     client,
     upstream,
@@ -466,6 +470,7 @@ async function cmdMicrosoft(config: PerchConfig, io: CliIo, sub: string | undefi
     upstream,
     send: Boolean(values['allow-send']),
     drafts: Boolean(values['allow-drafts']),
+    modify: Boolean(values['allow-modify']),
     port,
     timeoutMs,
     redirectHost,
@@ -566,6 +571,7 @@ async function cmdImap(config: PerchConfig, io: CliIo, sub: string | undefined, 
       password,
       allowDrafts: Boolean(values['allow-drafts']),
       allowSend: Boolean(values['allow-send']),
+      allowModify: Boolean(values['allow-modify']),
       ...(str('username') ? { username: str('username')! } : {}),
       ...(str('preset') ? { preset: str('preset')! } : {}),
       ...(str('imap-host') ? { imapHost: str('imap-host')! } : {}),
@@ -579,7 +585,7 @@ async function cmdImap(config: PerchConfig, io: CliIo, sub: string | undefined, 
   );
   io.stdout(
     `Connected IMAP account ${account.id} (${account.email}) as "${account.label}" via ${account.imap.host}/${account.smtp.host} ` +
-      `(drafts ${account.allowDrafts ? 'on' : 'off'}, send ${account.allowSend ? 'on' : 'off'}).\n`,
+      `(drafts ${account.allowDrafts ? 'on' : 'off'}, send ${account.allowSend ? 'on' : 'off'}, organize ${account.allowModify ? 'on' : 'off'}).\n`,
   );
 }
 
@@ -598,10 +604,12 @@ async function cmdSlack(config: PerchConfig, io: CliIo, sub: string | undefined,
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
   const token = await io.readSecret(`Slack user token (xoxp-…) for "${values.label}" (input hidden): `);
   const ws = await addSlackWorkspace(store, new Upstream(io.transport ?? createFetchTransport()), { label: values.label, token });
-  const missing = ['search:read', 'chat:write'].filter((s) => !ws.scopes.includes(s));
+  const missing = ['search:read', 'chat:write', 'reactions:read', 'reactions:write', 'files:read', 'files:write'].filter((s) => !ws.scopes.includes(s));
   io.stdout(
     `Connected Slack workspace ${ws.id} "${ws.label}" (${ws.teamName ?? ws.teamId}, user ${ws.userName ?? ws.userId}).\n` +
-      (missing.length ? `Note: the token lacks ${missing.join(', ')}; ${missing.includes('chat:write') ? 'posting' : 'search'} will not work until you add it and reconnect.\n` : '') +
+      (missing.length
+        ? `Note: the token lacks ${missing.join(', ')}; the tools that need them will not work until you reinstall the app with the current manifest (perch slack manifest) and run perch slack add again.\n`
+        : '') +
       `Posting needs a client grant: perch client add --label NAME --allow slack_read,slack_send --account ${ws.id}\n`,
   );
 }
@@ -853,6 +861,8 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         'keep-device': { type: 'boolean' },
         'no-check': { type: 'boolean' },
         'read-all': { type: 'boolean' },
+        'allow-write': { type: 'boolean' },
+        'allow-modify': { type: 'boolean' },
         public: { type: 'boolean' },
         name: { type: 'string' },
         redirect: { type: 'string', multiple: true },

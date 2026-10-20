@@ -3,6 +3,8 @@ import { DEFAULT_AUTH_TIMEOUT_MS, MAX_AUTH_TIMEOUT_MS, runPkceLoopback } from '.
 import type { Upstream } from '../upstream.js';
 
 export const DRIVE_READONLY_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
+/** Full Drive access; requested only with `perch google add --allow-write`, and checked before every Drive write. */
+export const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
 const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 const CALLBACK_PATH = '/oauth2/callback';
 export { DEFAULT_AUTH_TIMEOUT_MS, MAX_AUTH_TIMEOUT_MS };

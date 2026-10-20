@@ -108,6 +108,23 @@ perch google add --label "Arbeit" --port 8766
 
 Die Identität (E-Mail) liest Perch über die Drive-API aus. Ein zweiter Grant für dieselbe E-Mail wird abgelehnt.
 
+### 3.3 Schreiben (Drive)
+
+Standardmäßig ist Drive nur lesend verbunden (`drive.readonly`). Für Schreiben das Konto mit vollem Drive-Zugriff verbinden (Scope `drive`; im Consent-Screen der Google-Cloud-App muss dieser Scope eingetragen sein):
+
+```bash
+perch google remove google-1a2b3c4d          # bestehendes Konto, nur falls schon lesend verbunden
+perch google add --label "Privat" --allow-write --port 8766
+perch client add --label "Laptop" --allow drive_read,drive_write --account google-1a2b3c4d
+```
+
+- Schreiben dürfen **nur Client-Grants mit `drive_write`** für genau dieses Konto. Das globale Token und `serve --stdio` bleiben lesend.
+- Fehlt beim Anbieter der Scope `drive`, scheitert jeder Schreibaufruf mit `provider_scope_missing` (Hinweis: neu verbinden mit `--allow-write`), bevor etwas an Google geht.
+- Werkzeuge: hochladen (bis 10 MiB, Base64), Ordner, Google Doc/Sheet/Slides (leer oder aus Text/CSV), Inhalt ersetzen, umbenennen/verschieben, kopieren, teilen (Nutzer, Gruppe, Domain, „jeder mit dem Link“; Leser/Kommentator/Bearbeiter), Freigabe entfernen, kommentieren, Papierkorb und wiederherstellen.
+- Anlegen, Kopieren, Teilen und Kommentieren brauchen eine `requestId` (wie beim Senden, Abschnitt 4d): dieselbe ID läuft nie doppelt.
+- **Nie:** endgültig löschen, Papierkorb leeren, Eigentümer übertragen oder Rolle „owner“ vergeben. Diese Routen stehen nicht in der Allowlist.
+- Alle Schreibaufrufe stehen im Audit-Log (`perch audit list`), ohne Dateinamen, Inhalte oder E-Mail-Adressen.
+
 ## 4. Notion-Workspaces verbinden (PAT pro Workspace)
 
 1. In Notion pro Workspace ein **Personal Access Token** erstellen. Anleitung: <https://developers.notion.com/guides/get-started/personal-access-tokens>
@@ -122,7 +139,21 @@ perch notion add --label "Privat-Notion"
 
 Perch prüft das Token mit `GET /v1/users/me` und speichert den gemeldeten Token-Eigentümer als Information. Das Label vergibt der Nutzer. Perch kann nicht verifizieren, welcher Workspace dahintersteht.
 
-Obwohl das PAT laut Notion auch schreiben könnte, ruft Perch nur Lese-Endpunkte auf (Allowlist).
+Lesen dürfen das globale Token (nur lesend) und Client-Grants mit `notion_read`, diese nur in ihren Workspaces.
+
+### 4.1 Schreiben (Notion)
+
+Schreiben geht nur über einen Client-Grant mit `notion_write` für den Workspace, nie über das globale Token:
+
+```bash
+perch client add --label "Codex Notion" --allow notion_read,notion_write --account notion-1a2b3c4d
+```
+
+- Tools: `notion_create_page` (unter einer Seite oder als Zeile einer Data Source), `notion_update_page`, `notion_append_blocks`, `notion_update_block`, `notion_trash_page`/`notion_restore_page`, `notion_trash_block`, `notion_add_comment`; lesend dazu `notion_list_comments`.
+- Löschen heißt nur **Papierkorb** (`in_trash`, in Notion wiederherstellbar). Endgültiges Löschen und Änderungen am Datenbank-Schema sind nicht in der Allowlist.
+- Anlegen, Blöcke anhängen und Kommentieren brauchen eine `requestId` (wie beim Senden, Abschnitt 4d): dieselbe ID schreibt nie doppelt, kein automatischer Neuversuch.
+- Grenzen pro Aufruf: höchstens 100 Blöcke (verschachtelte mitgezählt), 512 KiB JSON, 2000 Zeichen pro Rich-Text-Element.
+- **Im Token freischalten (Nutzeraufgabe):** In den Einstellungen des Tokens bzw. der Integration die Fähigkeiten **„Update content“**, **„Insert content“** und für Kommentare **„Read comments“** und **„Insert comments“** aktivieren und die Seiten mit dem Token teilen. Perch kann das vorab nicht prüfen; fehlt eine Fähigkeit, meldet Notion `restricted_resource` und Perch zeigt einen Hinweis darauf.
 
 ## 4a. Mail-Konten verbinden (E-Mail-Meilenstein)
 
@@ -196,7 +227,7 @@ perch imap remove imap-1a2b3c4d
 
 - **Transport:** IMAP nur mit implizitem TLS. SMTP mit implizitem TLS (465) oder STARTTLS mit Pflicht-TLS (587). TLS ≥ 1.2 mit Zertifikatsprüfung ist nicht abschaltbar. Nur Hostnamen, keine IP-Adressen.
 - **Prüfung beim Hinzufügen:** `add` meldet sich vor dem Speichern bei IMAP an (bei `--allow-send` zusätzlich SMTP-`verify`). Bei einem Fehler wird nichts gespeichert.
-- **Gesendet-Ordner:** Perch legt nach dem SMTP-Versand **keine Kopie in „Gesendet“** ab. Ob GMX das serverseitig tut, ist nicht verifiziert.
+- **Gesendet-Ordner:** Perch legt nach `mail_send` per SMTP **keine Kopie in „Gesendet“** ab. Ob GMX das serverseitig tut, ist nicht verifiziert. Ausnahme: `mail_send_draft` verschiebt den gesendeten Entwurf nach „Gesendet“ (Abschnitt 4a.5).
 
 ### 4a.4 Client-Grants für Entwürfe und Senden
 
@@ -219,6 +250,27 @@ perch client remove client-1a2b3c4d     # wirkt ab dem nächsten Tool-Aufruf, au
 - **Widerruf und Einschränkung:** Vor **jedem** Tool-Aufruf liest Perch den Grant neu aus dem Store (Grant-ID und Token-Hash). `perch client remove` oder ein eingeschränkter Grant gilt damit sofort, auch für eine laufende stdio-Session. Der Aufruf scheitert mit `grant_revoked` bzw. `capability_denied`, bevor ein Provider kontaktiert wird. Über HTTP wird ein entferntes Token zusätzlich mit `401` abgewiesen. Die Tool-Liste einer laufenden stdio-Session wird nicht aktualisiert.
 - **Betreiber:** Das globale HTTP-Token und `perch serve --stdio` ohne Client-Token behalten alle Read-only-Tools (Drive, Notion, Mail, seit dem Productivity-Meilenstein auch Calendar/Contacts lesend) für alle Konten. Schreib-Tools gibt es dort nie.
 - **Grenze:** Client-Grants schränken einen Client innerhalb **eines** Namespace ein. Die Trennung zwischen Personen leisten erst die vom Admin angelegten Nutzer (Abschnitt 4c).
+
+### 4a.5 Ordnen und Entwürfe senden
+
+Mails ordnen (gelesen/ungelesen, Stern/Flag, verschieben, archivieren, Papierkorb und zurück) und vorhandene Entwürfe senden. Löschen heißt immer **Papierkorb** (wiederherstellbar). Endgültiges Löschen, Papierkorb leeren, Filter und Weiterleitungsregeln bietet Perch nicht an; die Upstream-Allowlist enthält diese Routen nicht.
+
+- **Beim Anbieter freischalten** (`--allow-modify`, sonst `provider_scope_missing` mit Hinweis zum Neu-Verbinden):
+  - Gmail: `perch gmail add --label "Gmail" --allow-modify` fordert zusätzlich `gmail.modify` an (Labels, gelesen, Archiv, Papierkorb; kein endgültiges Löschen). Für die Google-Cloud-Einwilligung den Scope `.../auth/gmail.modify` ergänzen.
+  - Microsoft: `perch microsoft add --label "Outlook" --allow-modify` fordert `Mail.ReadWrite` an (dasselbe Recht wie `--allow-drafts`).
+  - IMAP: `perch imap add ... --allow-modify` speichert `allowModify: true`. Bestehende Konten bleiben ohne (Standard `false`).
+  - Bestehende Konten: entfernen und mit der Option neu hinzufügen.
+- **Client-Grant:** Ordnen braucht die Capability `modify` für das Konto, Entwurf senden braucht `send`:
+  `perch client add --label "Laptop" --allow read,modify,send --account gmail-1a2b3c4d`
+- **Tools:**
+  - `mail_list_folders`, `mail_list_drafts` (lesend, mit `read` und für das globale Token)
+  - `mail_mark_message` (`read`, `starred`), `mail_move_message` (`folderId` aus `mail_list_folders` oder `archive: true`), `mail_trash_message`, `mail_restore_message` (alle mit `modify`)
+  - `mail_send_draft` (mit `send` und `requestId`, idempotent wie `mail_send`; Stand über `mail_send_status`)
+- **Pro Anbieter:**
+  - Gmail: Verschieben setzt das Ziel-Label und entfernt `INBOX`, Archivieren entfernt nur `INBOX`, Papierkorb über `messages/{id}/trash`/`untrash`. Entwurf senden über `drafts/send` braucht `gmail.compose` oder `gmail.modify` (`gmail.send` allein reicht nicht).
+  - Microsoft: Papierkorb ist „Gelöschte Elemente“, Archivieren verschiebt nach „Archiv“, Wiederherstellen nur aus „Gelöschte Elemente“ zurück in den Posteingang. Nach jedem Verschieben hat die Mail eine **neue** `messageId` (steht in der Antwort). Entwurf senden braucht `Mail.Send`.
+  - IMAP: Papierkorb ist der Ordner mit Special-Use `\Trash`, Archiv `\Archive` (sonst `folderId` angeben). Verschoben wird nur mit `MOVE` oder `UIDPLUS`; ohne beides lehnt Perch ab, weil ein einfaches `EXPUNGE` andere als gelöscht markierte Mails endgültig entfernen könnte. Entwurf senden liest den Entwurf aus dem Entwurfsordner, verschickt ihn per SMTP **ohne Bcc-Kopfzeile** (Bcc nur im Envelope) und verschiebt ihn danach nach `\Sent`. Der `From` des Entwurfs muss die Kontoadresse sein.
+- **Audit:** Jeder Aufruf landet ohne Inhalte im Audit-Log; Schreibaufrufe mit `attempt` vor dem Anbieter-Aufruf.
 
 ## 4b. Google Calendar und Contacts verbinden (Productivity-Meilenstein)
 
@@ -334,7 +386,12 @@ Die App hat nur User-Scopes:
 | `channels:history`, `groups:history`, `im:history`, `mpim:history` | Nachrichten und Threads lesen |
 | `users:read` | Namen zu Nutzer-IDs |
 | `search:read` | `slack_search` |
-| `chat:write` | `slack_send_message` (nur mit Client-Grant) |
+| `chat:write` | `slack_send_message`, `slack_edit_message` (nur mit Client-Grant) |
+| `reactions:read`, `reactions:write` | `slack_add_reaction`, `slack_remove_reaction` (nur mit Client-Grant) |
+| `files:read` | `slack_get_file` (Metadaten und Inhalt einer Datei) |
+| `files:write` | `slack_upload_file` (nur mit Client-Grant) |
+
+**Bestehende Workspaces (Manifest vor Oktober 2026):** Die Scopes `reactions:*` und `files:*` sind neu. Im Workspace die App-Seite öffnen → **App Manifest** → durch `perch slack manifest` ersetzen → **Reinstall to Workspace** → neues User OAuth Token kopieren. Dann in Perch `perch slack remove ID` und `perch slack add --label …` (Perch liest die Scopes nur beim Verbinden). Ohne Neuinstallation lehnen die neuen Tools mit `provider_scope_missing` ab, bevor sie Slack aufrufen.
 
 Token-Rotation ist im Manifest aus, das Token läuft also nicht ab.
 
@@ -345,7 +402,7 @@ perch slack add --label "Firma"     # Token verdeckt eingeben
 perch slack list
 ```
 
-Perch prüft das Token mit `auth.test` und speichert Workspace, Nutzer und die tatsächlich gewährten Scopes. Fehlen `search:read` oder `chat:write`, warnt `slack add`. Das gleiche Workspace-Konto zweimal zu verbinden wird abgelehnt.
+Perch prüft das Token mit `auth.test` und speichert Workspace, Nutzer und die tatsächlich gewährten Scopes. Fehlen Scopes des aktuellen Manifests (etwa `search:read`, `chat:write`, `files:write`), warnt `slack add`. Das gleiche Workspace-Konto zweimal zu verbinden wird abgelehnt.
 
 ### 4e.3 Lesen und Senden
 
@@ -357,6 +414,12 @@ Perch prüft das Token mit `auth.test` und speichert Workspace, Nutzer und die t
   ```
 
   Pflichtfeld `requestId` wie bei `mail_send` (Abschnitt 4d): gleiche ID + gleicher Inhalt postet nie zweimal.
+
+- **Dateien und Reaktionen:**
+  - `slack_get_file` (lesen, wie oben): Metadaten per `files.info`, Inhalt als Base64 bis `maxBytes` (Standard 48 KiB, höchstens 10 MiB). Größere Dateien werden abgelehnt, nie abgeschnitten. Geladen wird nur von `https://files.slack.com/files-pri/<Team>-<Datei>/…`.
+  - `slack_add_reaction`, `slack_remove_reaction`, `slack_edit_message` (nur eigene Nachrichten; Slack lehnt fremde ab): nur mit `slack_send`.
+  - `slack_upload_file` (bis 10 MiB, optional in einen Thread mit Kommentar): nur mit `slack_send`, idempotent per `requestId` wie `slack_send_message`. Die Bytes gehen nur an `https://files.slack.com/upload/v1/…`; jede andere Upload-Adresse wird abgelehnt, bevor Daten fließen.
+  - Löschen (Nachrichten, Dateien) und öffentliche Datei-Links gibt es nicht: Löschen ist bei Slack endgültig.
 
   **Achtung Limit:** Slack-, WhatsApp- und Mail-Sends teilen sich 1000 Sende-Einträge pro Namespace. Danach schlagen alle Sends fehl, auch Mail (`ledger_full`), bis es einen Ledger-Rollover gibt (`docs/SLACK_WHATSAPP_MILESTONE.md` §6).
 
@@ -453,14 +516,18 @@ perch whatsapp remove ID --keep-device   # nur lokal entfernen
 
 ### 4f.3 Lesen und Senden
 
-- **Lesen** (`whatsapp_list_chats`, `whatsapp_get_messages`, `whatsapp_search`): globales Token und jeder Client mit `whatsapp_read`. Medien nur als Metadaten (Typ, Dateiname, Größe), keine Downloads.
-- **Senden** (`whatsapp_send_message`, `whatsapp_send_status`): nur Text, optional als Antwort, nur mit Client-Grant `whatsapp_send` und Pflichtfeld `requestId`:
+- **Lesen** (`whatsapp_list_chats`, `whatsapp_get_messages`, `whatsapp_search`): globales Token und jeder Client mit `whatsapp_read`. Medien erscheinen dort nur als Metadaten (Typ, Dateiname, Größe).
+- **Medien herunterladen** (`whatsapp_download_media`): globales Token und jeder Client mit `whatsapp_read`. Liefert die Datei einer Nachricht als Base64 mit MIME-Typ und Dateiname. Standardgrenze 48 KiB (`maxBytes`, höchstens 16 MiB); größere Dateien lehnt Perch ab, statt sie abzuschneiden. GOWA legt dabei eine Kopie unter `statics/media/…` auf seiner Platte ab; Perch liest nur diese Datei und nur von der konfigurierten GOWA-Adresse.
+- **Text senden** (`whatsapp_send_message`, `whatsapp_send_status`): nur Text, optional als Antwort, nur mit Client-Grant `whatsapp_send` und Pflichtfeld `requestId`:
 
   ```bash
   perch client add --label "Claude Code" --allow whatsapp_read,whatsapp_send --account whatsapp-1a2b3c4d
   ```
 
   Ergebnis `accepted` (von GOWA an WhatsApp übergeben), `rejected` (GOWA hat abgelehnt, nicht gesendet) oder `indeterminate` (Antwort verloren; nie automatisch wiederholt).
+- **Medien senden** (`whatsapp_send_media`): Bild, Video, Audio oder Datei (Dokument) als Base64, höchstens 16 MiB, optional mit Bildunterschrift (nicht bei Audio) oder als Antwort. Gleiche Regeln wie beim Text: nur mit `whatsapp_send` für das Konto, Pflichtfeld `requestId`, Status über `whatsapp_send_status`. Perch schickt nur die Datei selbst, nie eine URL (GOWA lädt also nichts aus dem Netz), und keine Zeitplanung oder Einmal-Ansicht.
+
+  **Achtung:** Medien zu senden erhöht das Risiko, dass WhatsApp das Konto einschränkt oder sperrt, noch stärker als Textnachrichten. Sparsam und nur an bekannte Kontakte verwenden.
 
 ## 4g. Luma über den offiziellen Luma-MCP (Luma-Meilenstein)
 
@@ -517,6 +584,10 @@ perch oauth grant oc-0123456789abcdef --allow luma_read,luma_events --account lu
 - Felder, die das freigegebene Schema nicht nennt, lehnt Perch ab, auch verschachtelt.
 - Luma-Tools haben keine eigene Idempotenz. Bricht ein Aufruf mittendrin ab, ist der Ausgang unklar; dann in Luma nachsehen.
 - Zwischen Zählen und Senden eines Blasts können sich Gäste an- oder abmelden.
+
+## 4h. Papierkorb statt Löschen (alle Dienste)
+
+Perch löscht nie endgültig: Drive, Notion und Mail verschieben nur in den Papierkorb, Slack- und WhatsApp-Nachrichten lassen sich gar nicht löschen. Achtung: Die Anbieter leeren ihre Papierkörbe selbst nach einer Frist (Google Drive und Gmail etwa 30 Tage, Notion 30 Tage, Outlook je nach Einstellung, GMX laut Ordner-Einstellung). Wiederherstellen also zeitnah.
 
 ## 5a. Status: `perch status` und die Statusseite
 

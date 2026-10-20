@@ -3,10 +3,17 @@ import type { SourcePage } from '../fanout.js';
 import type { GmailAccount } from '../store/credentialStore.js';
 import { UpstreamError, type CallOptions, type Upstream } from '../upstream.js';
 import { ACCEPTED_NOTE, HARD_MAIL_MAX_BYTES, INDETERMINATE_NOTE } from './types.js';
-import { GMAIL_COMPOSE_SCOPE, GMAIL_SEND_SCOPE } from './gmailAccounts.js';
+import { GMAIL_COMPOSE_SCOPE, GMAIL_MODIFY_SCOPE, GMAIL_SEND_SCOPE } from './gmailAccounts.js';
 import { htmlToText, truncateUtf8 } from './html.js';
 import type {
   DraftResult,
+  MailDraftSummary,
+  MailFolder,
+  MailFolderRole,
+  MarkChange,
+  MoveTarget,
+  OrganizeResult,
+  ProviderCapabilities,
   MailAttachmentContent,
   MailAttachmentMeta,
   MailMessage,
@@ -58,6 +65,21 @@ const MESSAGE_ID = /^[A-Za-z0-9_-]{1,256}$/;
 const PART_ID = /^[0-9.]{1,64}$/;
 /** Gmail's own (volatile) attachment ids, as allowlisted by Upstream. */
 const ATTACHMENT_ID = /^[A-Za-z0-9_-]{1,4096}$/;
+/** Gmail label ids (INBOX, Label_12, CATEGORY_SOCIAL, ...). */
+const LABEL_ID = /^[A-Za-z0-9_-]{1,256}$/;
+/** Gmail page tokens (opaque; digits in practice). */
+const PAGE_TOKEN = /^[A-Za-z0-9_.~=-]{1,1024}$/;
+const LABEL_ROLES: Record<string, MailFolderRole> = {
+  INBOX: 'inbox',
+  SENT: 'sent',
+  DRAFT: 'drafts',
+  TRASH: 'trash',
+  SPAM: 'junk',
+  STARRED: 'starred',
+  IMPORTANT: 'important',
+};
+/** System labels a message cannot be moved to with labels.modify (or only through a dedicated tool). */
+const UNMOVABLE_LABELS = new Set(['TRASH', 'DRAFT', 'SENT', 'UNREAD', 'STARRED', 'IMPORTANT', 'CHAT']);
 /** Parallel messages.get calls per search page (Gmail enforces per-user concurrency limits). */
 const METADATA_CONCURRENCY = 5;
 /** Slack for the JSON envelope around a base64url body from the attachments endpoint. */
@@ -132,9 +154,17 @@ export class GmailProvider implements MailProvider<GmailAccount> {
     private readonly tokens: GmailTokenSource,
   ) {}
 
-  providerCapabilities(account: GmailAccount): { draft: boolean; send: boolean } {
+  providerCapabilities(account: GmailAccount): ProviderCapabilities {
     const compose = account.scopes.includes(GMAIL_COMPOSE_SCOPE);
-    return { draft: compose, send: compose || account.scopes.includes(GMAIL_SEND_SCOPE) };
+    return { draft: compose, send: compose || account.scopes.includes(GMAIL_SEND_SCOPE), modify: account.scopes.includes(GMAIL_MODIFY_SCOPE) };
+  }
+
+  /**
+   * users.drafts.send accepts gmail.compose or gmail.modify, but Perch requires the compose opt-in
+   * (--allow-drafts): an account connected only to organize mail (--allow-modify) must never gain a send path.
+   */
+  canSendDraft(account: GmailAccount): boolean {
+    return account.scopes.includes(GMAIL_COMPOSE_SCOPE);
   }
 
   private async auth(account: GmailAccount): Promise<Record<string, string>> {
@@ -300,11 +330,18 @@ export class GmailProvider implements MailProvider<GmailAccount> {
     if (!this.providerCapabilities(account).send) {
       throw new PerchError(`Gmail account ${account.id} was not authorised to send (gmail.send or gmail.compose)`, 'capability_denied');
     }
-    const json = outgoingMessage(mail);
+    return this.submit(account, `${BASE}/messages/send`, outgoingMessage(mail));
+  }
+
+  /**
+   * One POST to a send route, never retried. 4xx = rejected (not sent); anything after the request may have
+   * reached Google = indeterminate; failures before the transport (token, allowlist) throw.
+   */
+  private async submit(account: GmailAccount, path: string, json: unknown): Promise<SendResult> {
     const headers = await this.auth(account);
     let body: Buffer;
     try {
-      ({ body } = await this.upstream.raw('gmail', { method: 'POST', path: `${BASE}/messages/send`, headers, json, capability: 'send' }));
+      ({ body } = await this.upstream.raw('gmail', { method: 'POST', path, headers, json, capability: 'send' }));
     } catch (err) {
       // Blocked by the allowlist: nothing left the process.
       if (err instanceof PerchError && err.code === 'route_not_allowed') throw err;
@@ -326,6 +363,116 @@ export class GmailProvider implements MailProvider<GmailAccount> {
       ...(typeof id === 'string' && id ? { providerMessageId: id } : {}),
       detail: ACCEPTED_NOTE,
     };
+  }
+
+  // ---- organizing (gmail.modify) and sending existing drafts --------------------------------------------
+
+  private requireModify(account: GmailAccount): void {
+    if (this.providerCapabilities(account).modify) return;
+    throw new PerchError(
+      `Gmail account ${account.id} was not authorised to organize mail (gmail.modify). Reconnect it with --allow-modify: ` +
+        `\`perch gmail remove ${account.id}\`, then \`perch gmail add --allow-modify --label <label>\`.`,
+      'provider_scope_missing',
+    );
+  }
+
+  /** labels.modify on one message (route tag mail_modify). */
+  private async modify(account: GmailAccount, messageId: string, add: string[], remove: string[]): Promise<OrganizeResult> {
+    this.requireModify(account);
+    const id = checkMessageId(messageId);
+    await this.call<unknown>(account, {
+      method: 'POST',
+      path: `${BASE}/messages/${id}/modify`,
+      json: { ...(add.length ? { addLabelIds: add } : {}), ...(remove.length ? { removeLabelIds: remove } : {}) },
+      capability: 'mail_modify',
+    });
+    return { messageId: id };
+  }
+
+  async listFolders(account: GmailAccount): Promise<MailFolder[]> {
+    const res = await this.get<{ labels?: Array<{ id?: unknown; name?: unknown; type?: unknown }> }>(account, `${BASE}/labels`);
+    return (res.labels ?? [])
+      .filter((l): l is { id: string; name: unknown; type: unknown } => typeof l.id === 'string' && LABEL_ID.test(l.id))
+      .map((l) => ({
+        folderId: l.id,
+        name: typeof l.name === 'string' ? l.name : l.id,
+        role: LABEL_ROLES[l.id] ?? 'other',
+        type: l.type === 'system' ? ('system' as const) : ('user' as const),
+      }));
+  }
+
+  async listDrafts(account: GmailAccount, opts: { pageSize: number }, cursor: string | undefined): Promise<SourcePage<MailDraftSummary>> {
+    if (cursor !== undefined && !PAGE_TOKEN.test(cursor)) throw new PerchError('Invalid cursor', 'bad_cursor');
+    const list = await this.get<{ drafts?: Array<{ id?: unknown }>; nextPageToken?: unknown }>(account, `${BASE}/drafts`, {
+      maxResults: opts.pageSize,
+      pageToken: cursor,
+    });
+    const ids = (list.drafts ?? []).map((d) => d.id).filter((id): id is string => typeof id === 'string' && MESSAGE_ID.test(id));
+    const items = await mapBounded(ids, METADATA_CONCURRENCY, async (draftId) => {
+      const d = await this.get<{ message?: GmailMessageResource }>(account, `${BASE}/drafts/${draftId}`, { format: 'metadata' });
+      const m = d.message ?? {};
+      const h = m.payload?.headers;
+      const out: MailDraftSummary = { draftId };
+      if (m.id) out.messageId = m.id;
+      const subject = header(h, 'Subject');
+      if (subject !== undefined) out.subject = subject;
+      const to = splitAddresses(header(h, 'To'));
+      if (to) out.to = to;
+      const date = isoFromInternalDate(m.internalDate);
+      if (date) out.date = date;
+      return out;
+    });
+    const next = typeof list.nextPageToken === 'string' && PAGE_TOKEN.test(list.nextPageToken) ? list.nextPageToken : null;
+    return { items, next };
+  }
+
+  markMessage(account: GmailAccount, messageId: string, change: MarkChange): Promise<OrganizeResult> {
+    const add: string[] = [];
+    const remove: string[] = [];
+    if (change.read !== undefined) (change.read ? remove : add).push('UNREAD');
+    if (change.starred !== undefined) (change.starred ? add : remove).push('STARRED');
+    return this.modify(account, messageId, add, remove);
+  }
+
+  /**
+   * Gmail has labels, not folders: moving adds the target label and removes INBOX (what "Move to" does in Gmail);
+   * moving to INBOX only adds INBOX; archiving only removes INBOX. TRASH is reached through trashMessage only.
+   */
+  async moveMessage(account: GmailAccount, messageId: string, target: MoveTarget): Promise<OrganizeResult> {
+    if (target.archive) {
+      if (target.folderId !== undefined) throw new PerchError('Gmail archive takes no folderId (it removes the INBOX label)', 'bad_argument');
+      return { ...(await this.modify(account, messageId, [], ['INBOX'])), folderId: 'ARCHIVE' };
+    }
+    const label = target.folderId;
+    if (typeof label !== 'string' || !LABEL_ID.test(label)) throw new PerchError('folderId must be a Gmail label id from mail_list_folders', 'bad_argument');
+    if (UNMOVABLE_LABELS.has(label)) {
+      throw new PerchError(`Cannot move to ${label}${label === 'TRASH' ? '; use mail_trash_message' : ''}`, 'bad_argument');
+    }
+    const res = label === 'INBOX' ? await this.modify(account, messageId, ['INBOX'], []) : await this.modify(account, messageId, [label], ['INBOX']);
+    return { ...res, folderId: label };
+  }
+
+  async trashMessage(account: GmailAccount, messageId: string): Promise<OrganizeResult> {
+    this.requireModify(account);
+    const id = checkMessageId(messageId);
+    await this.call<unknown>(account, { method: 'POST', path: `${BASE}/messages/${id}/trash`, capability: 'mail_modify' });
+    return { messageId: id, folderId: 'TRASH' };
+  }
+
+  async restoreMessage(account: GmailAccount, messageId: string): Promise<OrganizeResult> {
+    this.requireModify(account);
+    const id = checkMessageId(messageId);
+    await this.call<unknown>(account, { method: 'POST', path: `${BASE}/messages/${id}/untrash`, capability: 'mail_modify' });
+    return { messageId: id };
+  }
+
+  /** users.drafts.send: Gmail sends the stored draft as is (Bcc handled by Gmail). Exactly one attempt. */
+  async sendDraft(account: GmailAccount, draftId: string): Promise<SendResult> {
+    if (!this.canSendDraft(account)) {
+      throw new PerchError(`Gmail account ${account.id} was not authorised to send drafts (gmail.compose or gmail.modify)`, 'provider_scope_missing');
+    }
+    if (typeof draftId !== 'string' || !MESSAGE_ID.test(draftId)) throw new PerchError('Invalid Gmail draft id', 'bad_argument');
+    return this.submit(account, `${BASE}/drafts/send`, { id: draftId });
   }
 }
 

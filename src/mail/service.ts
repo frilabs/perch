@@ -10,13 +10,17 @@ import {
   DEFAULT_MAIL_PAGE_SIZE,
   HARD_MAIL_MAX_BYTES,
   MAX_MAIL_PAGE_SIZE,
+  type MailDraftSummary,
+  type MailFolder,
   type MailProvider,
   type MailProviderKind,
   type MailSummary,
+  type MoveTarget,
+  type OrganizeResult,
   type ReplyContext,
   type SendResult,
 } from './types.js';
-import { accountChanged, canonicalSendPayload, SendWorkflow, validateRequestId, viewOf, type SendView } from './workflow.js';
+import { accountChanged, canonicalSendDraftPayload, canonicalSendPayload, SendWorkflow, validateRequestId, viewOf, type SendView } from './workflow.js';
 import { MailWorkflowLedger, newOperationId, type SendReason } from './workflowLedger.js';
 
 export interface MailProviders {
@@ -224,8 +228,8 @@ export class MailService {
       return {
         ...provenance(e),
         email: e.account.email,
-        providerCapabilities: { read: true, ...this.provider(e).providerCapabilities(e.account) },
-        granted: [...principal.capabilities].filter((c) => c === 'read' || c === 'draft' || c === 'send').sort(),
+        providerCapabilities: this.providerCaps(e),
+        granted: [...principal.capabilities].filter((c) => c === 'read' || c === 'draft' || c === 'send' || c === 'modify').sort(),
       };
     });
   }
@@ -328,16 +332,27 @@ export class MailService {
     validateOutgoing({ ...compose, subject: compose.subject ?? '' }, e.account.email);
   }
 
-  private assertProviderAllows(e: Entry, what: 'draft' | 'send') {
-    const caps = this.provider(e).providerCapabilities(e.account);
-    if (caps[what]) return;
-    const opt = what === 'send' ? '--allow-send' : '--allow-drafts';
-    throw new PerchError(
-      what === 'send'
-        ? `Account ${e.account.id} was not authorised to send at the provider. Reconnect with send permission: ${RECONNECT[e.kind](e.account.id, opt)}`
-        : `Account ${e.account.id} was not authorised for drafts at the provider. Reconnect: ${RECONNECT[e.kind](e.account.id, opt)}`,
-      'provider_scope_missing',
-    );
+  /** What the stored provider grant allows, as reported to clients (read is always possible). */
+  private providerCaps(e: Entry) {
+    const p = this.provider(e);
+    const caps = p.providerCapabilities(e.account);
+    return { read: true, draft: caps.draft, send: caps.send, modify: caps.modify === true, sendDraft: p.canSendDraft?.(e.account) === true };
+  }
+
+  private assertProviderAllows(e: Entry, what: 'draft' | 'send' | 'modify' | 'send_draft') {
+    const caps = this.providerCaps(e);
+    if (what === 'send_draft' ? caps.sendDraft : caps[what]) return;
+    const id = e.account.id;
+    const reconnect = (opt: string) => RECONNECT[e.kind](id, opt);
+    const message = {
+      send: `Account ${id} was not authorised to send at the provider. Reconnect with send permission: ${reconnect('--allow-send')}`,
+      draft: `Account ${id} was not authorised for drafts at the provider. Reconnect: ${reconnect('--allow-drafts')}`,
+      modify: `Account ${id} was not authorised to organize mail at the provider. Reconnect: ${reconnect('--allow-modify')}`,
+      send_draft:
+        `Account ${id} was not authorised to send existing drafts at the provider. Reconnect: ` +
+        reconnect(e.kind === 'gmail' ? '--allow-drafts' : '--allow-send'),
+    }[what];
+    throw new PerchError(message, 'provider_scope_missing');
   }
 
   /**
@@ -498,4 +513,184 @@ export class MailService {
     if (record.binding !== (await this.workflow.binding(bindingParts(e)))) throw accountChanged();
     return { ...provenance(e), from: e.account.email, ...viewOf(record) };
   }
+  // ---- organizing (capability "modify") and sending existing drafts ("send") ---------------------------
+
+  /** The adapter's optional organizer method, or a fixed refusal when this provider has none. */
+  private org<K extends OrganizerMethod>(e: Entry, name: K): NonNullable<MailProvider<unknown>[K]> {
+    const p = this.provider(e);
+    const fn = p[name];
+    if (typeof fn !== 'function') throw new PerchError(`This operation is not supported for ${e.kind} accounts`, 'unsupported');
+    return (fn as (...args: never[]) => unknown).bind(p) as NonNullable<MailProvider<unknown>[K]>;
+  }
+
+  async listFolders(stale: Principal, opts: { accountId: string }): Promise<MailProvenance & { folders: MailFolder[] }> {
+    return this.audited('mail_list_folders', stale, opts?.accountId, async (p) => {
+      const e = await this.authorised(p, opts.accountId, 'read');
+      return { ...provenance(e), folders: await this.org(e, 'listFolders')(e.account) };
+    });
+  }
+
+  async listDrafts(
+    stale: Principal,
+    opts: { accountId: string; pageSize?: number; cursor?: string },
+  ): Promise<MailProvenance & { drafts: MailDraftSummary[]; nextCursor: string | null; hasMore: boolean; incomplete?: boolean }> {
+    return this.audited('mail_list_drafts', stale, opts?.accountId, async (p) => {
+      const e = await this.authorised(p, opts.accountId, 'read');
+      const pageSize = bounded('pageSize', opts.pageSize, DEFAULT_MAIL_PAGE_SIZE, MAX_MAIL_PAGE_SIZE);
+      if (opts.cursor !== undefined && (typeof opts.cursor !== 'string' || !opts.cursor || opts.cursor.length > 16384)) {
+        throw new PerchError('Invalid cursor', 'bad_cursor');
+      }
+      const page = await this.org(e, 'listDrafts')(e.account, { pageSize }, opts.cursor);
+      const next = page.next ?? null;
+      return { ...provenance(e), drafts: page.items, nextCursor: next, hasMore: next !== null, ...(page.incomplete ? { incomplete: true } : {}) };
+    });
+  }
+
+  /**
+   * One organizing write. Audited like a draft (attempt durably BEFORE the provider write, fail closed). Inside, right
+   * before the provider call: namespace guard, the grant as stored now, "modify" on this account, the account as
+   * stored now and its provider permission (gmail.modify, Mail.ReadWrite, IMAP allowModify).
+   */
+  private organize(
+    type: string,
+    stale: Principal,
+    req: { accountId: string; messageId: string },
+    write: (e: Entry) => Promise<OrganizeResult>,
+  ): Promise<MailProvenance & OrganizeResult> {
+    return this.audited(
+      type,
+      stale,
+      req?.accountId,
+      async (p) => {
+        const now = await this.caller(p);
+        const e = await this.authorised(now, req.accountId, 'modify');
+        this.assertProviderAllows(e, 'modify');
+        if (typeof req.messageId !== 'string' || !req.messageId || req.messageId.length > 2048) {
+          throw new PerchError('messageId is required', 'bad_argument');
+        }
+        return { ...provenance(e), ...(await write(e)) };
+      },
+      true,
+    );
+  }
+
+  async markMessage(stale: Principal, req: { accountId: string; messageId: string; read?: boolean; starred?: boolean }) {
+    return this.organize('mail_mark_message', stale, req, (e) => {
+      const change = {
+        ...(typeof req.read === 'boolean' ? { read: req.read } : {}),
+        ...(typeof req.starred === 'boolean' ? { starred: req.starred } : {}),
+      };
+      if (!Object.keys(change).length) throw new PerchError('Set read and/or starred', 'bad_argument');
+      return this.org(e, 'markMessage')(e.account, req.messageId, change);
+    });
+  }
+
+  async moveMessage(stale: Principal, req: { accountId: string; messageId: string; folderId?: string; archive?: boolean }) {
+    return this.organize('mail_move_message', stale, req, (e) => {
+      let target: MoveTarget;
+      if (req.folderId !== undefined && (typeof req.folderId !== 'string' || !req.folderId || req.folderId.length > 1024)) {
+        throw new PerchError('folderId must be a folder/label id from mail_list_folders', 'bad_argument');
+      }
+      if (req.archive === true) target = { archive: true, ...(req.folderId !== undefined ? { folderId: req.folderId } : {}) };
+      else if (req.folderId !== undefined) target = { folderId: req.folderId };
+      else throw new PerchError('Set folderId or archive: true', 'bad_argument');
+      return this.org(e, 'moveMessage')(e.account, req.messageId, target);
+    });
+  }
+
+  async trashMessage(stale: Principal, req: { accountId: string; messageId: string }) {
+    return this.organize('mail_trash_message', stale, req, (e) => this.org(e, 'trashMessage')(e.account, req.messageId));
+  }
+
+  async restoreMessage(stale: Principal, req: { accountId: string; messageId: string }) {
+    return this.organize('mail_restore_message', stale, req, (e) => this.org(e, 'restoreMessage')(e.account, req.messageId));
+  }
+
+  /**
+   * Sends an existing draft through the same idempotent workflow as send(): capability "send", account, provider
+   * permission for sending drafts, requestId and draft id, all before the atomic ledger claim; a repeated key with
+   * the same draft replays the stored outcome, another draft (or a mail_send payload) under the same key conflicts.
+   * Exactly one provider attempt per key.
+   */
+  async sendDraft(stale: Principal, req: { accountId: string; draftId: string; requestId: string }): Promise<SendOutcome> {
+    const actor = actorOf(stale);
+    let principal: Principal;
+    let e: Entry;
+    let ids: { key: string; operationId: string };
+    let fp: string;
+    let binding: string;
+    try {
+      principal = await this.caller(stale);
+      e = await this.authorised(principal, req?.accountId, 'send');
+      this.assertProviderAllows(e, 'send_draft');
+      const requestId = validateRequestId(req.requestId);
+      if (typeof req.draftId !== 'string' || !req.draftId || req.draftId.length > 2048 || /[\u0000-\u001f\u007f]/.test(req.draftId)) {
+        throw new PerchError('draftId is required (from mail_list_drafts or mail_create_draft)', 'bad_argument');
+      }
+      ids = await this.workflow.ids(actor, e.account.id, requestId);
+      fp = await this.workflow.fingerprint(ids.key, canonicalSendDraftPayload(e.account.id, req.draftId));
+      binding = await this.workflow.binding(bindingParts(e));
+    } catch (err) {
+      await this.audit.record({ type: 'mail_send_draft', actor, accountId: safeAccountId(req?.accountId), outcome: outcomeOf(err), code: auditCode(err) });
+      throw err;
+    }
+    const claim = await this.workflow.claim({ key: ids.key, fp, binding, operationId: ids.operationId, accountId: e.account.id, provider: e.kind, actor });
+    const head = { ...provenance(e), from: e.account.email };
+    if (claim.kind === 'existing') {
+      const { createdAt: _c, finalizedAt: _f, ...view } = viewOf(claim.record);
+      return { ...head, ...view, replayed: true };
+    }
+    const { result, reason } = await this.attemptDraft(principal, e, req, binding).catch(
+      (): { result: SendResult; reason: SendReason } => ({
+        result: { status: 'indeterminate', detail: 'The send failed unexpectedly; the outcome is unknown.' },
+        reason: 'adapter_error',
+      }),
+    );
+    const recorded = await this.workflow.finalize(ids.key, claim.attempt, result.status, reason, result.providerMessageId);
+    if (!recorded) {
+      return { ...head, status: 'indeterminate', detail: FINALIZE_FAILED_NOTE, operationId: ids.operationId, requestState: 'pending', replayed: false };
+    }
+    return { ...head, ...result, detail: liveDetail(result), operationId: ids.operationId, requestState: result.status, replayed: false };
+  }
+
+  /** The single attempt of a claimed draft send; everything that fails before the provider call is "rejected". */
+  private async attemptDraft(
+    principal: Principal,
+    e: Entry,
+    req: { accountId: string; draftId: string },
+    binding: string,
+  ): Promise<{ result: SendResult; reason: SendReason }> {
+    const notSent = (detail: string, reason: SendReason) => ({ result: { status: 'rejected' as const, detail: `Not sent: ${detail}` }, reason });
+    const message = (err: unknown, fallback: string) => (err instanceof PerchError ? err.message : fallback);
+    // Immediately before submission: namespace, grant as stored now, "send" on this account, the sender identity
+    // binding and the provider permission of the account as stored now.
+    try {
+      const now = await this.caller(principal);
+      await this.authorised(now, req.accountId, 'send');
+    } catch (err) {
+      return notSent(message(err, 'the request is no longer authorised'), 'not_submitted_authorization');
+    }
+    const current = await this.entry(e.account.id).catch(() => undefined);
+    if (!current || (await this.workflow.binding(bindingParts(current))) !== binding) {
+      return notSent(accountChanged().message, 'not_submitted_account_changed');
+    }
+    let submit: (account: unknown, draftId: string) => Promise<SendResult>;
+    try {
+      this.assertProviderAllows(current, 'send_draft');
+      submit = this.org(current, 'sendDraft');
+    } catch (err) {
+      return notSent(message(err, 'the provider grant no longer allows sending drafts'), 'not_submitted_provider_precheck');
+    }
+    try {
+      const result = await submit(current.account, req.draftId);
+      return { result, reason: result.status === 'accepted' ? 'provider_accepted' : result.status === 'rejected' ? 'provider_rejected' : 'provider_unknown' };
+    } catch (err) {
+      // Adapters throw PerchError only before the message reaches the transport (scope, token, draft lookup).
+      if (err instanceof PerchError) return notSent(err.message, 'not_submitted_provider_precheck');
+      return { result: { status: 'indeterminate', detail: 'The send failed unexpectedly after it may have reached the provider; the outcome is unknown.' }, reason: 'adapter_error' };
+    }
+  }
 }
+
+type OrganizerMethod = 'listFolders' | 'listDrafts' | 'markMessage' | 'moveMessage' | 'trashMessage' | 'restoreMessage' | 'sendDraft';
+

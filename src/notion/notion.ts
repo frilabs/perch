@@ -1,9 +1,13 @@
 import { createHash } from 'node:crypto';
+import type { AuditLog } from '../audit/audit.js';
+import { allowedAccounts, assertDocsCapability, type Principal } from '../auth/grants.js';
 import { PerchError, safeMessage } from '../errors.js';
+import type { SendWorkflow } from '../mail/workflow.js';
 import { fanOut, type FanOutResult } from '../fanout.js';
 import { newAccountId, validateLabel } from '../ids.js';
 import type { CredentialStore, NotionWorkspace } from '../store/credentialStore.js';
 import { UpstreamError, type Upstream } from '../upstream.js';
+import { NotionWriter } from './notionWrite.js';
 
 /** Pinned Notion API version (data sources model). */
 export const NOTION_VERSION = '2026-03-11';
@@ -84,9 +88,9 @@ function toBlock(raw: NotionObject): BlockNode {
   return { ...rest, id: String(raw.id), type, has_children: raw.has_children === true, ...(text !== undefined ? { text } : {}) };
 }
 
-const fingerprint = (s: string) => createHash('sha256').update(s).digest('hex');
+export const fingerprint = (s: string) => createHash('sha256').update(s).digest('hex');
 
-function headers(token: string) {
+export function headers(token: string) {
   return { authorization: `Bearer ${token}`, 'notion-version': NOTION_VERSION };
 }
 
@@ -138,24 +142,39 @@ interface RetryBudget {
 
 const newBudget = (): RetryBudget => ({ remaining: MAX_RETRIES_PER_CALL });
 
+/** Workspaces of the namespace this principal may read (the read-only operator: all). */
+function readableOf(p: Principal, all: NotionWorkspace[]): NotionWorkspace[] {
+  if (!p.capabilities.has('notion_read')) throw new PerchError('Capability "notion_read" is not granted to this client', 'capability_denied');
+  const allowed = allowedAccounts(p, 'notion');
+  return all.filter((w) => allowed === 'all' || allowed.has(w.id));
+}
+
 const childrenKind = (ws: NotionWorkspace, blockId: string) => `notion-children:${ws.id}:${normaliseNotionId(blockId)}`;
 
 export class NotionService {
   private readonly sleep: (ms: number) => Promise<void>;
 
+  /** Create/edit/trash and comments (src/notion/notionWrite.ts); only when the context wires the send workflow. */
+  readonly write?: NotionWriter;
+
   constructor(
     private readonly store: CredentialStore,
     private readonly upstream: Upstream,
-    opts: { sleep?: (ms: number) => Promise<void> } = {},
+    opts: { sleep?: (ms: number) => Promise<void>; workflow?: SendWorkflow; audit?: AuditLog } = {},
   ) {
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    if (opts.workflow && opts.audit) this.write = new NotionWriter(store, upstream, opts.workflow, opts.audit);
   }
 
-  private async workspace(id: string): Promise<NotionWorkspace> {
+  /** Asserts notion_read for the workspace (before any lookup or I/O), then loads it. */
+  private async workspace(p: Principal, id: string): Promise<NotionWorkspace> {
+    if (typeof id !== 'string') throw new PerchError('workspaceId is required', 'bad_argument');
+    assertDocsCapability(p, 'notion', id, 'notion_read');
     const ws = (await this.store.read()).notion.find((w) => w.id === id);
     if (!ws) throw new PerchError(`Unknown Notion workspace: ${id}`, 'unknown_account');
     return ws;
   }
+
 
   /**
    * Notion's own cursors are sealed per namespace store and bound to workspace and parent (block/page or
@@ -199,7 +218,7 @@ export class NotionService {
   }
 
   /** Title search over pages and data sources (Notion does not guarantee full-text matching). */
-  async search(input: {
+  async search(p: Principal, input: {
     workspaceId?: string;
     query?: string;
     filter?: 'page' | 'data_source';
@@ -207,11 +226,12 @@ export class NotionService {
     cursor?: string;
   }): Promise<FanOutResult<SearchHit & WorkspaceProvenance>> {
     const pageSize = bounded('pageSize', input.pageSize, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
-    const workspaces = input.workspaceId ? [await this.workspace(input.workspaceId)] : (await this.store.read()).notion;
+    const workspaces = input.workspaceId ? [await this.workspace(p, input.workspaceId)] : readableOf(p, (await this.store.read()).notion);
     const budget = newBudget();
     const res = await fanOut<SearchHit>({
       kind: 'notion',
-      queryKey: { q: input.query ?? '', f: input.filter ?? null, pageSize, ws: input.workspaceId ?? null },
+      // The visible workspace set is part of the key, so a cursor never widens a narrower principal's scope.
+      queryKey: { q: input.query ?? '', f: input.filter ?? null, pageSize, ws: input.workspaceId ?? null, scope: workspaces.map((w) => w.id).sort() },
       sources: workspaces,
       seal: this.store,
       cursor: input.cursor,
@@ -248,8 +268,8 @@ export class NotionService {
     };
   }
 
-  async getPage(workspaceId: string, pageId: string): Promise<NotionObject & WorkspaceProvenance> {
-    const ws = await this.workspace(workspaceId);
+  async getPage(p: Principal, workspaceId: string, pageId: string): Promise<NotionObject & WorkspaceProvenance> {
+    const ws = await this.workspace(p, workspaceId);
     const page = await this.get<NotionObject>(newBudget(), ws, `/v1/pages/${normaliseNotionId(pageId)}`);
     return { ...this.prov(ws), ...page };
   }
@@ -262,8 +282,8 @@ export class NotionService {
   }
 
   /** One level of children for a block or page. */
-  async getBlockChildren(workspaceId: string, blockId: string, opts: { cursor?: string; pageSize?: number }) {
-    const ws = await this.workspace(workspaceId);
+  async getBlockChildren(p: Principal, workspaceId: string, blockId: string, opts: { cursor?: string; pageSize?: number }) {
+    const ws = await this.workspace(p, workspaceId);
     const pageSize = bounded('pageSize', opts.pageSize, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
     const kind = childrenKind(ws, blockId);
     const list = await this.children(newBudget(), ws, blockId, this.openCursor(kind, opts.cursor), pageSize);
@@ -284,11 +304,12 @@ export class NotionService {
    * rate-limit failure no further nested requests are made.
    */
   async getPageContent(
+    p: Principal,
     workspaceId: string,
     pageId: string,
     opts: { cursor?: string; pageSize?: number; maxDepth?: number; maxBlocks?: number },
   ) {
-    const ws = await this.workspace(workspaceId);
+    const ws = await this.workspace(p, workspaceId);
     const pageSize = bounded('pageSize', opts.pageSize, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
     const maxDepth = bounded('maxDepth', opts.maxDepth, DEFAULT_MAX_DEPTH, MAX_DEPTH);
     let budget = bounded('maxBlocks', opts.maxBlocks, DEFAULT_MAX_BLOCKS, MAX_BLOCKS);
@@ -348,25 +369,54 @@ export class NotionService {
     };
   }
 
-  async getDatabase(workspaceId: string, databaseId: string): Promise<NotionObject & WorkspaceProvenance> {
-    const ws = await this.workspace(workspaceId);
+  async getDatabase(p: Principal, workspaceId: string, databaseId: string): Promise<NotionObject & WorkspaceProvenance> {
+    const ws = await this.workspace(p, workspaceId);
     const db = await this.get<NotionObject>(newBudget(), ws, `/v1/databases/${normaliseNotionId(databaseId)}`);
     return { ...this.prov(ws), ...db };
   }
 
-  async getDataSource(workspaceId: string, dataSourceId: string): Promise<NotionObject & WorkspaceProvenance> {
-    const ws = await this.workspace(workspaceId);
+  async getDataSource(p: Principal, workspaceId: string, dataSourceId: string): Promise<NotionObject & WorkspaceProvenance> {
+    const ws = await this.workspace(p, workspaceId);
     const ds = await this.get<NotionObject>(newBudget(), ws, `/v1/data_sources/${normaliseNotionId(dataSourceId)}`);
     return { ...this.prov(ws), ...ds };
   }
 
+  /** Open (unresolved) comments on a page or block, oldest first (GET /v1/comments, a read route). */
+  async listComments(p: Principal, workspaceId: string, blockId: string, opts: { cursor?: string; pageSize?: number }) {
+    const ws = await this.workspace(p, workspaceId);
+    const id = normaliseNotionId(blockId);
+    const pageSize = bounded('pageSize', opts.pageSize, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
+    const kind = `notion-comments:${ws.id}:${id}`;
+    const list = await this.get<NotionList>(newBudget(), ws, '/v1/comments', {
+      block_id: id,
+      page_size: pageSize,
+      start_cursor: this.openCursor(kind, opts.cursor),
+    });
+    return {
+      ...this.prov(ws),
+      blockId,
+      comments: list.results.map((c) => ({
+        id: String(c.id),
+        ...(c.discussion_id ? { discussionId: String(c.discussion_id) } : {}),
+        ...(c.parent ? { parent: c.parent } : {}),
+        ...(c.created_by ? { createdBy: c.created_by } : {}),
+        ...(c.created_time ? { created_time: String(c.created_time) } : {}),
+        text: plain(c.rich_text),
+        rich_text: c.rich_text,
+      })),
+      nextCursor: list.has_more ? this.sealCursor(kind, list.next_cursor) : null,
+      hasMore: list.has_more,
+    };
+  }
+
   /** POST /v1/data_sources/{id}/query is a read operation (filter/sort/paginate rows). */
   async queryDataSource(
+    p: Principal,
     workspaceId: string,
     dataSourceId: string,
     opts: { filter?: unknown; sorts?: unknown; cursor?: string; pageSize?: number },
   ) {
-    const ws = await this.workspace(workspaceId);
+    const ws = await this.workspace(p, workspaceId);
     const kind = `notion-query:${ws.id}:${normaliseNotionId(dataSourceId)}`;
     const start = this.openCursor(kind, opts.cursor);
     const list = await this.post<NotionList>(newBudget(), ws, `/v1/data_sources/${normaliseNotionId(dataSourceId)}/query`, {
