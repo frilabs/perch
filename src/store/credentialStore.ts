@@ -80,6 +80,11 @@ const ImapAccountSchema = z.object({
   /** IMAP has no OAuth scopes: drafts/send are explicit opt-ins recorded at onboarding. */
   allowDrafts: z.boolean(),
   allowSend: z.boolean(),
+  /**
+   * Organizing (flags, move/archive, trash/restore) is a separate opt-in. Optional so that stores written before it
+   * existed stay valid; absent means false (never inferred from allowDrafts/allowSend).
+   */
+  allowModify: z.boolean().optional(),
   draftsMailbox: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
