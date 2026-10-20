@@ -40,9 +40,9 @@ describe('GraphMailProvider capabilities', () => {
   it('derives draft/send from the granted scopes', () => {
     const { provider } = setup();
     expect(provider.kind).toBe('microsoft');
-    expect(provider.providerCapabilities(account())).toEqual({ draft: false, send: false });
-    expect(provider.providerCapabilities(account(['Mail.Read', 'Mail.ReadWrite']))).toEqual({ draft: true, send: false });
-    expect(provider.providerCapabilities(account(['Mail.Read', 'Mail.Send']))).toEqual({ draft: false, send: true });
+    expect(provider.providerCapabilities(account())).toEqual({ draft: false, send: false, modify: false });
+    expect(provider.providerCapabilities(account(['Mail.Read', 'Mail.ReadWrite']))).toEqual({ draft: true, send: false, modify: true });
+    expect(provider.providerCapabilities(account(['Mail.Read', 'Mail.Send']))).toEqual({ draft: false, send: true, modify: false });
   });
 });
 

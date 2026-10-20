@@ -352,9 +352,9 @@ describe('GmailProvider.replyContext / providerCapabilities [MOCK Gmail]', () =>
   it('derives draft/send capability from the granted scopes', async () => {
     const provider = new GmailProvider(new Upstream(gmail.transport), { getAccessToken: async () => 'unused' });
     const acct = (scopes: string[]) => ({ scopes }) as GmailAccount;
-    expect(provider.providerCapabilities(acct([GMAIL_READONLY_SCOPE]))).toEqual({ draft: false, send: false });
-    expect(provider.providerCapabilities(acct([GMAIL_READONLY_SCOPE, GMAIL_SEND_SCOPE]))).toEqual({ draft: false, send: true });
-    expect(provider.providerCapabilities(acct([GMAIL_READONLY_SCOPE, GMAIL_COMPOSE_SCOPE]))).toEqual({ draft: true, send: true });
+    expect(provider.providerCapabilities(acct([GMAIL_READONLY_SCOPE]))).toEqual({ draft: false, send: false, modify: false });
+    expect(provider.providerCapabilities(acct([GMAIL_READONLY_SCOPE, GMAIL_SEND_SCOPE]))).toEqual({ draft: false, send: true, modify: false });
+    expect(provider.providerCapabilities(acct([GMAIL_READONLY_SCOPE, GMAIL_COMPOSE_SCOPE]))).toEqual({ draft: true, send: true, modify: false });
     expect(provider.kind).toBe('gmail');
   });
 });

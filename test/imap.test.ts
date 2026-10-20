@@ -242,8 +242,8 @@ describe('ImapMailProvider drafts and send [MOCK ImapSession]', () => {
   it('reports capabilities from the onboarding opt-ins', () => {
     const { provider } = setup({});
     expect(provider.kind).toBe('imap');
-    expect(provider.providerCapabilities(dummyImapAccount())).toEqual({ draft: false, send: false });
-    expect(provider.providerCapabilities(dummyImapAccount({ allowDrafts: true, allowSend: true }))).toEqual({ draft: true, send: true });
+    expect(provider.providerCapabilities(dummyImapAccount())).toEqual({ draft: false, send: false, modify: false });
+    expect(provider.providerCapabilities(dummyImapAccount({ allowDrafts: true, allowSend: true }))).toEqual({ draft: true, send: true, modify: false });
   });
 
   it('refuses drafts without allowDrafts, without connecting', async () => {
