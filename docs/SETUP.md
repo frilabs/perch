@@ -237,7 +237,7 @@ perch imap remove imap-1a2b3c4d
 
 - **Transport:** IMAP nur mit implizitem TLS. SMTP mit implizitem TLS (465) oder STARTTLS mit Pflicht-TLS (587). TLS ≥ 1.2 mit Zertifikatsprüfung ist nicht abschaltbar. Nur Hostnamen, keine IP-Adressen.
 - **Prüfung beim Hinzufügen:** `add` meldet sich vor dem Speichern bei IMAP an (bei `--allow-send` zusätzlich SMTP-`verify`). Bei einem Fehler wird nichts gespeichert.
-- **Gesendet-Ordner:** Perch legt nach `mail_send` per SMTP **keine Kopie in „Gesendet“** ab. Ob GMX das serverseitig tut, ist nicht verifiziert. Ausnahme: `mail_send_draft` verschiebt den gesendeten Entwurf nach „Gesendet“ (Abschnitt 4a.5).
+- **Gesendet-Ordner:** Nachdem SMTP eine Mail angenommen hat (`mail_send`, `mail_reply`/`mail_forward` mit `send: true`), legt Perch per IMAP-APPEND eine Kopie (mit Bcc, `\Seen`) in den `\Sent`-Ordner, sonst in einen Ordner mit üblichem Namen („Sent“, „Gesendet“, „Gesendete Objekte“ …). `mail_send_draft` verschiebt den Entwurf dorthin (ohne MOVE/UIDPLUS: Kopie, der Entwurf bleibt). Scheitert die Ablage, bleibt das Ergebnis `accepted` mit `sentCopy: false`; Perch sendet **nie** erneut über SMTP. Abschalten pro Konto: `perch imap add … --no-sent-copy`. Für SMTP-Server, die selbst ablegen (`smtp.gmail.com`, `smtp.office365.com`, `smtp-mail.outlook.com`), ist die Kopie automatisch aus (sonst läge jede Mail doppelt da). `perch imap list` zeigt „sent copy on/off“. Ob GMX bei SMTP-Versand selbst ablegt, ist nicht live geprüft; falls ja, das Konto mit `--no-sent-copy` neu hinzufügen.
 
 ### 4a.4 Client-Grants für Entwürfe und Senden
 

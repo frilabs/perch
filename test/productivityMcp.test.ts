@@ -25,10 +25,12 @@ let mailCalls: string[];
 
 // Grows with the mail organize milestone: folders/drafts listing (read) and sending an existing draft (send).
 const PR2_MAIL_SEND_TOOLS = [
+  'mail_forward',
   'mail_get_attachment',
   'mail_list_drafts',
   'mail_list_folders',
   'mail_read_message',
+  'mail_reply',
   'mail_search',
   'mail_send',
   'mail_send_draft',

@@ -30,6 +30,8 @@ export interface MockGraphMessage {
   internetMessageId: string;
   headers?: Array<{ name: string; value: string }>;
   attachments?: MockGraphAttachment[];
+  cc?: string[];
+  replyTo?: string[];
   /** MOCK only: answer with this HTML body even when the text Prefer header is sent. */
   htmlBody?: string;
   isRead?: boolean;
@@ -311,8 +313,8 @@ export class MockGraph {
       const html = req.headers.prefer !== 'outlook.body-content-type="text"';
       return json(200, {
         ...this.summary(m),
-        ccRecipients: [],
-        replyTo: [],
+        ccRecipients: (m.cc ?? []).map((address) => ({ emailAddress: { address } })),
+        replyTo: (m.replyTo ?? []).map((address) => ({ emailAddress: { address } })),
         internetMessageHeaders: m.headers ?? [],
         body:
           m.htmlBody !== undefined

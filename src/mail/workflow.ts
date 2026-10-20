@@ -91,6 +91,29 @@ export function canonicalSendPayload(req: SendPayload): string {
   ]);
 }
 
+/**
+ * Canonical CALLER payload of mail_reply / mail_forward with send: true (one domain per kind, never equal to a
+ * mail_send or send-draft payload). The derived recipients and quote are not part of it: they are derived only on
+ * the one attempt.
+ */
+export function canonicalDerivedPayload(
+  kind: 'reply' | 'forward',
+  req: { accountId: string; messageId: string; text?: string; html?: string; to?: string[]; cc?: string[]; bcc?: string[]; replyAll?: boolean; includeAttachments?: boolean },
+): string {
+  return JSON.stringify([
+    `perch-${kind}-v1`,
+    req.accountId,
+    req.messageId,
+    req.replyAll === true,
+    req.includeAttachments !== false,
+    req.text ?? '',
+    req.html ?? null,
+    req.to ?? [],
+    req.cc ?? [],
+    req.bcc ?? [],
+  ]);
+}
+
 /** Canonical payload of sending an existing draft: a distinct domain, so it never equals a mail_send payload. */
 export function canonicalSendDraftPayload(accountId: string, draftId: string): string {
   return JSON.stringify(['perch-send-draft-v1', accountId, draftId]);

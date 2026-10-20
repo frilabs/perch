@@ -29,6 +29,8 @@ export interface AddImapAccountInput {
   /** Organizing (flags, move/archive, trash/restore); default false. */
   allowModify?: boolean;
   draftsMailbox?: string;
+  /** false = never file a copy of sent mail in the Sent folder (`--no-sent-copy`); absent = automatic (see imapSentCopyEnabled). */
+  sentCopy?: boolean;
 }
 
 export type ImapVerifier = (account: ImapAccount) => Promise<void>;
@@ -60,6 +62,7 @@ export async function addImapAccount(store: CredentialStore, input: AddImapAccou
     throw bad('allowDrafts and allowSend must be true or false');
   }
   if (input.allowModify !== undefined && typeof input.allowModify !== 'boolean') throw bad('allowModify must be true or false');
+  if (input.sentCopy !== undefined && typeof input.sentCopy !== 'boolean') throw bad('sentCopy must be true or false');
   const servers = resolveServers({
     email: input.email,
     ...(input.preset !== undefined ? { preset: input.preset } : {}),
@@ -97,6 +100,7 @@ export async function addImapAccount(store: CredentialStore, input: AddImapAccou
     allowSend: input.allowSend,
     allowModify: input.allowModify === true,
     ...(draftsMailbox !== undefined ? { draftsMailbox } : {}),
+    ...(input.sentCopy !== undefined ? { sentCopy: input.sentCopy } : {}),
     createdAt: now,
     updatedAt: now,
   };
