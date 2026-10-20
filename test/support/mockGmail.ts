@@ -35,6 +35,10 @@ export interface MockGmailAccount {
   messages: MockMessage[];
   drafts: Array<{ id: string; raw: string; threadId?: string }>;
   sent: Array<{ raw: string; threadId?: string }>;
+  /** Labels (labels.list); system labels are added by addAccount. */
+  labels: Array<{ id: string; name: string; type: 'system' | 'user' }>;
+  /** Drafts sent with drafts.send (draft id, raw). */
+  sentDrafts: Array<{ id: string; raw: string }>;
 }
 
 export interface MockGmailOptions {
@@ -92,7 +96,8 @@ export class MockGmail {
 
   addAccount(email: string, messages: MockMessage[] = []): MockGmailAccount {
     for (const m of messages) assignPartIds(m.payload, '');
-    const acct = { email, refreshToken: dummySecret('GMAIL-REFRESH'), messages, drafts: [], sent: [] };
+    const labels = ['INBOX', 'SENT', 'DRAFT', 'TRASH', 'SPAM', 'STARRED', 'UNREAD', 'IMPORTANT'].map((id) => ({ id, name: id, type: 'system' as const }));
+    const acct: MockGmailAccount = { email, refreshToken: dummySecret('GMAIL-REFRESH'), messages, drafts: [], sent: [], labels, sentDrafts: [] };
     this.accounts.push(acct);
     return acct;
   }
@@ -147,6 +152,49 @@ export class MockGmail {
       const id = `r${randomBytes(4).toString('hex')}`;
       acct.drafts.push({ id, ...body.message });
       return json(200, { id, message: { id: `m${id}`, threadId: body.message.threadId ?? `t${id}`, labelIds: ['DRAFT'] } });
+    }
+    if (req.method === 'GET' && pathname === `${base}/labels`) return json(200, { labels: acct.labels });
+    if (req.method === 'GET' && pathname === `${base}/drafts`) {
+      const size = Number(q.get('maxResults') ?? 100);
+      const start = Number(q.get('pageToken') ?? 0);
+      const page = acct.drafts.slice(start, start + size);
+      const next = start + size < acct.drafts.length ? String(start + size) : undefined;
+      return json(200, { drafts: page.map((d) => ({ id: d.id, message: { id: `m${d.id}` } })), ...(next ? { nextPageToken: next } : {}) });
+    }
+    const draftGet = new RegExp(`^${base}/drafts/([^/]+)$`).exec(pathname);
+    if (req.method === 'GET' && draftGet) {
+      const d = acct.drafts.find((x) => x.id === draftGet[1]);
+      if (!d) return json(404, { error: { code: 404, status: 'NOT_FOUND' } });
+      return json(200, { id: d.id, message: { id: `m${d.id}`, internalDate: '1767225600000', payload: { mimeType: 'text/plain', headers: rawHeaders(d.raw) } } });
+    }
+    if (req.method === 'POST' && pathname === `${base}/drafts/send`) {
+      const b = this.sendBehaviour;
+      if (b === 'timeout') throw new PerchError('Upstream request timed out', 'upstream_timeout');
+      if (b === 'unreachable') throw new Error('socket hang up');
+      if (b.status >= 300) return json(b.status, b.body ?? { error: { code: b.status, status: 'FAILED_PRECONDITION' } });
+      const { id } = JSON.parse(req.body ?? '{}') as { id?: string };
+      const i = acct.drafts.findIndex((d) => d.id === id);
+      if (i < 0) return json(404, { error: { code: 404, status: 'NOT_FOUND' } });
+      const [d] = acct.drafts.splice(i, 1);
+      acct.sentDrafts.push({ id: d!.id, raw: d!.raw });
+      return json(200, { id: `s${randomBytes(4).toString('hex')}`, threadId: d!.threadId ?? 'tnew', labelIds: ['SENT'] });
+    }
+    const org = new RegExp(`^${base}/messages/([^/]+)/(modify|trash|untrash)$`).exec(pathname);
+    if (req.method === 'POST' && org) {
+      const m = acct.messages.find((x) => x.id === org[1]);
+      if (!m) return json(404, { error: { code: 404, status: 'NOT_FOUND' } });
+      let labels = new Set(m.labelIds ?? ['INBOX']);
+      if (org[2] === 'modify') {
+        const body = JSON.parse(req.body ?? '{}') as { addLabelIds?: string[]; removeLabelIds?: string[] };
+        for (const l of body.addLabelIds ?? []) {
+          if (!acct.labels.some((x) => x.id === l)) return json(400, { error: { code: 400, status: 'INVALID_ARGUMENT' } });
+          labels.add(l);
+        }
+        for (const l of body.removeLabelIds ?? []) labels.delete(l);
+      } else if (org[2] === 'trash') labels.add('TRASH');
+      else labels.delete('TRASH');
+      m.labelIds = [...labels];
+      return json(200, { id: m.id, threadId: m.threadId, labelIds: m.labelIds });
     }
     if (req.method === 'POST' && pathname === `${base}/messages/send`) {
       const b = this.sendBehaviour;
@@ -218,6 +266,17 @@ export class MockGmail {
       ...(p.parts ? { parts: p.parts.map((c) => this.render(c)) } : {}),
     };
   }
+}
+
+/** Top-level headers of a raw RFC 5322 message (base64url, as stored by drafts.create). */
+function rawHeaders(raw: string): Array<{ name: string; value: string }> {
+  const text = Buffer.from(raw, 'base64url').toString('utf8');
+  const head = text.split(/\r?\n\r?\n/)[0]!.replace(/\r?\n[ \t]+/g, ' ');
+  return head
+    .split(/\r?\n/)
+    .map((l) => [l.slice(0, l.indexOf(':')), l.slice(l.indexOf(':') + 1).trim()] as const)
+    .filter(([n]) => n)
+    .map(([name, value]) => ({ name, value }));
 }
 
 function subjectOf(m: MockMessage): string {

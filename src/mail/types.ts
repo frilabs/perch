@@ -110,13 +110,77 @@ export interface SendResult {
 export interface MailProvider<A> {
   readonly kind: MailProviderKind;
   /** What this stored account is able to do at the provider (OAuth scopes / IMAP opt-ins). */
-  providerCapabilities(account: A): { draft: boolean; send: boolean };
+  providerCapabilities(account: A): ProviderCapabilities;
   search(account: A, opts: SearchOptions, cursor: string | undefined): Promise<SourcePage<MailSummary>>;
   read(account: A, messageId: string, opts: ReadOptions): Promise<MailMessage>;
   getAttachment(account: A, messageId: string, attachmentId: string, opts: ReadOptions): Promise<MailAttachmentContent>;
   replyContext(account: A, messageId: string): Promise<ReplyContext>;
   createDraft(account: A, mail: OutgoingMime): Promise<DraftResult>;
   send(account: A, mail: OutgoingMime): Promise<SendResult>;
+  // ---- organizing and sending existing drafts (mail_* organize tools, src/mcp/tools/mailExtra.ts) -------------
+  // Optional so that minimal MOCK providers in older tests stay valid; every production adapter implements them.
+  /** Whether the stored grant can send an EXISTING draft (Gmail compose/modify, Graph Mail.Send, IMAP allowSend). */
+  canSendDraft?(account: A): boolean;
+  listFolders?(account: A): Promise<MailFolder[]>;
+  listDrafts?(account: A, opts: { pageSize: number }, cursor: string | undefined): Promise<SourcePage<MailDraftSummary>>;
+  markMessage?(account: A, messageId: string, change: MarkChange): Promise<OrganizeResult>;
+  moveMessage?(account: A, messageId: string, target: MoveTarget): Promise<OrganizeResult>;
+  /** Moves to the provider's trash (recoverable). Never a permanent delete. */
+  trashMessage?(account: A, messageId: string): Promise<OrganizeResult>;
+  /** Moves a trashed message back (Gmail untrash, Graph/IMAP back to the inbox). */
+  restoreMessage?(account: A, messageId: string): Promise<OrganizeResult>;
+  /** Exactly one provider attempt, never retried (same outcome classes as send). */
+  sendDraft?(account: A, draftId: string): Promise<SendResult>;
+}
+
+/** What a stored account is able to do at the provider (OAuth scopes / IMAP opt-ins). */
+export interface ProviderCapabilities {
+  draft: boolean;
+  send: boolean;
+  /** Organizing: flags, move/archive, trash/restore (Gmail gmail.modify, Graph Mail.ReadWrite, IMAP allowModify). */
+  modify?: boolean;
+}
+
+export type MailFolderRole = 'inbox' | 'sent' | 'drafts' | 'trash' | 'archive' | 'junk' | 'starred' | 'important' | 'all' | 'other';
+
+export interface MailFolder {
+  /** Gmail label id, Graph folder id (or well-known name) or IMAP mailbox path; use it as folderId when moving. */
+  folderId: string;
+  name: string;
+  role: MailFolderRole;
+  /** Gmail: system or user label. */
+  type?: 'system' | 'user';
+  /** IMAP special-use flag as reported by the server (e.g. \Trash). */
+  specialUse?: string;
+  total?: number;
+  unread?: number;
+}
+
+export interface MailDraftSummary {
+  /** Id to pass to mail_send_draft (Gmail draft id, Graph message id, Perch IMAP message id). */
+  draftId: string;
+  messageId?: string;
+  subject?: string;
+  to?: string[];
+  /** ISO 8601 */
+  date?: string;
+}
+
+export interface MarkChange {
+  read?: boolean;
+  /** Gmail STARRED label, Graph follow-up flag, IMAP \Flagged. */
+  starred?: boolean;
+}
+
+/** A folder/label id, or archive (Gmail: remove INBOX; Graph: archive folder; IMAP: \Archive or folderId). */
+export type MoveTarget = { folderId: string; archive?: false } | { archive: true; folderId?: string };
+
+export interface OrganizeResult {
+  /** The message's id after the operation (Graph and IMAP ids change when a message moves); absent when unknown. */
+  messageId?: string;
+  /** Present when the provider did not report the new id (IMAP without UIDPLUS): search the folder again. */
+  note?: string;
+  folderId?: string;
 }
 
 export const ACCEPTED_NOTE =

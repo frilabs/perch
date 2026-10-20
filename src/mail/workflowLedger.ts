@@ -44,8 +44,8 @@ export const OPERATION_ID_PATTERN = /^op-[a-f0-9]{24}$/;
 /** Ids of accounts Perch itself generated (provider prefix + 8 hex). Caller text never matches by accident. */
 export const ACCOUNT_ID_PATTERN = /^(google|notion|gmail|microsoft|imap|gprod|slack|whatsapp|luma)-[a-f0-9]{8}$/;
 /** Accounts that can send through the idempotent workflow (mail, Slack, WhatsApp). */
-const SEND_ACCOUNT_ID = /^(gmail|microsoft|imap|slack|whatsapp|luma)-[a-f0-9]{8}$/;
-export const SEND_PROVIDERS = ['gmail', 'microsoft', 'imap', 'slack', 'whatsapp', 'luma'] as const;
+const SEND_ACCOUNT_ID = /^(gmail|microsoft|imap|slack|whatsapp|luma|google|notion)-[a-f0-9]{8}$/;
+export const SEND_PROVIDERS = ['gmail', 'microsoft', 'imap', 'slack', 'whatsapp', 'luma', 'drive', 'notion'] as const;
 const NAMESPACE = /^(root|user-[a-f0-9]{16})$/;
 const SAFE_TOKEN = /^[a-z][a-z0-9_]{0,47}$/;
 /** Provider message ids are kept only in this opaque form (Gmail ids); anything with an address/host is dropped. */

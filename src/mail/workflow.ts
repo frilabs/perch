@@ -18,6 +18,8 @@ export function sendTypeOf(provider: SendProvider): string {
   if (provider === 'slack') return 'slack_send_message';
   if (provider === 'whatsapp') return 'whatsapp_send_message';
   if (provider === 'luma') return 'luma_write';
+  if (provider === 'drive') return 'drive_write';
+  if (provider === 'notion') return 'notion_write';
   return 'mail_send';
 }
 
@@ -87,6 +89,11 @@ export function canonicalSendPayload(req: SendPayload): string {
     req.inReplyTo ?? null,
     req.references ?? [],
   ]);
+}
+
+/** Canonical payload of sending an existing draft: a distinct domain, so it never equals a mail_send payload. */
+export function canonicalSendDraftPayload(accountId: string, draftId: string): string {
+  return JSON.stringify(['perch-send-draft-v1', accountId, draftId]);
 }
 
 export interface SendView {

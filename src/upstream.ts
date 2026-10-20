@@ -20,6 +20,7 @@ export type Service =
   | 'people'
   | 'openid'
   | 'slack'
+  | 'slackfiles'
   | 'gowa'
   | 'cimd'
   | 'telegram'
@@ -28,7 +29,7 @@ export type Service =
 /**
  * `admin` routes (GOWA device pairing/removal) are only ever passed by the local CLI, never by an MCP tool.
  */
-export type RouteCapability = 'read' | 'draft' | 'send' | 'calendar_write' | 'slack_send' | 'whatsapp_send' | 'admin' | 'notify';
+export type RouteCapability = 'read' | 'draft' | 'send' | 'calendar_write' | 'slack_send' | 'whatsapp_send' | 'admin' | 'notify' | 'drive_write' | 'notion_write' | 'mail_modify';
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
 export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
@@ -43,6 +44,8 @@ export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
   /** userinfo_endpoint of Google's OpenID Connect discovery document (hard-coded, never fetched). */
   openid: 'https://openidconnect.googleapis.com',
   slack: 'https://slack.com',
+  /** Slack file host: upload URLs from files.getUploadURLExternal and private file downloads (url_private_download). */
+  slackfiles: 'https://files.slack.com',
   /**
    * GOWA (self-hosted WhatsApp bridge) has no fixed origin: each call passes the configured instance
    * origin, which must pass validateGowaOrigin (loopback or a Tailscale address only). This placeholder
@@ -76,6 +79,7 @@ const SERVICE_NAMES: Record<Service, string> = {
   people: 'Google People API',
   openid: 'Google OpenID Connect',
   slack: 'Slack Web API',
+  slackfiles: 'Slack file host',
   gowa: 'WhatsApp bridge (GOWA)',
   cimd: 'OAuth client metadata document',
   telegram: 'Telegram Bot API',
@@ -109,12 +113,22 @@ const CONTACT_ID = 'c[0-9]{1,30}';
 /** Slack Web API ids: channels/groups/DMs (C/G/D…), message timestamps. */
 export const SLACK_CHANNEL_ID = /^[CGD][A-Z0-9]{2,30}$/;
 export const SLACK_TS = /^[0-9]{9,11}\.[0-9]{6}$/;
+/** Slack file ids (F…) and the opaque upload segment of files.getUploadURLExternal's upload_url. */
+export const SLACK_FILE_ID = /^F[A-Z0-9]{2,30}$/;
+export const SLACK_UPLOAD_PATH = /^\/upload\/v1\/[A-Za-z0-9_-]{1,2048}$/;
+/**
+ * url_private_download of a Slack file: /files-pri/<team>-<file>/download/<name> (or without "download/").
+ * The name may be percent-encoded but never an encoded '/', backslash or '.', and never contain '..'.
+ */
+export const SLACK_DOWNLOAD_PATH = /^\/files-pri\/[TE][A-Z0-9]{2,30}-(F[A-Z0-9]{2,30})\/(?:download\/)?(?!.*\.\.)(?!.*%(?:2[fFeE]|5[cC]))[A-Za-z0-9._~%()+-]{1,255}$/;
 /** WhatsApp JIDs Perch reads and writes to: people (phone or LID) and groups. Never status/newsletter/broadcast. */
 export const WHATSAPP_JID = /^(?:[0-9]{5,20}@s\.whatsapp\.net|[0-9]{5,20}@lid|[0-9]{5,20}(?:-[0-9]{5,20})?@g\.us)$/;
 const JID_PATH = '[0-9]{5,20}(?:-[0-9]{5,20})?%40(?:s\\.whatsapp\\.net|lid|g\\.us)';
 /** Device slots Perch creates in GOWA (`perch-` + 16 hex); other slots are never addressed. */
 export const GOWA_DEVICE_ID = /^perch-[a-f0-9]{16}$/;
 const DEVICE_PATH = 'perch-[a-f0-9]{16}';
+/** WhatsApp message ids as Perch accepts them from whatsapp_get_messages. */
+const WA_MESSAGE_PATH = '[A-Za-z0-9]{8,64}';
 
 type Route = [method: string, path: RegExp, capability?: RouteCapability];
 
@@ -124,6 +138,19 @@ const ROUTES: Record<Service, Route[]> = {
     ['GET', /^\/drive\/v3\/files$/],
     ['GET', new RegExp(`^/drive/v3/files/${DRIVE_ID}$`)],
     ['GET', new RegExp(`^/drive/v3/files/${DRIVE_ID}/export$`)],
+    ['GET', new RegExp(`^/drive/v3/files/${DRIVE_ID}/permissions$`)],
+    ['GET', new RegExp(`^/drive/v3/files/${DRIVE_ID}/comments$`)],
+    // Writes (client grants with drive_write only). Deliberately NOT allowlisted: DELETE /drive/v3/files/{id}
+    // (permanent delete), DELETE /drive/v3/files/trash (empty trash), PATCH .../permissions/{id} (role/owner
+    // changes) and anything that transfers ownership (see assertDriveRequestSafe).
+    ['POST', /^\/upload\/drive\/v3\/files$/, 'drive_write'],
+    ['PATCH', new RegExp(`^/upload/drive/v3/files/${DRIVE_ID}$`), 'drive_write'],
+    ['POST', /^\/drive\/v3\/files$/, 'drive_write'],
+    ['PATCH', new RegExp(`^/drive/v3/files/(?!trash$)${DRIVE_ID}$`), 'drive_write'],
+    ['POST', new RegExp(`^/drive/v3/files/${DRIVE_ID}/copy$`), 'drive_write'],
+    ['POST', new RegExp(`^/drive/v3/files/${DRIVE_ID}/permissions$`), 'drive_write'],
+    ['DELETE', new RegExp(`^/drive/v3/files/${DRIVE_ID}/permissions/${DRIVE_ID}$`), 'drive_write'],
+    ['POST', new RegExp(`^/drive/v3/files/${DRIVE_ID}/comments$`), 'drive_write'],
   ],
   oauth: [
     ['POST', /^\/token$/],
@@ -137,6 +164,14 @@ const ROUTES: Record<Service, Route[]> = {
     ['GET', new RegExp(`^/v1/databases/${NOTION_ID}$`)],
     ['GET', new RegExp(`^/v1/data_sources/${NOTION_ID}$`)],
     ['POST', new RegExp(`^/v1/data_sources/${NOTION_ID}/query$`)],
+    ['GET', /^\/v1\/comments$/],
+    // Writes (client grants with notion_write only). Trash is PATCH in_trash; DELETE /v1/blocks/{id} and
+    // database/data source schema changes are deliberately never allowlisted.
+    ['POST', /^\/v1\/pages$/, 'notion_write'],
+    ['PATCH', new RegExp(`^/v1/pages/${NOTION_ID}$`), 'notion_write'],
+    ['PATCH', new RegExp(`^/v1/blocks/${NOTION_ID}/children$`), 'notion_write'],
+    ['PATCH', new RegExp(`^/v1/blocks/${NOTION_ID}$`), 'notion_write'],
+    ['POST', /^\/v1\/comments$/, 'notion_write'],
   ],
   gmail: [
     ['GET', /^\/gmail\/v1\/users\/me\/profile$/],
@@ -145,6 +180,13 @@ const ROUTES: Record<Service, Route[]> = {
     ['GET', new RegExp(`^/gmail/v1/users/me/messages/${GMAIL_ID}/attachments/${GMAIL_ATTACHMENT_ID}$`)],
     ['POST', /^\/gmail\/v1\/users\/me\/drafts$/, 'draft'],
     ['POST', /^\/gmail\/v1\/users\/me\/messages\/send$/, 'send'],
+    // Organizing (gmail.modify). Never: DELETE routes, messages/batchDelete, batchModify, threads/*/trash,
+    // settings/filters or settings/forwardingAddresses (permanent deletion and mail rules are not offered).
+    ['GET', /^\/gmail\/v1\/users\/me\/labels$/],
+    ['GET', /^\/gmail\/v1\/users\/me\/drafts$/],
+    ['GET', new RegExp(`^/gmail/v1/users/me/drafts/${GMAIL_ID}$`)],
+    ['POST', new RegExp(`^/gmail/v1/users/me/messages/${GMAIL_ID}/(?:modify|trash|untrash)$`), 'mail_modify'],
+    ['POST', /^\/gmail\/v1\/users\/me\/drafts\/send$/, 'send'],
   ],
   graph: [
     ['GET', /^\/v1\.0\/me$/],
@@ -155,6 +197,14 @@ const ROUTES: Record<Service, Route[]> = {
     ['GET', new RegExp(`^/v1\\.0/me/messages/${GRAPH_ID}/attachments/${GRAPH_ID}$`)],
     ['POST', /^\/v1\.0\/me\/messages$/, 'draft'],
     ['POST', /^\/v1\.0\/me\/sendMail$/, 'send'],
+    // Organizing (Mail.ReadWrite). Never: DELETE routes, messages/{id}/permanentDelete, mailFolders writes
+    // or messageRules (permanent deletion and mail rules are not offered).
+    ['GET', /^\/v1\.0\/me\/mailFolders$/],
+    ['GET', new RegExp(`^/v1\\.0/me/mailFolders/${GRAPH_FOLDER}$`)],
+    ['GET', new RegExp(`^/v1\\.0/me/mailFolders/${GRAPH_FOLDER}/childFolders$`)],
+    ['PATCH', new RegExp(`^/v1\\.0/me/messages/${GRAPH_ID}$`), 'mail_modify'],
+    ['POST', new RegExp(`^/v1\\.0/me/messages/${GRAPH_ID}/move$`), 'mail_modify'],
+    ['POST', new RegExp(`^/v1\\.0/me/messages/${GRAPH_ID}/send$`), 'send'],
   ],
   msauth: [['POST', new RegExp(`^/${MS_TENANT}/oauth2/v2\\.0/token$`)]],
   calendar: [
@@ -177,12 +227,29 @@ const ROUTES: Record<Service, Route[]> = {
     ['GET', /^\/api\/conversations\.replies$/],
     ['GET', /^\/api\/users\.info$/],
     ['GET', /^\/api\/search\.messages$/],
+    ['GET', /^\/api\/files\.info$/],
     ['POST', /^\/api\/chat\.postMessage$/, 'slack_send'],
+    // Own messages only (Slack refuses others with cant_update_message). chat.delete, files.delete and
+    // files.sharedPublicURL are deliberately absent: Slack deletion is permanent, public links leak files.
+    ['POST', /^\/api\/chat\.update$/, 'slack_send'],
+    ['POST', /^\/api\/reactions\.add$/, 'slack_send'],
+    ['POST', /^\/api\/reactions\.remove$/, 'slack_send'],
+    ['POST', /^\/api\/files\.getUploadURLExternal$/, 'slack_send'],
+    ['POST', /^\/api\/files\.completeUploadExternal$/, 'slack_send'],
+  ],
+  slackfiles: [
+    ['GET', SLACK_DOWNLOAD_PATH],
+    ['POST', SLACK_UPLOAD_PATH, 'slack_send'],
   ],
   gowa: [
     ['GET', /^\/chats$/],
     ['GET', new RegExp(`^/chat/${JID_PATH}/messages$`)],
     ['POST', /^\/send\/message$/, 'whatsapp_send'],
+    // Media sends: multipart bodies built by Perch (file bytes only, never *_url fields).
+    ['POST', /^\/send\/(?:image|video|audio|file)$/, 'whatsapp_send'],
+    // Media download: the bridge saves the file and names its path; Perch then reads only that saved file.
+    ['GET', new RegExp(`^/message/${WA_MESSAGE_PATH}/download$`)],
+    ['GET', /^\/statics\/media\/[0-9]{5,20}(?:-[0-9]{5,20})?\/[0-9]{4}-[0-9]{2}-[0-9]{2}\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,199}$/],
     // Local CLI only (pairing and unlinking); no MCP tool passes the admin capability.
     ['GET', /^\/devices$/, 'admin'],
     ['POST', /^\/devices$/, 'admin'],
@@ -267,6 +334,19 @@ export function validateGowaOrigin(raw: string): string {
   return url.origin;
 }
 
+/**
+ * Drive writes never transfer ownership or grant the owner role, whatever the caller built: the query flags
+ * transferOwnership/moveToNewOwnersRoot and an "owner" role in a JSON body are refused before any I/O.
+ */
+function assertDriveRequestSafe(opts: CallOptions): void {
+  const q = opts.query ?? {};
+  const bad =
+    q.transferOwnership !== undefined ||
+    q.moveToNewOwnersRoot !== undefined ||
+    (opts.json !== null && typeof opts.json === 'object' && ['owner', 'organizer'].includes(String((opts.json as Record<string, unknown>).role)));
+  if (bad) throw new PerchError('Blocked Google Drive ownership change', 'route_not_allowed');
+}
+
 /** True when (service, method, path) is allowlisted for exactly this capability. */
 export function isAllowedRoute(service: Service, method: string, path: string, capability: RouteCapability = 'read'): boolean {
   return ROUTES[service].some(([m, re, cap]) => m === method && (cap ?? 'read') === capability && re.test(path));
@@ -280,6 +360,8 @@ export interface UpstreamRequest {
   url: URL;
   headers: Record<string, string>;
   body?: string;
+  /** Binary request body (uploads); when set, `body` is unset. */
+  bodyBytes?: Buffer;
   maxBytes: number;
 }
 
@@ -322,7 +404,7 @@ export function createFetchTransport(opts: { timeoutMs?: number } = {}): Upstrea
       res = await fetch(req.url, {
         method: req.method,
         headers: req.headers,
-        body: req.body,
+        body: req.bodyBytes ?? req.body,
         redirect: 'error',
         signal,
       });
@@ -372,6 +454,8 @@ export interface CallOptions {
   form?: Record<string, string>;
   /** Raw text body with explicit content type (e.g. base64 MIME for Graph). */
   text?: { contentType: string; data: string };
+  /** Binary body with explicit content type (uploads, multipart/form-data built by the caller). */
+  bytes?: { contentType: string; data: Buffer };
   maxBytes?: number;
   /** Required for draft/send/calendar_write routes; must equal the route's tag. */
   capability?: RouteCapability;
@@ -417,6 +501,7 @@ export class Upstream {
     if (!isAllowedRoute(service, opts.method, opts.path, opts.capability)) {
       throw new PerchError(`Blocked non-allowlisted ${SERVICE_NAMES[service]} call`, 'route_not_allowed');
     }
+    if (service === 'drive') assertDriveRequestSafe(opts);
     let origin = ORIGINS[service];
     if (DYNAMIC_ORIGIN.has(service)) {
       if (!opts.origin) throw new PerchError(`Blocked ${SERVICE_NAMES[service]} call without a configured origin`, 'route_not_allowed');
@@ -443,13 +528,18 @@ export class Upstream {
       headers['content-type'] = opts.text.contentType;
       body = opts.text.data;
     }
+    let bodyBytes: Buffer | undefined;
+    if (opts.bytes) {
+      headers['content-type'] = opts.bytes.contentType;
+      bodyBytes = opts.bytes.data;
+    }
     let res: UpstreamResponse;
     try {
       res = await this.transport({
         method: opts.method,
         url,
         headers,
-        body,
+        ...(bodyBytes ? { bodyBytes } : { body }),
         maxBytes: opts.maxBytes ?? DEFAULT_JSON_MAX_BYTES,
       });
     } catch (err) {

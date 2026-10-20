@@ -35,8 +35,9 @@ function validateClientId(clientId: string): string {
   return clientId;
 }
 
-export function microsoftScopesFor(opts: { send?: boolean; drafts?: boolean }): string[] {
-  return [...MS_DEFAULT_SCOPES, ...(opts.drafts ? ['Mail.ReadWrite'] : []), ...(opts.send ? ['Mail.Send'] : [])];
+/** Mail.ReadWrite covers drafts and organizing (flags, move, deleted items); it is requested once for either opt-in. */
+export function microsoftScopesFor(opts: { send?: boolean; drafts?: boolean; modify?: boolean }): string[] {
+  return [...MS_DEFAULT_SCOPES, ...(opts.drafts || opts.modify ? ['Mail.ReadWrite'] : []), ...(opts.send ? ['Mail.Send'] : [])];
 }
 
 /** "https://graph.microsoft.com/mail.read" -> "Mail.Read"; unknown scopes keep their spelling. */
@@ -88,6 +89,7 @@ export interface MicrosoftAuthorizationOptions {
   upstream: Upstream;
   send?: boolean;
   drafts?: boolean;
+  modify?: boolean;
   /** 0 = random free port. Use a fixed port when forwarding it over SSH (`ssh -L`). */
   port?: number;
   timeoutMs?: number;

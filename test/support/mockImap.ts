@@ -4,7 +4,7 @@
  * evidence of a live integration (the imapflow adapter is covered separately).
  */
 import type { MessageEnvelopeObject, MessageStructureObject } from 'imapflow';
-import type { ImapFetchedMessage, ImapMailboxLock, ImapSearchQuery, ImapSession } from '../../src/mail/imap.js';
+import type { ImapFetchedMessage, ImapMailboxInfo, ImapMailboxLock, ImapSearchQuery, ImapSession } from '../../src/mail/imap.js';
 
 export interface MockImapMessage {
   uid: number;
@@ -16,17 +16,28 @@ export interface MockImapMessage {
   headers?: string;
   /** Decoded part content by body part number (what imapflow download() would stream). */
   parts?: Record<string, Buffer>;
+  /** MOCK flags (\Seen, \Flagged, \Draft, ...). */
+  flags?: string[];
+  /** Complete raw source (downloadSource); defaults to part "1" for appended messages. */
+  source?: Buffer;
 }
 
 export interface MockMailbox {
   uidValidity: string;
   messages: MockImapMessage[];
   specialUse?: string;
+  /** LIST flags such as \Noselect. */
+  listFlags?: string[];
 }
 
 export class MockImapSession implements ImapSession {
   readonly calls: string[] = [];
-  readonly opens: Array<{ mailbox: string; readOnly: true }> = [];
+  readonly opens: Array<{ mailbox: string; readOnly: boolean }> = [];
+  readonly moves: Array<{ from: string; uid: number; to: string }> = [];
+  readonly flagChanges: Array<{ uid: number; add: string[]; remove: string[] }> = [];
+  /** Server extensions for moving (both false simulates a server where Perch must refuse to move). */
+  moveExt = true;
+  private writable = false;
   readonly downloads: Array<{ uid: number; part: string; maxBytes: number }> = [];
   readonly appended: Array<{ mailbox: string; raw: Buffer; flags: string[] }> = [];
   released = 0;
@@ -56,6 +67,7 @@ export class MockImapSession implements ImapSession {
     if (!mb) throw new Error(`MOCK: no mailbox ${mailbox}`);
     this.opens.push({ mailbox, readOnly: true });
     this.open = mailbox;
+    this.writable = false;
     return {
       uidValidity: mb.uidValidity,
       release: () => {
@@ -124,8 +136,71 @@ export class MockImapSession implements ImapSession {
     if (!mb) throw new Error(`MOCK: no mailbox ${mailbox}`);
     this.appended.push({ mailbox, raw, flags });
     const uid = Math.max(0, ...mb.messages.map((m) => m.uid)) + 1;
-    mb.messages.push({ uid, parts: { '1': raw } });
+    mb.messages.push({ uid, parts: { '1': raw }, source: raw, flags });
     return this.uidPlus ? { uid, uidValidity: mb.uidValidity } : {};
+  }
+
+  async listMailboxes(): Promise<ImapMailboxInfo[]> {
+    this.step('list');
+    return [...this.mailboxes].map(([path, mb]) => ({
+      path,
+      name: path.split('/').pop()!,
+      ...(mb.specialUse ? { specialUse: mb.specialUse } : {}),
+      ...(mb.listFlags ? { flags: mb.listFlags } : {}),
+    }));
+  }
+
+  async openWritable(mailbox: string): Promise<ImapMailboxLock> {
+    this.step('openWritable');
+    const mb = this.mailboxes.get(mailbox);
+    if (!mb) throw new Error(`MOCK: no mailbox ${mailbox}`);
+    this.opens.push({ mailbox, readOnly: false });
+    this.open = mailbox;
+    this.writable = true;
+    return {
+      uidValidity: mb.uidValidity,
+      release: () => {
+        this.released++;
+        this.open = null;
+        this.writable = false;
+      },
+    };
+  }
+
+  private writableSelected(): MockMailbox {
+    if (!this.writable) throw new Error('MOCK: mailbox not opened for writing');
+    return this.selected();
+  }
+
+  async setFlags(uid: number, add: string[], remove: string[]): Promise<void> {
+    this.step('setFlags');
+    const m = this.writableSelected().messages.find((x) => x.uid === uid);
+    if (!m) throw new Error('MOCK: no such message');
+    this.flagChanges.push({ uid, add, remove });
+    m.flags = [...new Set([...(m.flags ?? []).filter((f) => !remove.includes(f)), ...add])];
+  }
+
+  async move(uid: number, destination: string): Promise<{ uid?: number; uidValidity?: string }> {
+    this.step('move');
+    if (!this.moveExt) throw new Error('MOCK: MOVE/UIDPLUS not supported');
+    const from = this.open!;
+    const src = this.writableSelected();
+    const dest = this.mailboxes.get(destination);
+    if (!dest) throw new Error(`MOCK: no mailbox ${destination}`);
+    const i = src.messages.findIndex((x) => x.uid === uid);
+    if (i < 0) throw new Error('MOCK: no such message');
+    const [m] = src.messages.splice(i, 1);
+    const newUid = Math.max(0, ...dest.messages.map((x) => x.uid)) + 1;
+    dest.messages.push({ ...m!, uid: newUid });
+    this.moves.push({ from, uid, to: destination });
+    return this.uidPlus ? { uid: newUid, uidValidity: dest.uidValidity } : {};
+  }
+
+  async downloadSource(uid: number, maxBytes: number): Promise<Buffer | undefined> {
+    this.step('downloadSource');
+    const m = this.selected().messages.find((x) => x.uid === uid);
+    const src = m?.source ?? m?.parts?.['1'];
+    return src?.subarray(0, maxBytes);
   }
 
   async logout(): Promise<void> {

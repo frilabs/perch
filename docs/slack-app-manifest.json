@@ -16,7 +16,11 @@
         "mpim:history",
         "users:read",
         "search:read",
-        "chat:write"
+        "chat:write",
+        "reactions:read",
+        "reactions:write",
+        "files:read",
+        "files:write"
       ]
     }
   },
