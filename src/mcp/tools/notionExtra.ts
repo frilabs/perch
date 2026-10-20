@@ -142,7 +142,7 @@ export const notionExtraTools: ToolModule = {
     server.registerTool(
       'notion_trash_page',
       {
-        description: `Move a Notion page to the trash (restorable with notion_restore_page; never deletes permanently). ${CONFIRM}`,
+        description: `Move a Notion page to the trash (restorable with notion_restore_page; never deletes permanently, but Notion empties its trash after 30 days). ${CONFIRM}`,
         inputSchema: { workspaceId, pageId: notionId('Page id') },
         annotations: DESTRUCTIVE,
       },
@@ -162,7 +162,7 @@ export const notionExtraTools: ToolModule = {
     server.registerTool(
       'notion_trash_block',
       {
-        description: `Move a Notion block to the trash (restorable in Notion; never deletes permanently). ${CONFIRM}`,
+        description: `Move a Notion block to the trash (restorable in Notion; never deletes permanently, but Notion empties its trash after 30 days). ${CONFIRM}`,
         inputSchema: { workspaceId, blockId: notionId('Block id') },
         annotations: DESTRUCTIVE,
       },

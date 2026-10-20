@@ -350,7 +350,7 @@ export class MailService {
       modify: `Account ${id} was not authorised to organize mail at the provider. Reconnect: ${reconnect('--allow-modify')}`,
       send_draft:
         `Account ${id} was not authorised to send existing drafts at the provider. Reconnect: ` +
-        reconnect(e.kind === 'gmail' ? '--allow-drafts (or --allow-modify)' : '--allow-send'),
+        reconnect(e.kind === 'gmail' ? '--allow-drafts' : '--allow-send'),
     }[what];
     throw new PerchError(message, 'provider_scope_missing');
   }

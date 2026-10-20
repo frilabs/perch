@@ -19,6 +19,8 @@ export interface MockDriveFile {
   trashed?: boolean;
   permissions?: MockPermission[];
   comments?: Array<{ id: string; content: string; author: { displayName: string } }>;
+  /** Shared drive the file lives in (absent = My Drive). */
+  driveId?: string;
 }
 
 export interface MockPermission {
@@ -287,6 +289,7 @@ export class MockGoogle {
       modifiedTime: '2026-01-01T00:00:00.000Z',
       parents: f.parents ?? ['root'],
       ...(f.trashed !== undefined ? { trashed: f.trashed } : {}),
+      ...(f.driveId ? { driveId: f.driveId } : {}),
     };
   }
 }
