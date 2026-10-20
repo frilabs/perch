@@ -211,6 +211,11 @@ export class DriveWriteService {
       attempt: async (binding) => {
         const r = await this.attempt(p, a!.id, binding, prepared!);
         response = r.body;
+        // A permission id identifies the grantee's Google account: never stored in the ledger (no recipients there).
+        if (op === 'share') {
+          const { providerMessageId: _grantee, ...withoutId } = r.result;
+          return withoutId;
+        }
         return r.result;
       },
     });
@@ -219,7 +224,7 @@ export class DriveWriteService {
     return {
       ...this.prov(a!),
       ...fixed,
-      ...(providerMessageId ? { id: providerMessageId } : {}),
+      ...(providerMessageId ? { id: providerMessageId } : typeof response?.id === 'string' ? { id: response.id } : {}),
       ...(response ? { result: response } : {}),
     };
   }
@@ -432,10 +437,16 @@ export class DriveWriteService {
    * Validates, then re-resolves the grant immediately before the single provider call. Every pre-check
    * failure means nothing was sent to Google.
    */
-  private async edit(p: Principal, accountId: unknown, build: () => (auth: Record<string, string>) => CallOptions) {
+  private async edit(
+    p: Principal,
+    accountId: unknown,
+    build: () => (auth: Record<string, string>) => CallOptions,
+    precheck?: (auth: Record<string, string>) => Promise<void>,
+  ) {
     const a = await this.authorize(p, accountId);
     const call = build();
     const auth = await this.auth(a);
+    if (precheck) await precheck(auth);
     assertDocsCapability(await currentPrincipal(this.store, p), 'drive', a.id, 'drive_write');
     const opts = call(auth);
     // DELETE answers 204 without a body.
@@ -459,8 +470,36 @@ export class DriveWriteService {
     });
   }
 
-  /** Rename, change the description, or move (addParents/removeParents). */
+  /**
+   * driveId of a file or folder ('' for My Drive). Moving an existing file into another drive (a shared drive
+   * the user does not own, possibly in another organisation) hands ownership to that drive, whose organisers
+   * could then delete it for good: Perch refuses such moves.
+   */
+  private async driveIdOf(auth: Record<string, string>, id: string): Promise<string> {
+    const meta = await this.upstream.json<{ driveId?: unknown }>('drive', {
+      method: 'GET',
+      path: `/drive/v3/files/${id}`,
+      headers: auth,
+      query: { supportsAllDrives: true, fields: 'id,driveId' },
+    });
+    return typeof meta.driveId === 'string' ? meta.driveId : '';
+  }
+
+  /** Rename, change the description, or move (addParents/removeParents) within the file's own drive. */
   updateFile(p: Principal, input: { accountId: string; fileId: string; name?: string; description?: string; addParents?: string[]; removeParents?: string[] }) {
+    const moveCheck = async (auth: Record<string, string>) => {
+      const add = parentList(input.addParents, 'addParents');
+      if (!add.length) return;
+      const own = await this.driveIdOf(auth, fileIdOf(input.fileId));
+      for (const parent of add) {
+        if ((await this.driveIdOf(auth, parent)) !== own) {
+          throw new PerchError(
+            'Moving a file into another drive (e.g. a shared drive) transfers it to that drive; Perch only moves files within their own drive. Copy it instead.',
+            'not_permitted',
+          );
+        }
+      }
+    };
     return this.edit(p, input?.accountId, () => {
       const fileId = fileIdOf(input.fileId);
       const n = input.name === undefined ? undefined : name(input.name);
@@ -485,7 +524,7 @@ export class DriveWriteService {
         },
         json: { ...(n !== undefined ? { name: n } : {}), ...(input.description !== undefined ? { description: input.description } : {}) },
       });
-    });
+    }, moveCheck);
   }
 
   /** Moves to trash (trashed=true) or restores (trashed=false). Never deletes permanently. */

@@ -169,10 +169,11 @@ describe('GmailProvider organize [MOCK Gmail]', () => {
     expect(gmail.gmailCalls()).toHaveLength(0);
   });
 
-  it('sends a draft with drafts.send (compose or modify), never with gmail.send alone', async () => {
+  it('sends a draft with drafts.send only with the compose opt-in, never with gmail.send or gmail.modify alone', async () => {
     const { provider, acct, gmail } = gmailSetup();
     expect(provider.canSendDraft(gmailAccount([GMAIL_READONLY_SCOPE, GMAIL_SEND_SCOPE]))).toBe(false);
-    expect(provider.canSendDraft(gmailAccount([GMAIL_READONLY_SCOPE, GMAIL_MODIFY_SCOPE]))).toBe(true);
+    // Organizing (--allow-modify) must not open a send path.
+    expect(provider.canSendDraft(gmailAccount([GMAIL_READONLY_SCOPE, GMAIL_MODIFY_SCOPE]))).toBe(false);
     expect(await rejection(provider.sendDraft(gmailAccount([GMAIL_READONLY_SCOPE, GMAIL_SEND_SCOPE]), 'r-111'))).toMatchObject({ code: 'provider_scope_missing' });
     expect(gmail.gmailCalls()).toHaveLength(0);
     const r = await provider.sendDraft(gmailAccount([GMAIL_READONLY_SCOPE, GMAIL_COMPOSE_SCOPE]), 'r-111');
@@ -359,6 +360,13 @@ describe('ImapMailProvider organize [MOCK ImapSession]', () => {
     await provider.markMessage(imapAccount(), inboxId(1), { read: false });
     expect(box('INBOX').messages[0]!.flags).toEqual(['\\Flagged']);
     expect(session.opens.every((o) => o.readOnly === false)).toBe(true);
+  });
+
+  it('refuses to move a message into the drafts folder (it could then be re-sent as a draft)', async () => {
+    const { provider, box } = imapSetup();
+    expect(await rejection(provider.moveMessage(imapAccount(), inboxId(1), { folderId: 'Entwürfe' }))).toMatchObject({ code: 'not_permitted' });
+    expect(box('Entwürfe').messages).toHaveLength(1);
+    expect(box('INBOX').messages).toHaveLength(2);
   });
 
   it('moves, archives (\\Archive or a named folder), trashes to \\Trash and restores to INBOX with new ids', async () => {

@@ -10,7 +10,8 @@
   - Mail: `mail_list_folders`, `mail_list_drafts`, `mail_mark_message`, `mail_move_message`, `mail_trash_message`, `mail_restore_message`, `mail_send_draft`; Provider-Opt-in `--allow-modify` (Gmail `gmail.modify`, Graph `Mail.ReadWrite`, IMAP `allowModify`).
   - Slack: `slack_add_reaction`, `slack_remove_reaction`, `slack_edit_message`, `slack_upload_file`, `slack_get_file`; neue Manifest-Scopes (App neu installieren).
   - WhatsApp: `whatsapp_send_media`, `whatsapp_download_media`.
-- **Getestet (nur Mocks):** `npm run check` grün (siehe PR). **Live verifiziert:** nichts; offene Live-Punkte pro Dienst in `docs/PHASE1_REMAINING.md` §1.
+- **Unabhängiger Security-Review:** keine kritischen Befunde (kein Schreiben für das globale Token, keine Route für endgültiges Löschen, Kontogrenzen halten, Bcc wird entfernt). Behoben mit Regressionstests: Verschieben einer Drive-Datei in eine andere Ablage (geteilte Ablage = Besitzwechsel) wird abgelehnt; Gmail-Entwürfe senden nur mit dem Compose-Opt-in (`--allow-drafts`), nie über `--allow-modify`; IMAP verschiebt nichts in den Entwurfsordner (sonst Neuversand alter Mails); die Drive-Berechtigungs-ID (identifiziert die Empfängerin) kommt nicht in den Ledger. Hinweis ergänzt: Anbieter leeren Papierkörbe nach ~30 Tagen (SETUP §4h).
+- **Getestet (nur Mocks):** `npm run check` grün: 817 Tests (59 Dateien), Smoke 11/11, Lizenzprüfung OK, keine neuen Abhängigkeiten. **Live verifiziert:** nichts; offene Live-Punkte pro Dienst in `docs/PHASE1_REMAINING.md` §1.
 
 
 ## Update 2026-10-15: Luma über den offiziellen Luma-MCP (Branch `claude/perch-oauth-internet-access-b0cg8c`, auf `main` nach PR #8)

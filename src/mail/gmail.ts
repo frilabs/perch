@@ -159,9 +159,12 @@ export class GmailProvider implements MailProvider<GmailAccount> {
     return { draft: compose, send: compose || account.scopes.includes(GMAIL_SEND_SCOPE), modify: account.scopes.includes(GMAIL_MODIFY_SCOPE) };
   }
 
-  /** users.drafts.send needs gmail.compose or gmail.modify (gmail.send alone cannot send a stored draft). */
+  /**
+   * users.drafts.send accepts gmail.compose or gmail.modify, but Perch requires the compose opt-in
+   * (--allow-drafts): an account connected only to organize mail (--allow-modify) must never gain a send path.
+   */
   canSendDraft(account: GmailAccount): boolean {
-    return account.scopes.includes(GMAIL_COMPOSE_SCOPE) || account.scopes.includes(GMAIL_MODIFY_SCOPE);
+    return account.scopes.includes(GMAIL_COMPOSE_SCOPE);
   }
 
   private async auth(account: GmailAccount): Promise<Record<string, string>> {

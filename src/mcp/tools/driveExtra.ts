@@ -184,7 +184,7 @@ export const driveExtraTools: ToolModule = {
     server.registerTool(
       'drive_trash_file',
       {
-        description: `Move a Drive file to the trash (restorable with drive_restore_file; Perch never deletes permanently). ${CONFIRM}`,
+        description: `Move a Drive file to the trash (restorable with drive_restore_file; Perch never deletes permanently, but Google empties the trash after about 30 days). ${CONFIRM}`,
         inputSchema: { accountId, fileId },
         annotations: DESTRUCTIVE,
       },

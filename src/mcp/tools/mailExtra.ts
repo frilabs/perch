@@ -93,7 +93,7 @@ export const mailExtraTools: ToolModule = {
         {
           description:
             'Move one message to the trash (Gmail Trash, Microsoft Deleted Items, IMAP \\Trash). Recoverable with mail_restore_message; ' +
-            `Perch never deletes permanently and never empties the trash. ${MOVED_ID} ${CONFIRM} Requires "modify".`,
+            `Perch never deletes permanently and never empties the trash, but providers empty it after a retention period (Gmail about 30 days). ${MOVED_ID} ${CONFIRM} Requires "modify".`,
           inputSchema: { accountId, messageId },
           annotations: DESTRUCTIVE,
         },

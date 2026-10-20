@@ -221,9 +221,20 @@ describe('Drive writes [MOCK Google]', () => {
   });
 
   it('renames and moves', async () => {
+    mockA.files.push({ id: 'folderB', name: 'B', mimeType: 'application/vnd.google-apps.folder' });
     const r = await call(client, 'drive_update_file', { accountId: idA, fileId: 'a1', name: 'Renamed.txt', addParents: ['folderB'], removeParents: ['folderA'] });
     expect(r.body).toMatchObject({ accountId: idA, name: 'Renamed.txt', parents: ['folderB'] });
     expect((await call(client, 'drive_update_file', { accountId: idA, fileId: 'a1' })).isError).toBe(true);
+  });
+
+  it('refuses to move a file into another drive (that would hand it to a shared drive)', async () => {
+    mockA.files.push({ id: 'sharedFolder', name: 'Team', mimeType: 'application/vnd.google-apps.folder', driveId: 'sd0001' });
+    const writes = google.writes.length;
+    const r = await call(client, 'drive_update_file', { accountId: idA, fileId: 'a1', addParents: ['sharedFolder'], removeParents: ['folderA'] });
+    expect(r.isError).toBe(true);
+    expect(JSON.stringify(r.body)).toMatch(/another drive/);
+    expect(google.writes.length).toBe(writes);
+    expect(mockA.files[0]!.parents).toEqual(['folderA']);
   });
 
   it('copies a file', async () => {
@@ -255,6 +266,9 @@ describe('Drive writes [MOCK Google]', () => {
     const u = await call(client, 'drive_unshare_file', { accountId: idA, fileId: 'a1', permissionId: String(s.body.id) });
     expect(u.body).toMatchObject({ removed: true });
     expect(mockA.files[0]!.permissions!.map((x) => x.id)).toEqual(['anyoneWithLink']);
+    // The permission id identifies the grantee: never in the ledger.
+    const ledger = JSON.stringify(await new MailWorkflowLedger(store).read());
+    expect(ledger).not.toContain(String(s.body.id));
   });
 
   it('never grants owner and validates share shapes before any call', async () => {

@@ -585,6 +585,10 @@ perch oauth grant oc-0123456789abcdef --allow luma_read,luma_events --account lu
 - Luma-Tools haben keine eigene Idempotenz. Bricht ein Aufruf mittendrin ab, ist der Ausgang unklar; dann in Luma nachsehen.
 - Zwischen Zählen und Senden eines Blasts können sich Gäste an- oder abmelden.
 
+## 4h. Papierkorb statt Löschen (alle Dienste)
+
+Perch löscht nie endgültig: Drive, Notion und Mail verschieben nur in den Papierkorb, Slack- und WhatsApp-Nachrichten lassen sich gar nicht löschen. Achtung: Die Anbieter leeren ihre Papierkörbe selbst nach einer Frist (Google Drive und Gmail etwa 30 Tage, Notion 30 Tage, Outlook je nach Einstellung, GMX laut Ordner-Einstellung). Wiederherstellen also zeitnah.
+
 ## 5a. Status: `perch status` und die Statusseite
 
 **Auf dem Server:**

@@ -738,6 +738,8 @@ export class ImapMailProvider implements MailProvider<ImapAccount> {
         if (!to) throw new PerchError('This server reports no \\Archive folder; pass folderId with archive: true', 'no_archive_folder');
       }
       if (to === undefined) throw new PerchError('folderId is required (or archive: true)', 'bad_argument');
+      // A message moved into Drafts could then be re-sent with mail_send_draft (e.g. an old mail from Sent).
+      if (to === (await this.draftsPath(account, s))) throw new PerchError('Perch does not move messages into the drafts folder', 'not_permitted');
       return this.moveIn(s, uid, mailbox, to, list);
     });
   }
