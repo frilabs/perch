@@ -48,7 +48,8 @@ import { cmdLuma, lumaMcpFor } from './luma.js';
 import type { FetchLike } from '../luma/client.js';
 import { PERCH_VERSION } from '../version.js';
 import { chooseAccess, claudeAddCommand, runSetup, WRITE_FLAGS } from './onboarding.js';
-import { DEFAULT_PAIR_TIMEOUT_MS, pairWhatsappAccount, removeWhatsappAccount, setWhatsappInstance, whatsappDeviceStatus } from '../whatsapp/whatsapp.js';
+import { defaultInstallDeps, installGowa, type InstallDeps } from '../whatsapp/install.js';
+import { DEFAULT_PAIR_TIMEOUT_MS, pairWhatsappAccount, probeWhatsappInstance, removeWhatsappAccount, setWhatsappInstance, whatsappDeviceStatus } from '../whatsapp/whatsapp.js';
 
 export interface CliIo {
   env: Record<string, string | undefined>;
@@ -66,6 +67,8 @@ export interface CliIo {
   imapVerify?: (account: ImapAccount) => Promise<void>;
   /** Tests inject a no-op sleep (WhatsApp pairing polls the bridge). */
   sleep?: (ms: number) => Promise<void>;
+  /** Tests inject MOCK platform, download, systemctl and pins for `perch whatsapp install`; production uses the real ones. */
+  whatsappInstall?: Partial<InstallDeps>;
 }
 
 const USAGE = `perch ${PERCH_VERSION} - Google Drive + Notion + mail + Calendar/Contacts + Slack + WhatsApp MCP server (read-only unless a client grant allows more)
@@ -109,6 +112,8 @@ Usage:
   perch slack manifest                         print the Slack app manifest (create one internal app per workspace)
   perch slack add --label NAME                 user token (xoxp-…) is read via a masked terminal prompt
   perch slack list | remove ID
+  perch whatsapp install [--yes] [--dir PATH] [--port N]   download the pinned GOWA bridge (SHA-256 checked), run it as a
+                                               systemd user service on 127.0.0.1 and store it in Perch (Linux; asks first)
   perch whatsapp instance set --url http://127.0.0.1:3000   GOWA basic-auth user/password via masked prompts
   perch whatsapp instance show
   perch whatsapp add --label NAME --phone +43…  [--timeout SECONDS]   pair a new linked device by pairing code
@@ -626,6 +631,26 @@ async function cmdSlack(config: PerchConfig, io: CliIo, sub: string | undefined,
 async function cmdWhatsapp(config: PerchConfig, io: CliIo, sub: string | undefined, rest: string[], values: Record<string, unknown>) {
   const store = await openStore(config);
   const upstream = new Upstream(io.transport ?? createFetchTransport());
+  if (sub === 'install') {
+    if (rest.length) throw new UsageError('Usage: perch whatsapp install [--yes] [--dir PATH] [--port N]');
+    const home = io.env.HOME;
+    if (!home || !path.isAbsolute(home)) throw new PerchError('HOME is not set to an absolute path', 'usage');
+    const deps: InstallDeps = {
+      ...defaultInstallDeps({
+        home,
+        sleep: io.sleep,
+        out: io.stdout,
+        ask: io.readLine,
+        configuredOrigin: async () => (await store.read()).whatsappInstance?.origin,
+        probe: async (url, username, password) => void (await probeWhatsappInstance(upstream, { url, username, password })),
+        store: async (url, username, password) => void (await setWhatsappInstance(store, upstream, { url, username, password })),
+      }),
+      ...io.whatsappInstall,
+    };
+    const dir = typeof values.dir === 'string' ? values.dir : undefined;
+    await installGowa({ yes: values.yes === true, dir, port: optPort(values, 'port') }, deps);
+    return io.stdout('Next: perch whatsapp add --label NAME --phone +43…  (pairs your phone by code)\n');
+  }
   if (sub === 'instance') {
     const action = rest[0];
     if (action === 'show') {
@@ -663,7 +688,7 @@ async function cmdWhatsapp(config: PerchConfig, io: CliIo, sub: string | undefin
     );
     return;
   }
-  if (sub !== 'add') throw new UsageError('Usage: perch whatsapp instance|add|list|status|remove');
+  if (sub !== 'add') throw new UsageError('Usage: perch whatsapp install|instance|add|list|status|remove');
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
   if (typeof values.phone !== 'string') throw new UsageError('--phone is required (international format, e.g. +4366012345678)');
   const timeout = values.timeout === undefined ? DEFAULT_PAIR_TIMEOUT_MS / 1000 : Number(values.timeout);
@@ -906,6 +931,8 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         all: { type: 'boolean' },
         accept: { type: 'boolean' },
         json: { type: 'boolean' },
+        yes: { type: 'boolean' },
+        dir: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
       },
@@ -945,7 +972,9 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       case 'public':
         return await cmdPublic(config, io, sub);
       case 'setup':
-        return await runSetup(config, io, (argv) => runCli(argv, io));
+        return await runSetup(config, io, (argv) => runCli(argv, io), {
+          whatsappConfigured: async () => Boolean((await (await openStore(config)).read()).whatsappInstance),
+        });
       case 'status':
         return await cmdStatus(config, io, values);
       case 'accounts':

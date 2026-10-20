@@ -122,18 +122,26 @@ async function instanceOf(store: CredentialStore): Promise<WhatsappInstance> {
 }
 
 /** Stores the GOWA instance after one authenticated request (GET /devices) succeeded. */
-export async function setWhatsappInstance(store: CredentialStore, upstream: Upstream, input: { url: string; username: string; password: string }): Promise<{ origin: string; devices: number }> {
+/**
+ * Checks a bridge without storing anything: validates the origin (loopback/Tailscale only) and calls
+ * GET /devices with basic auth. Returns the probed instance and the number of device slots.
+ */
+export async function probeWhatsappInstance(upstream: Upstream, input: { url: string; username: string; password: string }): Promise<{ instance: WhatsappInstance; devices: number }> {
   const origin = validateGowaOrigin(input.url);
   const username = input.username.trim();
   if (!username || username.includes(':') || !input.password) throw new PerchError('GOWA username (without ":") and password are required', 'bad_argument');
   const now = new Date().toISOString();
-  const probe: WhatsappInstance = { origin, username, password: input.password, createdAt: now, updatedAt: now };
-  const body = await call(upstream, probe, 'GET', '/devices', { capability: 'admin' });
-  const list = results(body);
+  const instance: WhatsappInstance = { origin, username, password: input.password, createdAt: now, updatedAt: now };
+  const list = results(await call(upstream, instance, 'GET', '/devices', { capability: 'admin' }));
+  return { instance, devices: Array.isArray(list) ? list.length : 0 };
+}
+
+export async function setWhatsappInstance(store: CredentialStore, upstream: Upstream, input: { url: string; username: string; password: string }): Promise<{ origin: string; devices: number }> {
+  const { instance, devices } = await probeWhatsappInstance(upstream, input);
   await store.update((data) => {
-    data.whatsappInstance = { ...probe, createdAt: data.whatsappInstance?.createdAt ?? now };
+    data.whatsappInstance = { ...instance, createdAt: data.whatsappInstance?.createdAt ?? instance.createdAt };
   });
-  return { origin, devices: Array.isArray(list) ? list.length : 0 };
+  return { origin: instance.origin, devices };
 }
 
 export function normalisePhone(raw: string): string {
