@@ -8,7 +8,7 @@ import { loadHttpToken, resolveConfig, type PerchConfig } from '../config.js';
 import { createPerchContext } from '../context.js';
 import { PerchError, safeMessage } from '../errors.js';
 import { registerGoogleAccount, removeGoogleAccount } from '../google/accounts.js';
-import { DEFAULT_AUTH_TIMEOUT_MS, MAX_AUTH_TIMEOUT_MS, parseClientFile, runLoopbackAuthorization } from '../google/oauth.js';
+import { DEFAULT_AUTH_TIMEOUT_MS, DRIVE_READONLY_SCOPE, DRIVE_SCOPE, MAX_AUTH_TIMEOUT_MS, parseClientFile, runLoopbackAuthorization } from '../google/oauth.js';
 import {
   parseServices,
   productivityScopesFor,
@@ -86,7 +86,7 @@ Usage:
   perch accounts                               list all connected accounts
   perch status [--no-check] [--json]           overview with a live check per account
                                                (exit code 1 if a check failed); the same page: GET /status on serve --http
-  perch google add --label NAME [--port N] [--timeout SECONDS] [--login-hint EMAIL]
+  perch google add --label NAME [--allow-write] [--port N] [--timeout SECONDS] [--login-hint EMAIL]
   perch google list | remove ID [--revoke]
   perch notion add --label NAME                PAT is read via a masked terminal prompt
   perch notion list | remove ID
@@ -333,16 +333,19 @@ async function cmdGoogle(config: PerchConfig, io: CliIo, sub: string | undefined
     throw new PerchError('Set PERCH_GOOGLE_CLIENT_FILE to the JSON of your Google "Desktop app" OAuth client', 'bad_config');
   }
   const client = parseClientFile((await readPrivateFile(config.googleClientFile)).toString('utf8'));
+  // --allow-write asks Google for full Drive access (create, edit, share, trash); writes still need a client grant with drive_write.
+  const allowWrite = Boolean(values['allow-write']);
   const grant = await runLoopbackAuthorization({
     client,
     upstream,
     port,
     timeoutMs,
+    scopes: [allowWrite ? DRIVE_SCOPE : DRIVE_READONLY_SCOPE],
     ...(typeof values['login-hint'] === 'string' ? { loginHint: values['login-hint'] } : {}),
     onAuthUrl: (url) => {
       const p = new URL(new URL(url).searchParams.get('redirect_uri')!).port;
       io.stderr(
-        `Open this URL in a browser and approve read-only Drive access for the account you want to add:\n\n${url}\n\n` +
+        `Open this URL in a browser and approve ${allowWrite ? 'full (read and write)' : 'read-only'} Drive access for the account you want to add:\n\n${url}\n\n` +
           `The browser must reach http://127.0.0.1:${p} on this machine. If the browser runs elsewhere, ` +
           `forward the port first: ssh -L ${p}:127.0.0.1:${p} <this-server>\n` +
           `Waiting up to ${Math.round(timeoutMs / 1000)}s...\n`,
@@ -350,7 +353,8 @@ async function cmdGoogle(config: PerchConfig, io: CliIo, sub: string | undefined
     },
   });
   const account = await registerGoogleAccount(store, upstream, { label: values.label, client, grant });
-  io.stdout(`Connected Google account ${account.id} (${account.email}) as "${account.label}".\n`);
+  io.stdout(`Connected Google account ${account.id} (${account.email}) as "${account.label}"${allowWrite ? ' with Drive write access at Google' : ''}.\n`);
+  if (allowWrite) io.stdout(`Writes still need a client grant: perch client add --label NAME --allow drive_read,drive_write --account ${account.id}\n`);
 }
 
 async function cmdNotion(config: PerchConfig, io: CliIo, sub: string | undefined, rest: string[], values: Record<string, unknown>) {

@@ -46,13 +46,16 @@ Perch re-checks the grant before every tool call, so `perch client remove ID` ta
 
 ## Features
 
-- **Google Drive** (`drive.readonly`, a separate OAuth grant per account):
+- **Google Drive** (`drive.readonly`, or `drive` with `perch google add --allow-write`; a separate OAuth grant per account):
   - search and list, optionally across all accounts
-  - metadata
+  - metadata, sharing entries and comments
   - read text, base64 download
   - export Docs, Sheets and Slides to validated formats
   - size limit: 48 KiB by default because of client output limits, up to 10 MiB on request
   - never written to disk
+  - client grants with `drive_read` read only their granted accounts
+  - writes (client grants with `drive_write` on accounts connected with `--allow-write` only): upload (up to 10 MiB), create folders and Google Docs/Sheets/Slides (empty or from text/CSV), replace content, rename, move, copy, share (user, group, domain, anyone with the link; reader/commenter/writer), unshare, comment, trash and restore
+  - creating, copying, sharing and commenting need a `requestId` and never run twice; deleting means trash only (no permanent delete, no empty trash, no ownership transfer)
 - **Notion** (one personal access token per workspace):
   - title search over pages and data sources (no full-text search)
   - pages and paginated, nested block content
