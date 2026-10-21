@@ -64,6 +64,7 @@ import { addNotionWorkspace, removeNotionWorkspace } from '../notion/notion.js';
 import { SLACK_APP_MANIFEST } from '../slack/manifest.js';
 import { addSlackWorkspace, removeSlackWorkspace } from '../slack/slack.js';
 import { ensurePrivateDir, pathExists, readPrivateFile, writePrivateFileAtomic, writePrivateFileExclusive } from '../secureFs.js';
+import { renameRecord } from '../store/rename.js';
 import { CredentialStore, initStore, type GoogleAccountGroup, type ImapAccount, type StoreData } from '../store/credentialStore.js';
 import { createFetchTransport, Upstream, type UpstreamTransport } from '../upstream.js';
 import { collectStatus, failedChecks, formatStatusText } from '../status/status.js';
@@ -127,6 +128,7 @@ Usage:
   perch luma list | remove ID [--revoke] | tools ID [--accept]   tools: approved vs live tool schemas
   perch oauth local-page enable | disable       local pairing page /local/pair with its own password
   perch accounts                               list all connected accounts
+  perch rename ID "NEW LABEL"                  change the label of an account, a Google account group (ggroup-…, all its services) or a client
   perch status [--no-check] [--json] [--plain] overview with a live check per account, capabilities and the commands
                                                that enable missing ones (exit code 1 if a check failed); --plain: the
                                                previous one-line-per-account text; the same page: GET /status on serve --http
@@ -1404,6 +1406,12 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       case 'accounts':
         io.stdout(formatAccounts(await (await openStore(config)).read(), 'all'));
         return 0;
+      case 'rename': {
+        if (!sub || rest.length !== 1) throw new UsageError('Usage: perch rename ID "NEW LABEL"   (ID from perch accounts, perch google list or perch client list)');
+        const r = await renameRecord(await openStore(config), sub, rest[0]!);
+        io.stdout(`Renamed ${r.renamed.join(', ')} to "${r.label}".\n`);
+        return 0;
+      }
       case 'google':
         await cmdGoogle(config, io, sub, rest, values);
         return 0;
