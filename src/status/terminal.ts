@@ -204,6 +204,12 @@ export function accountCapabilities(d: StoreData): CapabilityMap {
   }
   for (const a of d.whatsapp) out[a.id] = [{ name: 'read', enabled: true }, { name: 'send', enabled: true }];
   for (const a of d.luma) out[a.id] = [{ name: `${a.tools.length} tools approved`, enabled: true }];
+  for (const a of d.x) {
+    out[a.id] = [
+      { name: 'read', enabled: true },
+      { name: 'post', enabled: a.scopes.includes('tweet.write'), detail: 'publish posts (app permissions "Read and write")', enable: `perch x add --label ${shellQuote(a.label)}` },
+    ];
+  }
   return out;
 }
 
@@ -282,6 +288,7 @@ const SERVICES: Array<{ key: string; title: string; name?: string; google?: bool
     add: (r) => (r.whatsappBridge ? 'perch whatsapp add --label NAME --phone +43…' : 'perch whatsapp install, then perch whatsapp add --label NAME --phone +43…'),
   },
   { key: 'luma', title: 'Luma', match: (a) => a.family === 'luma', does: 'events and guests through the official Luma MCP', add: () => 'perch luma add --label NAME' },
+  { key: 'x', title: 'X', match: (a) => a.family === 'x', does: 'post on your own X account (own X developer app, paid API)', add: () => 'perch x add --label NAME' },
 ];
 
 /** Google without any connected account: one line, one command (read/write per service later: perch google access). */

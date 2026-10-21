@@ -76,6 +76,7 @@ import { accountCapabilities, formatStatusTerminal } from '../status/terminal.js
 import { startPublicAccess } from '../access/runtime.js';
 import { cmdOauth, cmdPublic } from './oauth.js';
 import { cmdLuma, lumaMcpFor } from './luma.js';
+import { cmdX } from './x.js';
 import { cmdGoogleClient, googleRequestFromFlags, loadGoogleClient } from './googleClient.js';
 import { loginPrompts } from './loginPrompt.js';
 import type { FetchLike } from '../luma/client.js';
@@ -200,11 +201,17 @@ Usage:
   perch whatsapp instance show
   perch whatsapp add --label NAME --phone +43…  [--timeout SECONDS]   pair a new linked device by pairing code
   perch whatsapp list | status | remove ID [--keep-device]
+  perch x add --label NAME [--timeout SECONDS]   post on your own X account: login in the browser (OAuth 2.0 with PKCE,
+                                               fixed port 8771) with your X developer app; same X user = update
+  perch x client setup | show                  guided X developer app (Client ID, optional secret, hidden);
+                                               stored in ~/.config/perch/x-client.json (0600)
+  perch x list | remove ID [--revoke]
   perch client add --label NAME --full [--token-file PATH]   read + write on every account (also later ones)
   perch client add --label NAME --allow CAPS --account ID [--account ID ...] [--token-file PATH]
                       CAPS: read,draft,send,modify (mail accounts); calendar_read,calendar_write,calendar_invite,contacts_read (gprod accounts);
                             slack_read,slack_send (slack accounts); whatsapp_read,whatsapp_send (whatsapp accounts);
                             luma_read,luma_events,luma_guests,luma_blast (luma accounts)
+                            x_read,x_post (x accounts)
   perch client list | remove ID
   perch token rotate                           replace the HTTP bearer token file
   perch audit list [--limit N] [--client ID] [--account ID]   body-free audit trail
@@ -1491,6 +1498,9 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         return await cmdOauth(config, io, sub, rest, values);
       case 'luma':
         await cmdLuma(config, io, sub, rest, values);
+        return 0;
+      case 'x':
+        await cmdX(config, io, sub, rest, values);
         return 0;
       case 'public':
         return await cmdPublic(config, io, sub);

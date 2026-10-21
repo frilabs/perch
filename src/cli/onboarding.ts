@@ -192,6 +192,15 @@ const SERVICES: readonly SetupService[] = [
     needs: () => tunnel(8768),
     args: async () => ['--port', '8768'],
   },
+  {
+    cmd: 'x',
+    title: 'X (post on your own account)',
+    needs: () =>
+      'Needs your own X developer app (once per installation; Perch shows the steps) and API credits: X bills every post ' +
+      '(pay-per-use, see developer.x.com).\n' +
+      tunnel(8771),
+    args: async () => [],
+  },
 ];
 
 /**

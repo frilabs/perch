@@ -39,6 +39,7 @@ const PROVIDER_BY_PREFIX: Record<string, AuditProvider> = {
   slack: 'slack',
   whatsapp: 'whatsapp',
   luma: 'luma',
+  x: 'x',
 };
 
 export function actorOf(p: Principal): Actor {

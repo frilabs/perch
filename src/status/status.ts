@@ -22,7 +22,7 @@ import { PERCH_VERSION } from '../version.js';
  * token providers, so refresh-token rotation never races with the running server.
  */
 
-export type AccountFamily = 'drive' | 'notion' | 'mail' | 'calendar' | 'slack' | 'whatsapp' | 'luma';
+export type AccountFamily = 'drive' | 'notion' | 'mail' | 'calendar' | 'slack' | 'whatsapp' | 'luma' | 'x';
 
 export const FAMILY_TITLES: Record<AccountFamily, string> = {
   drive: 'Google Drive',
@@ -32,6 +32,7 @@ export const FAMILY_TITLES: Record<AccountFamily, string> = {
   slack: 'Slack',
   whatsapp: 'WhatsApp',
   luma: 'Luma',
+  x: 'X',
 };
 
 export interface CheckResult {
@@ -147,6 +148,9 @@ function accountsOf(d: StoreData): AccountStatus[] {
     const ident = a.email ?? a.name;
     rows.push({ family: 'luma', id: a.id, label: a.label, provider: 'luma-mcp', ...(ident ? { identity: ident } : {}), permissions: `${a.tools.length} tools approved`, connectedAt: a.createdAt });
   }
+  for (const a of d.x) {
+    rows.push({ family: 'x', id: a.id, label: a.label, provider: 'x', identity: `@${a.username}`, permissions: a.scopes.includes('tweet.write') ? 'read, post' : 'read', connectedAt: a.createdAt });
+  }
   return rows;
 }
 
@@ -241,6 +245,9 @@ async function checkAccount(ctx: PerchContext, d: StoreData, a: AccountStatus, o
     }
     case 'luma':
       await ctx.luma.check(a.id);
+      return;
+    case 'x':
+      await ctx.x.check(a.id);
       return;
   }
 }
