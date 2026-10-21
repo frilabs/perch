@@ -26,3 +26,14 @@ Stand 2026-10-21. **Von Fritz freigegeben** („ja, baue den slack session-modus
 
 - Dev-Abhängigkeit `vite` (über vitest) auf eine Version ohne die gemeldete Lücke aktualisieren (`npm audit` muss danach 0 melden); Lizenzprüfung grün.
 - Terminal-Ausgaben der neuen Anleitungen vor dem Abschluss in einem echten Pseudo-Terminal ansehen (z. B. `script`), auf saubere Einrückung und Umbrüche prüfen.
+
+## 4. Nachtrag: Notion per OAuth (ohne Owner-Rechte)
+
+Live gesehen: In Team-Workspaces dürfen Mitglieder oft keine *internen* Verbindungen (API-Token) anlegen, eine **OAuth-Verbindung** aber schon (Notion: „Du bist nicht berechtigt, interne Verbindungen zu erstellen“, OAuth wählbar). Daher:
+
+- `perch notion add` fragt (oder Flag): „[t]oken (interne Verbindung) oder [o]auth (öffentliche Verbindung, auch ohne Owner-Rechte)?“.
+- OAuth-Client einmal pro Installation, geführt wie bei Microsoft: `https://www.notion.so/profile/integrations` → Neue Verbindung → OAuth, „Installierbar in: Beliebigem Workspace“, **Umleitungs-URI `http://localhost:8769/notion/callback`** → Client-ID und Client-Secret kopieren → verdeckt einfügen; gespeichert `0600` in `~/.config/perch/notion-client.json` (`perch notion client setup|show`).
+- Login über die bestehende Loopback-/Paste-Adresse-Mechanik (fester Port 8769, Pfad `/notion/callback`, `state`, `owner=user`), Token-Tausch `POST https://api.notion.com/v1/oauth/token` mit Basic-Auth (client_id:client_secret). Antwort liefert `access_token`, `workspace_id`, `workspace_name`, `bot_id`, ggf. `refresh_token`/`expires_in`: falls vorhanden, Refresh über denselben Endpunkt (`grant_type=refresh_token`) mit den bestehenden Garantien (Lock, Persistenz); sonst gilt der Token unbefristet.
+- Ergebnis ist ein normaler Notion-Workspace-Datensatz (gleiche Tools, gleiche REST-Aufrufe), zusätzlich `authMode: 'oauth'`; gleiche `workspace_id` erneut → aktualisieren statt Dublette. Seiten wählt der Nutzer im Notion-Zustimmungsdialog aus.
+- Upstream: nur der Token-Endpunkt kommt neu in die Allowlist (Tag `admin`/CLI-only).
+- Live zu prüfen: akzeptiert Notion `http://localhost` als Umleitungs-URI; liefert der Token-Endpunkt einen Refresh-Token.
