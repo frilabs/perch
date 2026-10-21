@@ -189,7 +189,8 @@ export function accountCapabilities(d: StoreData): CapabilityMap {
     ];
   }
   for (const w of d.slack) {
-    const has = (...scopes: string[]) => scopes.every((s) => w.scopes.includes(s));
+    // Session workspaces (unofficial) report no scopes: everything counts as enabled, Slack decides per call.
+    const has = (...scopes: string[]) => w.authMode === 'session' || scopes.every((s) => w.scopes.includes(s));
     const enable = `reinstall the Slack app with the current manifest (perch slack manifest), then perch slack remove ${w.id} && perch slack add --label ${shellQuote(w.label)}`;
     const caps: Array<[string, boolean, string]> = [
       ['read', has('channels:read', 'channels:history', 'groups:read', 'groups:history', 'im:read', 'im:history', 'mpim:read', 'mpim:history', 'users:read'), 'channels, DMs, threads'],
@@ -272,7 +273,7 @@ const SERVICES: Array<{ key: string; title: string; name?: string; google?: bool
     add: () => 'perch imap add --label NAME --email ADDRESS [--preset gmx] [--allow-drafts] [--allow-send] [--allow-modify]',
   },
   { key: 'calendar', title: 'Google Calendar/Contacts', google: true, match: (a) => a.family === 'calendar', does: '', add: () => '' },
-  { key: 'slack', title: 'Slack', match: (a) => a.family === 'slack', does: 'read, search and post (internal app, user token)', add: () => 'perch slack manifest, then perch slack add --label NAME' },
+  { key: 'slack', title: 'Slack', match: (a) => a.family === 'slack', does: 'read, search and post (internal app, or browser session without admin)', add: () => 'perch slack add --label NAME [--session]' },
   {
     key: 'whatsapp',
     title: 'WhatsApp',

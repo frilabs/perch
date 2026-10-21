@@ -172,7 +172,8 @@ const SERVICES: readonly SetupService[] = [
     cmd: 'slack',
     title: 'Slack',
     needs: () =>
-      'Per workspace: Perch shows the app manifest and the steps to create and install the Slack app, then asks for the "User OAuth Token" (xoxp-…) hidden.\n',
+      'Per workspace: either the Slack app (official; Perch shows the manifest and the steps, then asks for the "User OAuth Token" xoxp-… hidden) ' +
+      'or your browser session (unofficial, no admin needed; Perch warns first and shows how to copy cookie and token).\n',
     args: async () => [],
   },
   {

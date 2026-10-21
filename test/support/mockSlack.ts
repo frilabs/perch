@@ -27,6 +27,10 @@ export interface MockSlackChannel {
 
 export interface MockSlackTeam {
   token: string;
+  /** Session mode (browser session): the `d` cookie value (URL-encoded) every request must carry. */
+  cookie?: string;
+  /** Session mode: the session was signed out / expired (every call answers invalid_auth). */
+  expired?: boolean;
   teamId: string;
   team: string;
   userId: string;
@@ -95,11 +99,14 @@ export class MockSlack {
   private convCounter = 0;
   private scheduleCounter = 0;
 
-  addTeam(name: string, opts: { scopes?: string[] } = {}): MockSlackTeam {
+  addTeam(name: string, opts: { scopes?: string[]; session?: boolean } = {}): MockSlackTeam {
     this.teamCounter++;
     const n = this.teamCounter;
+    const secret = () => dummySecret('SLACK').replace(/[^A-Za-z0-9-]/g, '');
     const team: MockSlackTeam = {
-      token: `xoxp-${dummySecret('SLACK').replace(/[^A-Za-z0-9-]/g, '')}`,
+      token: `${opts.session ? 'xoxc' : 'xoxp'}-${secret()}`,
+      // Like the browser shows it: base64 with '/', '+' and '=' URL-encoded.
+      ...(opts.session ? { cookie: `xoxd-${secret()}%2F${secret()}%2B${secret()}%3D%3D` } : {}),
       teamId: `T0MOCK${n}`,
       team: `Mock team ${name}`,
       userId: `U0ME${n}`,
@@ -117,6 +124,16 @@ export class MockSlack {
     return team;
   }
 
+  /** The team a request authenticates as: bearer token, and for session teams the exact `d` cookie. */
+  private authed(req: UpstreamRequest): MockSlackTeam | undefined {
+    const token = (req.headers.authorization ?? '').replace(/^Bearer /, '');
+    const team = this.teams.find((t) => t.token === token);
+    if (!team) return undefined;
+    if (team.cookie !== undefined && (team.expired || req.headers.cookie !== `d=${team.cookie}`)) return undefined;
+    if (team.cookie === undefined && req.headers.cookie !== undefined) return undefined;
+    return team;
+  }
+
   private filesHost(req: UpstreamRequest): UpstreamResponse {
     const path = req.url.pathname;
     if (req.method === 'POST' && path.startsWith('/upload/v1/')) {
@@ -130,8 +147,8 @@ export class MockSlack {
     }
     const m = /^\/files-pri\/([A-Z0-9]+)-(F[A-Z0-9]+)\//.exec(path);
     if (req.method === 'GET' && m) {
-      const token = (req.headers.authorization ?? '').replace(/^Bearer /, '');
-      const team = this.teams.find((t) => t.token === token && t.teamId === m[1]);
+      const t = this.authed(req);
+      const team = t && t.teamId === m[1] ? t : undefined;
       const file = team?.files.find((f) => f.id === m[2]);
       // Slack answers an unauthenticated download with its HTML login page (HTTP 200).
       if (!file?.content) return { status: 200, headers: { 'content-type': 'text/html' }, body: Buffer.from('<html>login</html>') };
@@ -145,8 +162,7 @@ export class MockSlack {
     if (req.url.origin === 'https://files.slack.com') return this.filesHost(req);
     if (req.url.origin !== 'https://slack.com') throw new Error(`MOCK Slack: unexpected origin ${req.url.origin}`);
     if (this.rateLimitQueue.length) return json(429, { ok: false, error: 'ratelimited' }, { 'retry-after': this.rateLimitQueue.shift()! });
-    const token = (req.headers.authorization ?? '').replace(/^Bearer /, '');
-    const team = this.teams.find((t) => t.token === token);
+    const team = this.authed(req);
     if (!team) return json(200, { ok: false, error: 'invalid_auth' });
     const q = req.url.searchParams;
     const method = req.url.pathname.replace('/api/', '');
@@ -155,7 +171,8 @@ export class MockSlack {
         return json(
           200,
           { ok: true, url: `https://mock-${team.teamId.toLowerCase()}.slack.example/`, team: team.team, user: team.user, team_id: team.teamId, user_id: team.userId },
-          { 'x-oauth-scopes': team.scopes.join(',') },
+          // Session tokens report no scopes.
+          team.cookie === undefined ? { 'x-oauth-scopes': team.scopes.join(',') } : {},
         );
       case 'conversations.list': {
         const types = (q.get('types') ?? '').split(',');
