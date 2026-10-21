@@ -12,6 +12,7 @@ import { isSlackAuthFailure, isSlackSession, SLACK_USER_SCOPES, slackAuth, slack
 import { ROOT_NAMESPACE, type ImapAccount, type StoreData } from '../store/credentialStore.js';
 import { expireDevices, isPublicLocked, OAuthStore } from '../access/state.js';
 import { PERCH_VERSION } from '../version.js';
+import { linkedinExpiry, loginExpired, renewCommandFor } from '../linkedin/linkedin.js';
 
 /**
  * Read-only overview of one namespace: connected accounts (labels, ids, identities, granted provider
@@ -22,7 +23,7 @@ import { PERCH_VERSION } from '../version.js';
  * token providers, so refresh-token rotation never races with the running server.
  */
 
-export type AccountFamily = 'drive' | 'notion' | 'mail' | 'calendar' | 'slack' | 'whatsapp' | 'luma';
+export type AccountFamily = 'drive' | 'notion' | 'mail' | 'calendar' | 'slack' | 'whatsapp' | 'luma' | 'linkedin';
 
 export const FAMILY_TITLES: Record<AccountFamily, string> = {
   drive: 'Google Drive',
@@ -32,6 +33,7 @@ export const FAMILY_TITLES: Record<AccountFamily, string> = {
   slack: 'Slack',
   whatsapp: 'WhatsApp',
   luma: 'Luma',
+  linkedin: 'LinkedIn',
 };
 
 export interface CheckResult {
@@ -55,6 +57,11 @@ export interface AccountStatus {
   hint?: string;
   /** Google account group (one shared login) this account belongs to. */
   groupId?: string;
+  /** Logins with a fixed lifetime (LinkedIn): connected until, and whether that is soon (7 days) or over. */
+  expiresAt?: string;
+  expiry?: 'ok' | 'soon' | 'expired';
+  /** Command that renews such a login (soon or expired). */
+  renew?: string;
   check?: CheckResult;
 }
 
@@ -146,6 +153,24 @@ function accountsOf(d: StoreData): AccountStatus[] {
   for (const a of d.luma) {
     const ident = a.email ?? a.name;
     rows.push({ family: 'luma', id: a.id, label: a.label, provider: 'luma-mcp', ...(ident ? { identity: ident } : {}), permissions: `${a.tools.length} tools approved`, connectedAt: a.createdAt });
+  }
+  for (const a of d.linkedin) {
+    const exp = linkedinExpiry(a);
+    rows.push({
+      family: 'linkedin',
+      id: a.id,
+      label: a.label,
+      provider: 'linkedin',
+      ...(a.name ? { identity: a.name } : {}),
+      permissions: a.scopes.includes('w_member_social') ? 'post' : 'read',
+      connectedAt: a.createdAt,
+      ...(exp.until ? { expiresAt: exp.until } : {}),
+      expiry: exp.state,
+      ...(exp.state !== 'ok' ? { renew: renewCommandFor(a) } : {}),
+      ...(exp.state === 'soon' ? { hint: `login expires on ${exp.until!.slice(0, 10)}; renew it now (same account): ${renewCommandFor(a)}` } : {}),
+      // An expired login fails without asking LinkedIn (also with --no-check).
+      ...(exp.state === 'expired' ? { check: { state: 'error' as const, message: loginExpired(a, exp.until).message } } : {}),
+    });
   }
   return rows;
 }
@@ -242,6 +267,9 @@ async function checkAccount(ctx: PerchContext, d: StoreData, a: AccountStatus, o
     case 'luma':
       await ctx.luma.check(a.id);
       return;
+    case 'linkedin':
+      await ctx.linkedin.check(a.id);
+      return;
   }
 }
 
@@ -266,7 +294,7 @@ export async function collectStatus(ctx: PerchContext, opts: StatusOptions = {})
   const accounts = accountsOf(d);
   const live = opts.live ?? true;
   if (live) {
-    const queue = [...accounts];
+    const queue = accounts.filter((a) => !a.check);
     const worker = async () => {
       for (let a = queue.shift(); a; a = queue.shift()) {
         const started = Date.now();
@@ -311,7 +339,8 @@ export function formatStatusText(r: StatusReport): string {
   const accountLine = (a: AccountStatus, indent: string) => {
     const mark = !a.check ? '·' : a.check.state === 'ok' ? '✓' : '✗';
     const result = !a.check ? '' : a.check.state === 'ok' ? `  ok (${a.check.ms} ms)` : `  ERROR: ${a.check.message}`;
-    lines.push(`${indent}${mark} ${a.id}  "${a.label}"  ${a.identity ?? ''}  [${a.provider}: ${a.permissions}]  since ${day(a.connectedAt)}${result}`);
+    const until = a.expiresAt ? `  until ${day(a.expiresAt)}` : '';
+    lines.push(`${indent}${mark} ${a.id}  "${a.label}"  ${a.identity ?? ''}  [${a.provider}: ${a.permissions}]  since ${day(a.connectedAt)}${until}${result}`);
     if (a.hint) lines.push(`${indent}    hint: ${a.hint}`);
   };
   // Google account groups first: one login, the services as accounts below it.

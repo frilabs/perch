@@ -13,6 +13,7 @@ As of 2026-10-19 (`main` after PR #9). This is a completion checklist, **not a c
 | Slack (several workspaces) | read; post with `slack_send` | `SLACK_WHATSAPP_MILESTONE.md` |
 | WhatsApp via self-hosted GOWA | read; text send with `whatsapp_send` | `SLACK_WHATSAPP_MILESTONE.md` |
 | Luma via the official Luma MCP | read; events/guests/blasts only with grants; pinned tool schemas | `LUMA_SPEC.md` |
+| LinkedIn (2026-10-21) | own-profile text posts with `linkedin_post` (idempotent, shared ledger), `linkedin_status`; 60-day login with 7-day warning in `perch status`; exclusion lifted by Fritz | `LINKEDIN_X_SPEC.md`, `SETUP.md` §4i |
 | `perch status` and read-only `/status` page | live check per account | `SETUP.md` §5a |
 | Write extensions (2026-10-20) | Drive create/edit/share/trash, Notion create/edit/trash/comments, mail organize + send drafts, Slack files/reactions/edit, WhatsApp media; all only with client grants, delete = trash only | `FULL_ACCESS_SPEC.md` (implemented subset) |
 | Public access over MCP OAuth | pairing windows, Google login + Perch code (TOTP), kill switch; two independent reviews | `PUBLIC_ACCESS_SPEC.md`, `SETUP.md` §6a |
@@ -26,7 +27,8 @@ As of 2026-10-19 (`main` after PR #9). This is a completion checklist, **not a c
 
 Follow the README live test. Points that only a live run can answer:
 
-- Every connector once with a real account: Drive, Notion, Gmail, Outlook, GMX, Calendar/Contacts, Slack, WhatsApp/GOWA, Luma.
+- Every connector once with a real account: Drive, Notion, Gmail, Outlook, GMX, Calendar/Contacts, Slack, WhatsApp/GOWA, Luma, LinkedIn.
+- LinkedIn: does the app accept `http://localhost:8770/linkedin/callback` as redirect; is the default `LinkedIn-Version` (202608) active; does the token response carry a refresh token (normally not); does LinkedIn count the 3000 characters before or after escaping; which URN `x-restli-id` returns (`share` or `ugcPost`).
 - Google: refresh tokens expire after 7 days while the consent screen is in "Testing".
 - Google one login (`perch google add`): granular consent (unticking single scopes on the consent screen; is the token response `scope` exactly what was ticked?), `include_granted_scopes=true` (does the new grant report the earlier scopes of the same OAuth client, also those of separately connected Gmail/Calendar accounts; does a refresh return the combined `scope`?), whether re-adding the same account issues a new refresh token and keeps the old one valid, and whether one revoke really ends Drive, Gmail and Calendar access together.
 - Guided Google preparation and paste login: do the Cloud Console direct links (`/projectcreate`, `/apis/library/<api>?project=ID`, `/auth/branding|audience|scopes|clients/create?project=ID`) still land on the right pages; does the downloaded Desktop-app JSON still contain `redirect_uris: ["http://localhost"]`; does the "Manually add scopes" field accept the printed list (`openid`, `.../auth/userinfo.email`, …). After consent, does the laptop browser show "This site can't be reached" with the **complete** redirect address (`http://127.0.0.1:PORT/oauth2/callback?state=…&code=…&scope=…`) in the address bar, so that pasting it works (Chrome, Safari, Firefox); same for Outlook (`http://localhost:PORT/?code=…`) and Luma. Does pasting into the hidden raw-mode prompt work over SSH from macOS Terminal/iTerm (one-line paste of the client JSON).
@@ -64,4 +66,4 @@ Follow the README live test. Points that only a live run can answer:
 
 ## Phase 2 — separate roadmap
 
-Public signup, billing, hosted multi-tenancy, provider app verification and a public release remain separate. LinkedIn is excluded. Perch contains no LLM.
+Public signup, billing, hosted multi-tenancy, provider app verification and a public release remain separate. LinkedIn was excluded until 2026-10-21; Fritz lifted that for posting to the own profile (`docs/LINKEDIN_X_SPEC.md`), everything else on LinkedIn (feeds, company pages) stays out. Perch contains no LLM.

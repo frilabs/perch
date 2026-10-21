@@ -192,6 +192,15 @@ const SERVICES: readonly SetupService[] = [
     needs: () => tunnel(8768),
     args: async () => ['--port', '8768'],
   },
+  {
+    cmd: 'linkedin',
+    title: 'LinkedIn (post to your own profile)',
+    needs: (c) =>
+      existsSync(c.linkedinClientFile)
+        ? tunnel(8770)
+        : 'First Perch walks you through your own LinkedIn app (once; LinkedIn requires a company page for it).\n' + tunnel(8770),
+    args: async () => [],
+  },
 ];
 
 /**

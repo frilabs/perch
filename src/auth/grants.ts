@@ -12,6 +12,7 @@ import {
   LUMA_CAPABILITIES,
   DRIVE_CAPABILITIES,
   NOTION_CAPABILITIES,
+  LINKEDIN_CAPABILITIES,
   type Capability,
   type ClientGrant,
   type CredentialStore,
@@ -22,6 +23,7 @@ import {
   type LumaCapability,
   type DriveCapability,
   type NotionCapability,
+  type LinkedinCapability,
 } from '../store/credentialStore.js';
 
 /**
@@ -55,11 +57,13 @@ export interface Principal {
   driveAccounts: ReadonlySet<string> | 'all';
   /** Notion workspaces (notion-…); 'all' only for the read-only operator. */
   notionAccounts: ReadonlySet<string> | 'all';
+  /** LinkedIn accounts (linkedin-…); 'all' only for the read-only operator. */
+  linkedinAccounts: ReadonlySet<string> | 'all';
 }
 
 export const READONLY_PRINCIPAL: Principal = Object.freeze({
   kind: 'operator_readonly',
-  capabilities: new Set<Capability>(['read', 'calendar_read', 'contacts_read', 'slack_read', 'whatsapp_read', 'luma_read', 'drive_read', 'notion_read']),
+  capabilities: new Set<Capability>(['read', 'calendar_read', 'contacts_read', 'slack_read', 'whatsapp_read', 'luma_read', 'drive_read', 'notion_read', 'linkedin_read']),
   mailAccounts: 'all',
   productivityAccounts: 'all',
   slackAccounts: 'all',
@@ -67,10 +71,11 @@ export const READONLY_PRINCIPAL: Principal = Object.freeze({
   lumaAccounts: 'all',
   driveAccounts: 'all',
   notionAccounts: 'all',
+  linkedinAccounts: 'all',
 }) as Principal;
 
 /** Account families: each capability applies to exactly one family, recognised by the account id prefix. */
-export type AccountFamily = 'mail' | 'productivity' | 'slack' | 'whatsapp' | 'luma' | 'drive' | 'notion';
+export type AccountFamily = 'mail' | 'productivity' | 'slack' | 'whatsapp' | 'luma' | 'drive' | 'notion' | 'linkedin';
 const FAMILY_CAPS: Record<AccountFamily, readonly string[]> = {
   mail: MAIL_CAPABILITIES,
   productivity: PRODUCTIVITY_CAPABILITIES,
@@ -79,6 +84,7 @@ const FAMILY_CAPS: Record<AccountFamily, readonly string[]> = {
   luma: LUMA_CAPABILITIES,
   drive: DRIVE_CAPABILITIES,
   notion: NOTION_CAPABILITIES,
+  linkedin: LINKEDIN_CAPABILITIES,
 };
 const FAMILY_HINT: Record<AccountFamily, string> = {
   mail: 'Mail capabilities (read, draft, send) need at least one mail account (gmail-…, microsoft-…, imap-…)',
@@ -88,6 +94,7 @@ const FAMILY_HINT: Record<AccountFamily, string> = {
   luma: 'Luma capabilities (luma_read, luma_events, luma_guests, luma_blast) need at least one Luma account (luma-…)',
   drive: 'Drive capabilities (drive_read, drive_write) need at least one Google Drive account (google-…)',
   notion: 'Notion capabilities (notion_read, notion_write) need at least one Notion workspace (notion-…)',
+  linkedin: 'LinkedIn capabilities (linkedin_read, linkedin_post) need at least one LinkedIn account (linkedin-…)',
 };
 
 export function familyOf(id: string): AccountFamily {
@@ -97,6 +104,7 @@ export function familyOf(id: string): AccountFamily {
   if (id.startsWith('luma-')) return 'luma';
   if (id.startsWith('google-')) return 'drive';
   if (id.startsWith('notion-')) return 'notion';
+  if (id.startsWith('linkedin-')) return 'linkedin';
   return 'mail';
 }
 const capFamily = (c: Capability): AccountFamily => (Object.keys(FAMILY_CAPS) as AccountFamily[]).find((f) => FAMILY_CAPS[f].includes(c))!;
@@ -122,6 +130,7 @@ function accountIdsOf(data: StoreData, family: AccountFamily): string[] {
   if (family === 'luma') return data.luma.map((a) => a.id);
   if (family === 'drive') return data.google.map((a) => a.id);
   if (family === 'notion') return data.notion.map((w) => w.id);
+  if (family === 'linkedin') return data.linkedin.map((a) => a.id);
   return data.whatsapp.map((a) => a.id);
 }
 
@@ -141,6 +150,7 @@ export function principalFromGrant(grant: ClientGrant): Principal {
       lumaAccounts: 'all',
       driveAccounts: 'all',
       notionAccounts: 'all',
+      linkedinAccounts: 'all',
     };
   }
   const of = (f: AccountFamily) => new Set(grant.accountIds.filter((id) => familyOf(id) === f));
@@ -157,6 +167,7 @@ export function principalFromGrant(grant: ClientGrant): Principal {
     lumaAccounts: of('luma'),
     driveAccounts: of('drive'),
     notionAccounts: of('notion'),
+    linkedinAccounts: of('linkedin'),
   };
 }
 
@@ -204,6 +215,17 @@ export function assertLumaCapability(p: Principal, accountId: string, cap: LumaC
   const accountOk = p.lumaAccounts === 'all' || p.lumaAccounts.has(accountId);
   if (!p.capabilities.has(cap) || !accountOk) {
     throw new PerchError(`Capability "${cap}" is not granted to this client for Luma account ${accountId}`, 'capability_denied');
+  }
+}
+
+/** Throws unless the principal holds `cap` for the LinkedIn account `accountId`. The operator only reads. */
+export function assertLinkedinCapability(p: Principal, accountId: string, cap: LinkedinCapability): void {
+  if (p.kind === 'operator_readonly' && cap !== 'linkedin_read') {
+    throw new PerchError('This connection is read-only (global token or default stdio). Posting on LinkedIn needs a client grant: perch client add --allow linkedin_post', 'capability_denied');
+  }
+  const accountOk = p.linkedinAccounts === 'all' || p.linkedinAccounts.has(accountId);
+  if (!p.capabilities.has(cap) || !accountOk) {
+    throw new PerchError(`Capability "${cap}" is not granted to this client for LinkedIn account ${accountId}`, 'capability_denied');
   }
 }
 
@@ -356,6 +378,7 @@ const UNKNOWN_ACCOUNT: Record<AccountFamily, string> = {
   luma: 'Unknown Luma account',
   drive: 'Unknown Google Drive account',
   notion: 'Unknown Notion workspace',
+  linkedin: 'Unknown LinkedIn account',
 };
 
 function validateGrantShape(data: StoreData, capabilities: Capability[], accountIds: string[]): void {

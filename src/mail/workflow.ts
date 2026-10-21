@@ -20,6 +20,7 @@ export function sendTypeOf(provider: SendProvider): string {
   if (provider === 'luma') return 'luma_write';
   if (provider === 'drive') return 'drive_write';
   if (provider === 'notion') return 'notion_write';
+  if (provider === 'linkedin') return 'linkedin_post';
   return 'mail_send';
 }
 

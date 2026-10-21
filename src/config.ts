@@ -1,4 +1,6 @@
 import { defaultNotionClientFile } from './notion/oauth.js';
+import { defaultLinkedinClientFile } from './linkedin/oauth.js';
+import { DEFAULT_LINKEDIN_VERSION, LINKEDIN_VERSION_PATTERN } from './linkedin/linkedin.js';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { PerchError } from './errors.js';
@@ -55,6 +57,10 @@ export interface PerchConfig {
   publicTrustForwarded: boolean;
   /** Overrides Perch's built-in Client ID Metadata Document URL for Luma. */
   lumaClientId?: string;
+  /** LinkedIn app of the operator: ~/.config/perch/linkedin-client.json, 0600. */
+  linkedinClientFile: string;
+  /** LinkedIn-Version header (PERCH_LINKEDIN_VERSION, YYYYMM). */
+  linkedinVersion: string;
 }
 
 /**
@@ -94,6 +100,8 @@ export function resolveConfig(env: Record<string, string | undefined>): PerchCon
         : {};
   const publicPort = Number(env.PERCH_PUBLIC_PORT || '8767');
   if (!Number.isInteger(publicPort) || publicPort < 0 || publicPort > 65535) throw new PerchError('PERCH_PUBLIC_PORT must be a valid port', 'bad_config');
+  const linkedinVersion = env.PERCH_LINKEDIN_VERSION?.trim() || DEFAULT_LINKEDIN_VERSION;
+  if (!LINKEDIN_VERSION_PATTERN.test(linkedinVersion)) throw new PerchError('PERCH_LINKEDIN_VERSION must be a LinkedIn API version like 202608 (YYYYMM)', 'bad_config');
   const flag = (name: string, dflt: boolean) => {
     const v = env[name]?.trim().toLowerCase();
     if (v === undefined || v === '') return dflt;
@@ -125,6 +133,8 @@ export function resolveConfig(env: Record<string, string | undefined>): PerchCon
     ...(env.PERCH_NOTIFY_TELEGRAM_FILE ? { notifyTelegramFile: path.resolve(env.PERCH_NOTIFY_TELEGRAM_FILE) } : {}),
     publicTrustForwarded: flag('PERCH_PUBLIC_TRUST_FORWARDED', false),
     ...(env.PERCH_LUMA_CLIENT_ID ? { lumaClientId: validateCimdUrl(env.PERCH_LUMA_CLIENT_ID.trim()) } : {}),
+    linkedinClientFile: defaultLinkedinClientFile(env.XDG_CONFIG_HOME || path.join(env.HOME || home, '.config')),
+    linkedinVersion,
   };
 }
 

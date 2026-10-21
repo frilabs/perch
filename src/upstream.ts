@@ -25,11 +25,13 @@ export type Service =
   | 'cimd'
   | 'telegram'
   | 'luma'
-  | 'lumaauth';
+  | 'lumaauth'
+  | 'linkedin'
+  | 'linkedinauth';
 /**
  * `admin` routes (GOWA device pairing/removal) are only ever passed by the local CLI, never by an MCP tool.
  */
-export type RouteCapability = 'read' | 'draft' | 'send' | 'calendar_write' | 'calendar_invite' | 'slack_send' | 'whatsapp_send' | 'admin' | 'notify' | 'drive_write' | 'notion_write' | 'mail_modify';
+export type RouteCapability = 'read' | 'draft' | 'send' | 'calendar_write' | 'calendar_invite' | 'slack_send' | 'whatsapp_send' | 'admin' | 'notify' | 'drive_write' | 'notion_write' | 'mail_modify' | 'linkedin_post';
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
 export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
@@ -63,6 +65,10 @@ export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
   luma: 'https://mcp.luma.com',
   /** Luma's OAuth authorization server, taken from Luma's metadata; must pass validateLumaOrigin. Placeholder. */
   lumaauth: 'https://mcp.luma.com',
+  /** LinkedIn REST API (docs/LINKEDIN_X_SPEC.md): OpenID userinfo and member posts only. */
+  linkedin: 'https://api.linkedin.com',
+  /** LinkedIn OAuth 2.0 token endpoint (the authorization page is opened in the browser, never fetched). */
+  linkedinauth: 'https://www.linkedin.com',
 });
 
 /** Services whose origin is configured per namespace instead of fixed (see validateGowaOrigin). */
@@ -85,6 +91,8 @@ const SERVICE_NAMES: Record<Service, string> = {
   telegram: 'Telegram Bot API',
   luma: 'Luma MCP server',
   lumaauth: 'Luma authorization server',
+  linkedin: 'LinkedIn API',
+  linkedinauth: 'LinkedIn OAuth',
 };
 
 const NOTION_ID = '[0-9a-fA-F-]{32,36}';
@@ -289,6 +297,13 @@ const ROUTES: Record<Service, Route[]> = {
     // token, registration and revocation endpoints as announced in Luma's metadata (Luma hosts only)
     ['POST', /^\/(?!.*\.\.)[A-Za-z0-9._~\/-]{1,200}$/],
   ],
+  // Only the member's own identity and own posts: no feeds, no deletion, no organization pages.
+  linkedin: [
+    ['GET', /^\/v2\/userinfo$/],
+    ['POST', /^\/rest\/posts$/, 'linkedin_post'],
+  ],
+  // Code exchange and refresh: internal callers only, never reachable from a client grant.
+  linkedinauth: [['POST', /^\/oauth\/v2\/accessToken$/, 'admin']],
 };
 
 /** Hosts Perch accepts for Luma's authorization server (from metadata): luma.com, lu.ma and their subdomains. */
@@ -529,6 +544,7 @@ function extractCode(service: Service, body: Buffer): string | undefined {
   const o = parsed as Record<string, unknown>;
   let code: unknown;
   if (service === 'notion') code = o.code ?? o.error; // the OAuth token endpoint answers { error: "invalid_grant" }
+  else if (service === 'linkedin' && typeof o.code === 'string') code = o.code; // { status, serviceErrorCode, code, message }
   else if (typeof o.error === 'string') code = o.error;
   else if (o.error && typeof o.error === 'object') {
     const e = o.error as { errors?: Array<{ reason?: unknown }>; status?: unknown; code?: unknown };

@@ -204,6 +204,7 @@ export function accountCapabilities(d: StoreData): CapabilityMap {
   }
   for (const a of d.whatsapp) out[a.id] = [{ name: 'read', enabled: true }, { name: 'send', enabled: true }];
   for (const a of d.luma) out[a.id] = [{ name: `${a.tools.length} tools approved`, enabled: true }];
+  for (const a of d.linkedin) out[a.id] = [{ name: 'post to own profile', enabled: a.scopes.includes('w_member_social') }];
   return out;
 }
 
@@ -282,6 +283,7 @@ const SERVICES: Array<{ key: string; title: string; name?: string; google?: bool
     add: (r) => (r.whatsappBridge ? 'perch whatsapp add --label NAME --phone +43…' : 'perch whatsapp install, then perch whatsapp add --label NAME --phone +43…'),
   },
   { key: 'luma', title: 'Luma', match: (a) => a.family === 'luma', does: 'events and guests through the official Luma MCP', add: () => 'perch luma add --label NAME' },
+  { key: 'linkedin', title: 'LinkedIn', match: (a) => a.family === 'linkedin', does: 'post to your own profile (your LinkedIn app)', add: () => 'perch linkedin add --label NAME' },
 ];
 
 /** Google without any connected account: one line, one command (read/write per service later: perch google access). */
@@ -331,8 +333,9 @@ export function formatStatusTerminal(r: StatusReport, capabilities: CapabilityMa
     const failed = a.check?.state === 'error';
     const status = !a.check ? 'not checked' : a.check.state === 'ok' ? `ok · ${a.check.ms} ms` : a.check.state === 'skipped' ? 'skipped' : 'FAILED';
     row(0, failed ? FAIL : ON, failed ? p.fail : p.ok, title, status, failed ? p.fail : a.check ? p.ok : (s) => s);
-    text(2, `${a.id} · ${a.provider} · since ${a.connectedAt.slice(0, 10)}`);
+    text(2, `${a.id} · ${a.provider} · since ${a.connectedAt.slice(0, 10)}${a.expiresAt ? ` · connected until ${a.expiresAt.slice(0, 10)}` : ''}`);
     if (failed && a.check?.message) prose(2, a.check.message, p.fail);
+    if (failed && a.renew) command(4, a.renew);
     const caps = capabilities[a.id] ?? [{ name: a.permissions, enabled: true }];
     chipLine(caps);
     const off = caps.filter((c) => !c.enabled);
@@ -342,7 +345,11 @@ export function formatStatusTerminal(r: StatusReport, capabilities: CapabilityMa
       const pinned = r.clients.filter((c) => !c.full && c.accountIds.includes(a.id));
       if (pinned.length) prose(4, `note: reconnecting gives a new account id; grant it again to ${pinned.map((c) => c.label).join(', ')}`, p.hint);
     }
-    if (a.hint && !off.length) prose(2, `hint: ${a.hint}`, p.hint);
+    if (a.expiry === 'soon' && a.renew) {
+      // Yellow: the login ends within 7 days; the command renews it in place (same id, grants stay valid).
+      prose(2, `login expires on ${a.expiresAt!.slice(0, 10)}; renew it now (same account, same id):`, p.hint);
+      command(4, a.renew);
+    } else if (a.hint && !off.length) prose(2, `hint: ${a.hint}`, p.hint);
   };
   /** Enabled capabilities as one wrapped line of ☑ chips. */
   const chipLine = (caps: AccountCapability[], indent = 2) => {

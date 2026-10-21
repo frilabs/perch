@@ -43,6 +43,11 @@ export interface PkceLoopbackOptions<T> {
   prepare?: (redirectUri: string) => Promise<Record<string, string>>;
   /** Optional paste-the-redirect-address input that races the callback. */
   paste?: PasteRedirect;
+  /**
+   * Send the PKCE challenge (default true). Only false for providers whose standard apps do not support PKCE
+   * (LinkedIn: confidential client with secret); state is checked either way.
+   */
+  pkce?: boolean;
   /** Exchanges the code (with the PKCE verifier) at the fixed token endpoint. */
   exchange: (code: string, verifier: string, redirectUri: string) => Promise<T>;
 }
@@ -190,8 +195,7 @@ export async function runPkceLoopback<T>(opts: PkceLoopbackOptions<T>): Promise<
       redirect_uri: redirectUri,
       response_type: 'code',
       state,
-      code_challenge: challenge,
-      code_challenge_method: 'S256',
+      ...(opts.pkce === false ? {} : { code_challenge: challenge, code_challenge_method: 'S256' }),
     }).toString();
     opts.onAuthUrl(auth.toString());
     if (opts.paste) void readPasted(opts.paste);

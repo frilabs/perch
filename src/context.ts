@@ -20,6 +20,8 @@ import { createFetchTransport, Upstream, type UpstreamTransport } from './upstre
 import { WhatsappService } from './whatsapp/whatsapp.js';
 import { LumaMcp } from './luma/client.js';
 import { createLumaTokenProvider, LumaService } from './luma/service.js';
+import { LinkedinService } from './linkedin/linkedin.js';
+import { createLinkedinTokenProvider } from './linkedin/oauth.js';
 
 /** Long-lived services shared by all MCP requests (keeps the access-token caches warm). */
 export interface PerchContext {
@@ -35,6 +37,8 @@ export interface PerchContext {
   slack: SlackService;
   whatsapp: WhatsappService;
   luma: LumaService;
+  /** LinkedIn: own profile posts (docs/LINKEDIN_X_SPEC.md). */
+  linkedin: LinkedinService;
   /** The namespace's OAuth access-token providers (shared by services and status checks). */
   tokens: {
     drive: GoogleTokenProvider;
@@ -59,6 +63,8 @@ export function createPerchContext(
   mailProviders?: MailProviders,
   /** Tests only: MOCK Luma MCP client. */
   lumaMcp?: LumaMcp,
+  /** Per-installation options from the configuration (PERCH_LINKEDIN_VERSION). */
+  opts: { linkedinVersion?: string } = {},
 ): PerchContext {
   const upstream = new Upstream(transport);
   // One login per Google account group: Drive, Gmail and Calendar/Contacts members share its cache and refresh.
@@ -86,6 +92,9 @@ export function createPerchContext(
     slack: new SlackService(store, upstream, workflow, audit),
     whatsapp: new WhatsappService(store, upstream, workflow, audit),
     luma: new LumaService(store, workflow, audit, lumaTokens, lumaMcp ?? new LumaMcp()),
+    linkedin: new LinkedinService(store, upstream, workflow, audit, createLinkedinTokenProvider(store, upstream), {
+      ...(opts.linkedinVersion ? { version: opts.linkedinVersion } : {}),
+    }),
     tokens: { drive: tokens, gmail: gmailTokens, microsoft: microsoftTokens, productivity: productivityTokens, luma: lumaTokens, googleGroups: groupTokens },
     audit,
   };

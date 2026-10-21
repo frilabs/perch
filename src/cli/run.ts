@@ -76,6 +76,7 @@ import { accountCapabilities, formatStatusTerminal } from '../status/terminal.js
 import { startPublicAccess } from '../access/runtime.js';
 import { cmdOauth, cmdPublic } from './oauth.js';
 import { cmdLuma, lumaMcpFor } from './luma.js';
+import { cmdLinkedin } from './linkedin.js';
 import { cmdGoogleClient, googleRequestFromFlags, loadGoogleClient } from './googleClient.js';
 import { loginPrompts } from './loginPrompt.js';
 import type { FetchLike } from '../luma/client.js';
@@ -129,6 +130,9 @@ Usage:
   perch oauth client add --name N --redirect URI | add --cimd URL | list | remove ID   extra OAuth clients
   perch luma add --label NAME [--port N] [--timeout SECONDS]   connect a Luma account (official Luma MCP, OAuth)
   perch luma list | remove ID [--revoke] | tools ID [--accept]   tools: approved vs live tool schemas
+  perch linkedin add --label NAME [--timeout SECONDS]   connect a LinkedIn member (your LinkedIn app, login in the
+                                               browser, port 8770); the same member again renews the login (same id)
+  perch linkedin list | remove ID | client setup | show   client: guided LinkedIn app (stored 0600)
   perch oauth local-page enable | disable       local pairing page /local/pair with its own password
   perch accounts                               list all connected accounts
   perch rename ID "NEW LABEL"                  change the label of an account, a Google account group (ggroup-…, all its services) or a client
@@ -204,7 +208,7 @@ Usage:
   perch client add --label NAME --allow CAPS --account ID [--account ID ...] [--token-file PATH]
                       CAPS: read,draft,send,modify (mail accounts); calendar_read,calendar_write,calendar_invite,contacts_read (gprod accounts);
                             slack_read,slack_send (slack accounts); whatsapp_read,whatsapp_send (whatsapp accounts);
-                            luma_read,luma_events,luma_guests,luma_blast (luma accounts)
+                            luma_read,luma_events,luma_guests,luma_blast (luma accounts); linkedin_read,linkedin_post (linkedin accounts)
   perch client list | remove ID
   perch token rotate                           replace the HTTP bearer token file
   perch audit list [--limit N] [--client ID] [--account ID]   body-free audit trail
@@ -387,7 +391,7 @@ async function cmdServe(config: PerchConfig, io: CliIo, values: Record<string, u
   if (Boolean(values.stdio) === Boolean(values.http)) throw new UsageError('Choose exactly one of --stdio or --http');
   const store = await openRootStore(config);
   await warnAboutProvisionedUsers(store, io);
-  const context = createPerchContext(store, io.transport ?? createFetchTransport(), undefined, lumaMcpFor(io));
+  const context = createPerchContext(store, io.transport ?? createFetchTransport(), undefined, lumaMcpFor(io), { linkedinVersion: config.linkedinVersion });
   if (values.stdio) {
     // Plain stdio is the read-only operator; a client token file selects one of the client grants.
     const token = config.clientTokenFile ? (await readPrivateFile(config.clientTokenFile)).toString('utf8').trim() : undefined;
@@ -1222,7 +1226,7 @@ async function cmdWhatsapp(config: PerchConfig, io: CliIo, sub: string | undefin
 
 async function cmdStatus(config: PerchConfig, io: CliIo, values: Record<string, unknown>): Promise<number> {
   const store = await openStore(config);
-  const ctx = createPerchContext(store, io.transport ?? createFetchTransport(), undefined, lumaMcpFor(io));
+  const ctx = createPerchContext(store, io.transport ?? createFetchTransport(), undefined, lumaMcpFor(io), { linkedinVersion: config.linkedinVersion });
   const report = await collectStatus(ctx, { live: values['no-check'] !== true, ...(io.imapVerify ? { imapVerify: io.imapVerify } : {}) });
   if (values.json === true) io.stdout(`${JSON.stringify(report, null, 2)}\n`);
   else if (values.plain === true) io.stdout(formatStatusText(report));
@@ -1491,6 +1495,9 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         return await cmdOauth(config, io, sub, rest, values);
       case 'luma':
         await cmdLuma(config, io, sub, rest, values);
+        return 0;
+      case 'linkedin':
+        await cmdLinkedin(config, io, sub, rest, values);
         return 0;
       case 'public':
         return await cmdPublic(config, io, sub);
