@@ -66,6 +66,16 @@ const NotionWorkspaceSchema = z.object({
   tokenOwner: z
     .object({ id: z.string(), name: z.string().optional(), type: z.string().optional() })
     .optional(),
+  /** How the token was obtained: internal integration secret (absent = 'token') or a public integration via OAuth. */
+  authMode: z.enum(['token', 'oauth']).optional(),
+  /** OAuth only: Notion's workspace_id/workspace_name/bot_id from the token response (same workspace_id = update). */
+  oauthWorkspaceId: z.string().min(1).max(100).optional(),
+  workspaceName: z.string().max(200).optional(),
+  botId: z.string().max(100).optional(),
+  /** OAuth with expiring access tokens only: refresh token and the client it belongs to (like Google accounts). */
+  clientId: z.string().min(1).max(512).optional(),
+  clientSecret: z.string().min(1).max(512).optional(),
+  refreshToken: z.string().min(1).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

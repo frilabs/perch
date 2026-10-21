@@ -184,6 +184,8 @@ export class NotionWriter {
     private readonly upstream: Upstream,
     private readonly workflow: SendWorkflow,
     private readonly audit: AuditLog,
+    /** OAuth workspaces with expiring tokens resolve their access token here; default: the stored token. */
+    private readonly accessToken: (ws: NotionWorkspace) => Promise<string> = async (ws) => ws.token,
   ) {}
 
   private prov(ws: NotionWorkspace): WorkspaceProvenance {
@@ -204,9 +206,9 @@ export class NotionWriter {
     assertDocsCapability(await currentPrincipal(this.store, stale), 'notion', workspaceId, 'notion_write');
   }
 
-  private call(ws: NotionWorkspace, method: 'POST' | 'PATCH', path: string, body: Json): Promise<Json> {
+  private async call(ws: NotionWorkspace, method: 'POST' | 'PATCH', path: string, body: Json): Promise<Json> {
     // Writes go straight to the upstream: no 429 retry (the read path's retry never applies here).
-    return this.upstream.json<Json>('notion', { method, path, json: body, headers: headers(ws.token), capability: 'notion_write' });
+    return this.upstream.json<Json>('notion', { method, path, json: body, headers: headers(await this.accessToken(ws)), capability: 'notion_write' });
   }
 
   /** One idempotent creating write (see src/messaging/send.ts). */

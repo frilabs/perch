@@ -202,7 +202,7 @@ async function checkAccount(ctx: PerchContext, d: StoreData, a: AccountStatus, o
       return;
     case 'notion': {
       const ws = d.notion.find((w) => w.id === a.id)!;
-      await up.json('notion', { method: 'GET', path: '/v1/users/me', headers: { authorization: `Bearer ${ws.token}`, 'notion-version': NOTION_VERSION } });
+      await up.json('notion', { method: 'GET', path: '/v1/users/me', headers: { authorization: `Bearer ${await ctx.notion.accessToken(ws)}`, 'notion-version': NOTION_VERSION } });
       return;
     }
     case 'mail':

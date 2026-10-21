@@ -160,6 +160,8 @@ const ROUTES: Record<Service, Route[]> = {
   ],
   notion: [
     ['GET', /^\/v1\/users\/me$/],
+    // OAuth code exchange and refresh (public integrations); internal callers only, never reachable from a client grant.
+    ['POST', /^\/v1\/oauth\/token$/, 'admin'],
     ['POST', /^\/v1\/search$/],
     ['GET', new RegExp(`^/v1/pages/${NOTION_ID}$`)],
     ['GET', new RegExp(`^/v1/blocks/${NOTION_ID}/children$`)],
@@ -516,7 +518,7 @@ function extractCode(service: Service, body: Buffer): string | undefined {
   if (!parsed || typeof parsed !== 'object') return undefined;
   const o = parsed as Record<string, unknown>;
   let code: unknown;
-  if (service === 'notion') code = o.code;
+  if (service === 'notion') code = o.code ?? o.error; // the OAuth token endpoint answers { error: "invalid_grant" }
   else if (typeof o.error === 'string') code = o.error;
   else if (o.error && typeof o.error === 'object') {
     const e = o.error as { errors?: Array<{ reason?: unknown }>; status?: unknown; code?: unknown };
