@@ -7,7 +7,7 @@ import { newAccountId, validateLabel } from '../ids.js';
 import { validateRequestId, type SendWorkflow } from '../mail/workflow.js';
 import { messageSendStatus, sendMessageIdempotently, type MessageSendResult, type MessageSendView } from '../messaging/send.js';
 import type { CredentialStore, SlackWorkspace } from '../store/credentialStore.js';
-import { SLACK_CHANNEL_ID, SLACK_DOWNLOAD_PATH, SLACK_FILE_ID, SLACK_TS, SLACK_UPLOAD_PATH, UpstreamError, type Upstream } from '../upstream.js';
+import { SLACK_CHANNEL_ID, SLACK_DOWNLOAD_PATH, SLACK_FILE_ID, SLACK_SESSION_COOKIE, SLACK_TS, SLACK_UPLOAD_PATH, UpstreamError, type Upstream } from '../upstream.js';
 
 /**
  * Slack Web API with a user token (xoxp-…) per workspace. Each workspace uses its own internal app
@@ -17,6 +17,10 @@ import { SLACK_CHANNEL_ID, SLACK_DOWNLOAD_PATH, SLACK_FILE_ID, SLACK_TS, SLACK_U
  * Reads are plain allowlisted GETs. Posting (chat.postMessage) and scheduling (chat.scheduleMessage) need a
  * client grant with slack_send for the workspace and go through the idempotent send workflow
  * (src/messaging/send.ts).
+ *
+ * Session workspaces (docs/SLACK_SESSION_NOTION_GUIDE_SPEC.md §1, unofficial, opt-in) use the browser session
+ * instead: token xoxc-… plus the cookie `d` (xoxd-…), sent only to slack.com and files.slack.com (see
+ * Upstream's slackCookie). Same endpoints and grants; scope checks do not apply (session tokens report none).
  */
 
 /** User-token scopes of the bundled manifest (docs/slack-app-manifest.json). */
@@ -80,14 +84,40 @@ export interface WorkspaceProvenance {
 }
 
 const fingerprint = (s: string) => createHash('sha256').update(s).digest('hex');
-const auth = (token: string) => ({ authorization: `Bearer ${token}` });
 
-function slackFailure(code: unknown): PerchError {
+export const isSlackSession = (ws: Pick<SlackWorkspace, 'authMode'>) => ws.authMode === 'session';
+
+/**
+ * Credentials of one Slack request: the bearer token, and for session workspaces the `d` cookie (Upstream only
+ * attaches it for slack.com and files.slack.com).
+ */
+export function slackAuth(ws: Pick<SlackWorkspace, 'token' | 'authMode' | 'sessionCookie'>): { headers: Record<string, string>; slackCookie?: string } {
+  return { headers: { authorization: `Bearer ${ws.token}` }, ...(isSlackSession(ws) && ws.sessionCookie ? { slackCookie: ws.sessionCookie } : {}) };
+}
+
+/** Session tokens report no scopes: every scope counts as present (Slack itself decides per call). */
+const hasScope = (ws: SlackWorkspace, scope: string) => isSlackSession(ws) || ws.scopes.includes(scope);
+
+const SAFE_ARG = /^[A-Za-z0-9_.@+:,/=-]+$/;
+const quoteArg = (s: string) => (SAFE_ARG.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+
+/** The command that renews an expired session (updates the same workspace record). */
+export const slackSessionAddCommand = (label: string) => `perch slack add --label ${quoteArg(label)} --session`;
+
+const AUTH_FAILURES = ['invalid_auth', 'not_authed', 'token_revoked', 'token_expired', 'account_inactive'];
+export const isSlackAuthFailure = (code: unknown) => typeof code === 'string' && AUTH_FAILURES.includes(code);
+
+/** Message for a session workspace whose session Slack no longer accepts (never contains token or cookie). */
+export const slackSessionExpired = (code: string, label: string) =>
+  new PerchError(`Slack session expired (${code}): run ${slackSessionAddCommand(label)} again (updates the same workspace)`, 'slack_session_expired');
+
+function slackFailure(code: unknown, ws?: Pick<SlackWorkspace, 'authMode' | 'label'>): PerchError {
   const c = typeof code === 'string' && SLACK_ERROR.test(code) ? code : 'unknown_error';
   if (c === 'missing_scope') {
     return new PerchError('Slack refused: the token lacks a required scope. Add it to the app (docs/slack-app-manifest.json), reinstall and run perch slack add again', 'provider_scope_missing');
   }
-  if (['invalid_auth', 'not_authed', 'token_revoked', 'token_expired', 'account_inactive'].includes(c)) {
+  if (AUTH_FAILURES.includes(c)) {
+    if (ws && isSlackSession(ws)) return slackSessionExpired(c, ws.label);
     return new PerchError(`Slack refused the token (${c}): it is invalid, revoked or the app was uninstalled; reconnect with perch slack add`, 'upstream_error');
   }
   if (c === 'ratelimited') return new PerchError('Slack rate limit reached; try again later', 'upstream_error');
@@ -183,41 +213,85 @@ function conversationType(c: Raw): ConversationType {
   return 'public_channel';
 }
 
+/** Session token of the Slack web client (xoxc-…). */
+export const SLACK_SESSION_TOKEN = /^xoxc-[A-Za-z0-9-]{10,500}$/;
+
+/**
+ * Normalises a pasted value of the browser cookie `d`: an optional leading `d=`, surrounding quotes and a
+ * trailing `;` are dropped. Browsers show the value URL-encoded (%2F, %2B, %3D) and Perch sends it as is; a
+ * decoded copy (raw '/', '+', '=') is encoded the same way the browser sends it.
+ */
+export function normalizeSlackCookie(raw: string): string {
+  let v = raw.trim();
+  if (v.startsWith('d=')) v = v.slice(2).trim();
+  v = v.replace(/;$/, '').trim();
+  if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) v = v.slice(1, -1);
+  if (!v.includes('%') && /[/+=]/.test(v)) v = v.replace(/[/+=]/g, (ch) => encodeURIComponent(ch));
+  if (!SLACK_SESSION_COOKIE.test(v)) {
+    throw new PerchError('Expected the value of the Slack cookie "d" as shown in the browser (starts with xoxd-)', 'bad_argument');
+  }
+  return v;
+}
+
 /**
  * Validates a user token with auth.test and stores it under a user-assigned label. Bot tokens are refused:
  * they cannot read DMs or search, and would post as the app instead of the user.
+ *
+ * With `sessionCookie` (session mode, unofficial): the token must be a browser session token (xoxc-…) and
+ * auth.test runs with token and cookie. A workspace with the same team id is updated in place (same id, client
+ * grants stay); otherwise a new one is added. An app add for a team connected as a session switches that
+ * record to the app the same way. Nothing is stored when Slack refuses.
  */
-export async function addSlackWorkspace(store: CredentialStore, upstream: Upstream, input: { label: string; token: string }): Promise<SlackWorkspace> {
+export async function addSlackWorkspace(
+  store: CredentialStore,
+  upstream: Upstream,
+  input: { label: string; token: string; sessionCookie?: string },
+): Promise<SlackWorkspace> {
   const label = validateLabel(input.label);
   const token = input.token.trim();
   if (!token) throw new PerchError('Empty token', 'bad_argument');
-  if (!/^xoxp-[A-Za-z0-9-]{10,500}$/.test(token)) {
-    throw new PerchError('Expected a Slack user token (xoxp-…, "User OAuth Token" of the app). Bot (xoxb-), rotating (xoxe-) and app-level (xapp-) tokens are not supported', 'bad_argument');
+  const session = input.sessionCookie !== undefined;
+  const cookie = session ? normalizeSlackCookie(input.sessionCookie!) : undefined;
+  if (session) {
+    if (!SLACK_SESSION_TOKEN.test(token)) throw new PerchError('Expected the Slack session token (xoxc-…, printed by the console line of the guide)', 'bad_argument');
+  } else {
+    if (SLACK_SESSION_TOKEN.test(token)) throw new PerchError('This is a browser session token (xoxc-…); connect it with perch slack add --label NAME --session', 'bad_argument');
+    if (!/^xoxp-[A-Za-z0-9-]{10,500}$/.test(token)) {
+      throw new PerchError('Expected a Slack user token (xoxp-…, "User OAuth Token" of the app). Bot (xoxb-), rotating (xoxe-) and app-level (xapp-) tokens are not supported', 'bad_argument');
+    }
+    const existing = (await store.read()).slack.find((w) => fingerprint(w.token) === fingerprint(token));
+    if (existing) throw new PerchError(`This token is already connected as ${existing.id} ("${existing.label}")`, 'duplicate_account');
   }
-  const existing = (await store.read()).slack.find((w) => fingerprint(w.token) === fingerprint(token));
-  if (existing) throw new PerchError(`This token is already connected as ${existing.id} ("${existing.label}")`, 'duplicate_account');
-  const res = await upstream.raw('slack', { method: 'GET', path: '/api/auth.test', headers: auth(token) });
+  const creds = session ? { token, authMode: 'session' as const, sessionCookie: cookie! } : { token };
+  const res = await upstream.raw('slack', { method: 'GET', path: '/api/auth.test', ...slackAuth(creds) });
   let body: Raw;
   try {
     body = JSON.parse(res.body.toString('utf8')) as Raw;
   } catch {
     throw new PerchError('Slack returned a malformed response', 'upstream_bad_response');
   }
-  if (body.ok !== true) throw slackFailure(body.error);
+  if (body.ok !== true) {
+    if (session && isSlackAuthFailure(body.error)) {
+      throw new PerchError(
+        `Slack refused the session (${String(body.error)}): token and cookie must come from the same signed-in browser; copy both again. Nothing was stored`,
+        'upstream_error',
+      );
+    }
+    throw slackFailure(body.error);
+  }
   const teamId = typeof body.team_id === 'string' ? body.team_id : '';
   const userId = typeof body.user_id === 'string' ? body.user_id : '';
   if (!/^[TE][A-Z0-9]{2,30}$/.test(teamId) || !SLACK_USER.test(userId)) throw new PerchError('Slack returned an unexpected identity', 'upstream_bad_response');
-  const scopes = (res.headers['x-oauth-scopes'] ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => /^[a-z.:_-]{1,100}$/.test(s));
+  // Session tokens report no x-oauth-scopes; their scopes are never checked.
+  const scopes = session
+    ? []
+    : (res.headers['x-oauth-scopes'] ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => /^[a-z.:_-]{1,100}$/.test(s));
   return store.update((data) => {
-    if (data.slack.some((w) => fingerprint(w.token) === fingerprint(token))) throw new PerchError('This token is already connected', 'duplicate_account');
-    const dup = data.slack.find((w) => w.teamId === teamId && w.userId === userId);
-    if (dup) throw new PerchError(`This Slack user in this workspace is already connected as ${dup.id} ("${dup.label}"); remove it first to replace the token`, 'duplicate_account');
     const now = new Date().toISOString();
-    const ws: SlackWorkspace = {
-      id: newAccountId('slack', data.slack.map((w) => w.id)),
+    const fields = {
       label,
       token,
       teamId,
@@ -226,9 +300,25 @@ export async function addSlackWorkspace(store: CredentialStore, upstream: Upstre
       userId,
       ...(typeof body.user === 'string' ? { userName: body.user.slice(0, 200) } : {}),
       scopes,
-      createdAt: now,
-      updatedAt: now,
+      ...(session ? { authMode: 'session' as const, sessionCookie: cookie! } : {}),
     };
+    let replace: SlackWorkspace | undefined;
+    if (session) {
+      const sameTeam = data.slack.filter((w) => w.teamId === teamId);
+      replace = sameTeam.find((w) => w.userId === userId) ?? sameTeam[0];
+    } else {
+      if (data.slack.some((w) => fingerprint(w.token) === fingerprint(token))) throw new PerchError('This token is already connected', 'duplicate_account');
+      const dup = data.slack.find((w) => w.teamId === teamId && w.userId === userId && !isSlackSession(w));
+      if (dup) throw new PerchError(`This Slack user in this workspace is already connected as ${dup.id} ("${dup.label}"); remove it first to replace the token`, 'duplicate_account');
+      replace = data.slack.find((w) => w.teamId === teamId && isSlackSession(w));
+    }
+    if (replace) {
+      const id = replace.id;
+      const updated: SlackWorkspace = { id, ...fields, createdAt: replace.createdAt, updatedAt: now };
+      data.slack = data.slack.map((w) => (w.id === id ? updated : w));
+      return updated;
+    }
+    const ws: SlackWorkspace = { id: newAccountId('slack', data.slack.map((w) => w.id)), ...fields, createdAt: now, updatedAt: now };
     data.slack.push(ws);
     return ws;
   });
@@ -439,8 +529,8 @@ export class SlackService {
   private async call<T extends Raw>(budget: RetryBudget, ws: SlackWorkspace, method: string, query: Record<string, string | number | boolean | undefined>): Promise<T> {
     for (let attempt = 0; ; attempt++) {
       try {
-        const body = await this.upstream.json<Raw>('slack', { method: 'GET', path: `/api/${method}`, query, headers: auth(ws.token) });
-        if (body.ok !== true) throw slackFailure(body.error);
+        const body = await this.upstream.json<Raw>('slack', { method: 'GET', path: `/api/${method}`, query, ...slackAuth(ws) });
+        if (body.ok !== true) throw slackFailure(body.error, ws);
         return body as T;
       } catch (err) {
         const limited = err instanceof UpstreamError && err.status === 429;
@@ -588,7 +678,7 @@ export class SlackService {
       cursor: input.cursor,
       fetchPage: async (source, start) => {
         const ws = workspaces.find((w) => w.id === source.id)!;
-        if (!ws.scopes.includes('search:read')) throw new PerchError('This workspace token has no search:read scope; add it to the app and reconnect', 'provider_scope_missing');
+        if (!hasScope(ws, 'search:read')) throw new PerchError('This workspace token has no search:read scope; add it to the app and reconnect', 'provider_scope_missing');
         const page = start ? Number(start) : 1;
         if (!Number.isInteger(page) || page < 1 || page > 100) throw new PerchError('Invalid cursor', 'bad_cursor');
         const r = await this.call<{ messages?: { matches?: Raw[]; paging?: { page?: number; pages?: number } } }>(budget, ws, 'search.messages', {
@@ -624,7 +714,7 @@ export class SlackService {
   }
 
   private assertCanPost(ws: SlackWorkspace): void {
-    if (!ws.scopes.includes('chat:write')) {
+    if (!hasScope(ws, 'chat:write')) {
       throw new PerchError(`Workspace ${ws.id} was connected without the chat:write scope. Add it to the app, reinstall and run perch slack add again`, 'provider_scope_missing');
     }
   }
@@ -683,7 +773,7 @@ export class SlackService {
         method: 'POST',
         path: '/api/chat.postMessage',
         capability: 'slack_send',
-        headers: auth(current.token),
+        ...slackAuth(current),
         json: {
           channel,
           text: req.text,
@@ -697,7 +787,7 @@ export class SlackService {
       if (err instanceof PerchError && err.code === 'route_not_allowed') return notSent(err.message, 'not_submitted_provider_precheck');
       return { status: 'indeterminate', detail: 'The request to Slack failed after it may have been processed; the outcome is unknown.', reason: 'provider_unknown' };
     }
-    if (body.ok !== true) return notSent(slackFailure(body.error).message, 'provider_rejected');
+    if (body.ok !== true) return notSent(slackFailure(body.error, current).message, 'provider_rejected');
     const ts = typeof body.ts === 'string' && SLACK_TS.test(body.ts) ? body.ts : undefined;
     return { status: 'accepted', detail: 'Posted.', ...(ts ? { providerMessageId: encodeTs(ts) } : {}), reason: 'provider_accepted' };
   }
@@ -715,7 +805,7 @@ export class SlackService {
   }
 
   private assertScope(ws: SlackWorkspace, scope: (typeof SLACK_USER_SCOPES)[number]): void {
-    if (!ws.scopes.includes(scope)) {
+    if (!hasScope(ws, scope)) {
       throw new PerchError(
         `Workspace ${ws.id} was connected without the ${scope} scope. Reinstall the app with the new manifest (docs/slack-app-manifest.json) and run perch slack add again`,
         'provider_scope_missing',
@@ -735,7 +825,9 @@ export class SlackService {
     await this.stillAllowed(p, workspaceId);
     const ws = await this.workspace(workspaceId);
     this.assertScope(ws, scope);
-    const res = await this.upstream.json<Raw>('slack', { method: 'POST', path: `/api/${method}`, capability: 'slack_send', headers: auth(ws.token), ...body });
+    const res = await this.upstream.json<Raw>('slack', { method: 'POST', path: `/api/${method}`, capability: 'slack_send', ...slackAuth(ws), ...body });
+    // An expired session is reported the same way for every write.
+    if (res.ok !== true && isSlackAuthFailure(res.error)) throw slackFailure(res.error, ws);
     return res;
   }
 
@@ -857,10 +949,10 @@ export class SlackService {
         method: 'POST',
         path: '/api/files.getUploadURLExternal',
         capability: 'slack_send',
-        headers: auth(current.token),
+        ...slackAuth(current),
         form: { filename: req.filename, length: String(f.bytes.length) },
       });
-      if (r.ok !== true) return notShared(slackFailure(r.error).message, 'provider_rejected');
+      if (r.ok !== true) return notShared(slackFailure(r.error, current).message, 'provider_rejected');
       const path = uploadPathOf(r.upload_url);
       if (!path || typeof r.file_id !== 'string' || !SLACK_FILE_ID.test(r.file_id)) {
         return notShared('Slack returned an upload URL outside https://files.slack.com/upload/v1/; refusing to send the file there', 'not_submitted_provider_precheck');
@@ -889,7 +981,7 @@ export class SlackService {
         method: 'POST',
         path: '/api/files.completeUploadExternal',
         capability: 'slack_send',
-        headers: auth(current.token),
+        ...slackAuth(current),
         form: {
           files: JSON.stringify([{ id: fileId, title: f.title ?? req.filename }]),
           channel_id: f.channel,
@@ -902,7 +994,7 @@ export class SlackService {
       if (err instanceof PerchError && err.code === 'route_not_allowed') return notShared(err.message, 'not_submitted_provider_precheck');
       return { status: 'indeterminate', detail: 'The request to Slack failed after it may have been processed; the outcome is unknown.', reason: 'provider_unknown' };
     }
-    if (body.ok !== true) return notShared(slackFailure(body.error).message, 'provider_rejected');
+    if (body.ok !== true) return notShared(slackFailure(body.error, current).message, 'provider_rejected');
     return { status: 'accepted', detail: 'File shared.', providerMessageId: fileId, reason: 'provider_accepted' };
   }
 
@@ -924,9 +1016,13 @@ export class SlackService {
     if (typeof file.size === 'number' && file.size > maxBytes) {
       throw new PerchError(`The file has ${file.size} bytes, more than maxBytes (${maxBytes}); raise maxBytes (up to ${MAX_SLACK_FILE_BYTES}) to download it`, 'response_too_large');
     }
-    const res = await this.upstream.raw('slackfiles', { method: 'GET', path, headers: { ...auth(ws.token), accept: '*/*' }, maxBytes });
+    const credentials = slackAuth(ws);
+    const res = await this.upstream.raw('slackfiles', { method: 'GET', path, ...credentials, headers: { ...credentials.headers, accept: '*/*' }, maxBytes });
     const type = res.headers['content-type'] ?? '';
     if (/^text\/html/i.test(type) && !/html/i.test(String(file.mimetype ?? ''))) {
+      if (isSlackSession(ws)) {
+        throw new PerchError(`Slack answered with a web page instead of the file: the session has probably expired; run ${slackSessionAddCommand(ws.label)} again`, 'slack_session_expired');
+      }
       throw new PerchError('Slack answered with a web page instead of the file (token lacks files:read or was revoked)', 'upstream_bad_response');
     }
     return { ...this.prov(ws), ...meta, contentBase64: res.body.toString('base64'), bytes: res.body.length };
@@ -1033,7 +1129,7 @@ export class SlackService {
         method: 'POST',
         path: '/api/chat.scheduleMessage',
         capability: 'slack_send',
-        headers: auth(current.token),
+        ...slackAuth(current),
         form: { channel: m.channel, text: req.text, post_at: String(m.postAt), ...(m.threadTs ? { thread_ts: m.threadTs } : {}) },
       });
     } catch (err) {
@@ -1041,7 +1137,7 @@ export class SlackService {
       if (err instanceof PerchError && err.code === 'route_not_allowed') return notScheduled(err.message, 'not_submitted_provider_precheck');
       return { status: 'indeterminate', detail: 'The request to Slack failed after it may have been processed; the outcome is unknown.', reason: 'provider_unknown' };
     }
-    if (body.ok !== true) return notScheduled(slackFailure(body.error).message, 'provider_rejected');
+    if (body.ok !== true) return notScheduled(slackFailure(body.error, current).message, 'provider_rejected');
     const id = typeof body.scheduled_message_id === 'string' && SLACK_SCHEDULED_ID.test(body.scheduled_message_id) ? body.scheduled_message_id : undefined;
     return {
       status: 'accepted',
@@ -1105,13 +1201,14 @@ export class SlackService {
         label: w.label,
         ...(w.teamName ? { team: w.teamName } : {}),
         ...(w.userName ? { user: w.userName } : {}),
-        canSearch: w.scopes.includes('search:read'),
-        canPost: w.scopes.includes('chat:write'),
-        canReact: w.scopes.includes('reactions:write'),
-        canReadFiles: w.scopes.includes('files:read'),
-        canUploadFiles: w.scopes.includes('files:write'),
-        canOpenDm: w.scopes.includes('im:write'),
-        canOpenGroupDm: w.scopes.includes('mpim:write'),
+        canSearch: hasScope(w, 'search:read'),
+        canPost: hasScope(w, 'chat:write'),
+        canReact: hasScope(w, 'reactions:write'),
+        canReadFiles: hasScope(w, 'files:read'),
+        canUploadFiles: hasScope(w, 'files:write'),
+        canOpenDm: hasScope(w, 'im:write'),
+        canOpenGroupDm: hasScope(w, 'mpim:write'),
+        ...(isSlackSession(w) ? { connection: 'session (unofficial)' } : {}),
         granted: [...p.capabilities].filter((c) => c.startsWith('slack_')).sort(),
         connectedAt: w.createdAt,
       }));

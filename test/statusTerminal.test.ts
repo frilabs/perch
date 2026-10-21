@@ -193,7 +193,7 @@ describe('perch status terminal rendering', () => {
     for (const [title, cmd] of [
       ['Notion', 'perch notion add --label NAME'],
       ['Outlook / Microsoft 365', 'perch microsoft add --label NAME'],
-      ['Slack', 'perch slack manifest, then perch slack add --label NAME'],
+      ['Slack', 'perch slack add --label NAME [--session]'],
       ['Luma', 'perch luma add --label NAME'],
     ]) {
       expect(block).toMatch(new RegExp(`☐ ${title!.replace(/[/()]/g, '\\$&')} +\\S`));

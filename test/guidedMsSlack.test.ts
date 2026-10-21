@@ -244,39 +244,41 @@ describe('perch slack add guide [MOCK Slack]', () => {
 
   it('shows manifest, link and steps before the hidden token prompt; the token is never printed', async () => {
     const team = mock.addTeam('A');
-    expect(await runCli(['slack', 'add', '--label', 'Company'], slackIo([''], [team.token]))).toBe(0);
+    // '' = default choice (app), then Enter after the guide.
+    expect(await runCli(['slack', 'add', '--label', 'Company'], slackIo(['', ''], [team.token]))).toBe(0);
     expect(out).toContain('https://api.slack.com/apps?new_app=1');
     expect(out).toMatch(/From a manifest/);
     expect(out).toMatch(/Install to Workspace/);
     expect(out).toMatch(/User OAuth Token/);
     expect(out).toContain('"token_rotation_enabled": false');
-    expect(prompts[0]).toMatch(/Press Enter/);
-    expect(prompts[1]).toMatch(/^SECRET:Slack user token/);
+    expect(prompts[0]).toMatch(/\[a\]pp .*\n.*\[s\]ession/);
+    expect(prompts[1]).toMatch(/Press Enter/);
+    expect(prompts[2]).toMatch(/^SECRET:Slack user token/);
     expect(out.indexOf('new_app=1')).toBeLessThan(out.indexOf('Connected Slack workspace'));
     expect(out + err).not.toContain(team.token);
   });
 
   it('--skip-guide goes straight to the token prompt', async () => {
     const team = mock.addTeam('A');
-    expect(await runCli(['slack', 'add', '--label', 'Company', '--skip-guide'], slackIo([], [team.token]))).toBe(0);
+    expect(await runCli(['slack', 'add', '--label', 'Company', '--skip-guide'], slackIo(['a'], [team.token]))).toBe(0);
     expect(out).not.toContain('new_app=1');
-    expect(prompts).toEqual([expect.stringMatching(/^SECRET:/)]);
+    expect(prompts).toEqual([expect.stringMatching(/^Connect with/), expect.stringMatching(/^SECRET:/)]);
   });
 
   it('asks [y/N] when a workspace is already connected', async () => {
     const a = mock.addTeam('A');
     const b = mock.addTeam('B');
     const c = mock.addTeam('C');
-    expect(await runCli(['slack', 'add', '--label', 'A', '--skip-guide'], slackIo([], [a.token]))).toBe(0);
+    expect(await runCli(['slack', 'add', '--label', 'A', '--skip-guide'], slackIo(['a'], [a.token]))).toBe(0);
     out = '';
     prompts = [];
-    expect(await runCli(['slack', 'add', '--label', 'B'], slackIo([''], [b.token]))).toBe(0);
-    expect(prompts[0]).toMatch(/Show the steps .*\[y\/N\]/);
+    expect(await runCli(['slack', 'add', '--label', 'B'], slackIo(['a', ''], [b.token]))).toBe(0);
+    expect(prompts[1]).toMatch(/Show the steps .*\[y\/N\]/);
     expect(out).not.toContain('new_app=1');
     prompts = [];
-    expect(await runCli(['slack', 'add', '--label', 'C'], slackIo(['y', ''], [c.token]))).toBe(0);
+    expect(await runCli(['slack', 'add', '--label', 'C'], slackIo(['a', 'y', ''], [c.token]))).toBe(0);
     expect(out).toContain('new_app=1');
-    expect(prompts.map((p) => p.slice(0, 7))).toEqual(['Show th', 'Press E', 'SECRET:']);
+    expect(prompts.map((p) => p.slice(0, 7))).toEqual(['Connect', 'Show th', 'Press E', 'SECRET:']);
   });
 
   it('without a terminal: no guide, the masked prompt fails as before', async () => {
@@ -295,6 +297,7 @@ describe('perch setup hints', () => {
     out = '';
     // google, microsoft, imap, notion n; slack y.
     await runCli(['setup'], io(['n', 'n', 'n', 'n', 'y']));
-    expect(out).toMatch(/Perch shows the app manifest and the steps/);
+    expect(out).toMatch(/Perch shows the manifest and the steps/);
+    expect(out).toMatch(/browser session \(unofficial, no admin needed/);
   });
 });
