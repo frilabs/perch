@@ -3,6 +3,7 @@ import { runPkceLoopback, type PasteRedirect } from '../oauth/loopback.js';
 import type { TokenGrantResponse } from '../oauth/tokenProvider.js';
 import type { MicrosoftAccount } from '../store/credentialStore.js';
 import type { Upstream } from '../upstream.js';
+import { explainMicrosoftAuthError } from './authErrors.js';
 
 /**
  * Microsoft identity platform, auth code flow with PKCE for a public client (no client secret):
@@ -98,12 +99,23 @@ export interface MicrosoftAuthorizationOptions {
   onAuthUrl: (url: string) => void;
   /** Paste-the-redirect-address input racing the callback (login without a tunnel). */
   paste?: PasteRedirect;
+  /** The client ID is the built-in frilabs app (wording of error messages and the admin consent text). */
+  frilabsApp?: boolean;
 }
 
 export async function runMicrosoftAuthorization(opts: MicrosoftAuthorizationOptions): Promise<MicrosoftAuthorizationResult> {
   const tenant = validateTenant(opts.tenant);
   const clientId = validateClientId(opts.clientId);
   const scopes = microsoftScopesFor(opts);
+  try {
+    return await authorize(opts, tenant, clientId, scopes);
+  } catch (err) {
+    // Microsoft's AADSTS errors (callback or token endpoint) in plain words, incl. the admin consent link.
+    throw explainMicrosoftAuthError(err, { app: { clientId, frilabs: Boolean(opts.frilabsApp) }, tenant });
+  }
+}
+
+function authorize(opts: MicrosoftAuthorizationOptions, tenant: string, clientId: string, scopes: string[]): Promise<MicrosoftAuthorizationResult> {
   return runPkceLoopback({
     provider: 'Microsoft',
     authEndpoint: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize`,

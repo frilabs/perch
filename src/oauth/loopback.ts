@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { PerchError } from '../errors.js';
+import { aadstsFromText } from '../upstream.js';
 
 export const DEFAULT_AUTH_TIMEOUT_MS = 300_000;
 /** Upper bound (also keeps setTimeout far below its 2^31 ms overflow). */
@@ -59,8 +60,31 @@ export const LOOPBACK_HOSTS: readonly string[] = ['127.0.0.1', 'localhost', '[::
 /** Upper bound for a pasted address (an authorization response is far below). */
 export const MAX_PASTED_URL_LENGTH = 8192;
 
-const providerError = (provider: string, error: string) =>
-  new PerchError(`${provider} authorization failed: ${/^[a-z_]{1,64}$/.test(error) ? error : 'unknown_error'}`, 'oauth_denied');
+/**
+ * The provider answered the authorization request with `error=`. Only sanitised facts are kept: the OAuth error
+ * name, an AADSTS number (Microsoft) and whether the description mentions admin approval; never the description.
+ */
+export class OAuthDeniedError extends PerchError {
+  constructor(
+    provider: string,
+    readonly providerError: string,
+    readonly aadstsCode: string | undefined,
+    readonly mentionsAdminApproval: boolean,
+  ) {
+    super(`${provider} authorization failed: ${providerError}${aadstsCode ? ` (AADSTS${aadstsCode})` : ''}`, 'oauth_denied');
+  }
+}
+
+const providerError = (provider: string, params: URLSearchParams) => {
+  const error = params.get('error') ?? '';
+  const description = (params.get('error_description') ?? '').slice(0, 4096);
+  return new OAuthDeniedError(
+    provider,
+    /^[a-z_]{1,64}$/.test(error) ? error : 'unknown_error',
+    aadstsFromText(description),
+    /\badmin(istrator)?\b[^.]{0,40}\b(approv|consent|permission)/i.test(description),
+  );
+};
 
 /**
  * Checks a pasted redirect address as strictly as the callback: http on a loopback host with the expected port and
@@ -88,7 +112,7 @@ export function parsePastedRedirect(raw: string, expected: { port: number; callb
   const gotState = url.searchParams.get('state');
   if (!gotState || !safeEqual(gotState, expected.state)) throw bad('it belongs to a different or older login attempt (state does not match)');
   const error = url.searchParams.get('error');
-  if (error) throw providerError(expected.provider, error);
+  if (error) throw providerError(expected.provider, url.searchParams);
   const code = url.searchParams.get('code');
   if (!code) throw bad('it contains no authorization code');
   return code;
@@ -127,7 +151,7 @@ export async function runPkceLoopback<T>(opts: PkceLoopbackOptions<T>): Promise<
     if (error) {
       done = true;
       reply(400, 'Authorization was not granted. You can close this window.');
-      return settle.reject(providerError(opts.provider, error));
+      return settle.reject(providerError(opts.provider, url.searchParams));
     }
     const code = url.searchParams.get('code');
     if (!code) return reply(400, 'Missing code.');

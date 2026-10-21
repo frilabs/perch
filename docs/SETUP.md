@@ -281,7 +281,28 @@ Fehlt nach dem Consent ein angefragter Scope, z. B. weil ein Häkchen entfernt w
 
 ### 4a.2 Outlook.com / Microsoft 365 (Microsoft Graph, delegiert)
 
-**Geführt (Standard):** `perch microsoft add` (oder Outlook in `perch setup`) erkennt, dass noch keine Client-ID da ist, und führt im Terminal durch die App-Registrierung, jeweils mit „Enter, wenn erledigt“:
+**Ohne eigene App (Standard, sobald die frilabs-App ausgeliefert ist):** Perch bringt die Client-ID der von frilabs registrierten Multi-Tenant-App **„Perch (frilabs)“** mit (öffentlicher Client, kein Secret; Konstante `FRILABS_MICROSOFT_CLIENT_ID` in `src/microsoft/defaultApp.ts`, Spezifikation `docs/MICROSOFT_FRILABS_APP_SPEC.md`). `perch microsoft add` fragt dann nur Lesen oder Lesen + Schreiben und startet direkt den Login; Microsoft zeigt die App „Perch (frilabs)“ an. frilabs bekommt dabei keine Daten: Tokens und Mails bleiben in Perch. Reihenfolge der Client-ID: `PERCH_MICROSOFT_CLIENT_ID` > `~/.config/perch/microsoft-client-id` > eingebaute frilabs-ID. `perch microsoft client show` nennt die Quelle („frilabs default“). Ist die Konstante leer (noch keine frilabs-Registrierung), verhält sich Perch wie unten beschrieben (geführte eigene Registrierung). Eine unbrauchbare Client-ID-Datei wird gemeldet und **nicht** stillschweigend durch die frilabs-App ersetzt.
+
+**Admin-Freigabe:** Manche Organisationen erlauben Nutzern nicht, fremden Apps Mailzugriff zu geben. Dann bricht `add` mit einer klaren Meldung ab und gibt den **Admin-Freigabe-Link** samt Text zum Weiterleiten an die IT aus (was Perch ist, welche Rechte, selbst gehostet, frilabs sieht keine Daten). Den Link gibt es auch direkt:
+
+```bash
+perch microsoft admin-consent-link                       # Tenant organizations (Admin meldet sich in seiner Organisation an)
+perch microsoft admin-consent-link --tenant firma.example  # oder Tenant-GUID; eine E-Mail-Adresse wird auf ihre Domain gekürzt
+```
+
+Format: `https://login.microsoftonline.com/<tenant>/v2.0/adminconsent?client_id=<id>&scope=offline_access https://graph.microsoft.com/User.Read … Mail.Send&redirect_uri=http://localhost` (URL-kodiert). Nach der Freigabe zeigt der Browser „Diese Website ist nicht erreichbar“ auf `localhost`; das ist erwartet. Danach `perch microsoft add` erneut.
+
+**Fehlermeldungen:** Perch übersetzt Microsofts Fehler aus Callback und Token-Antwort (nur Fehlername und AADSTS-Nummer, nie Microsofts Beschreibung, Codes oder Tokens):
+
+| Code | Bedeutung | Hinweis von Perch |
+|---|---|---|
+| `AADSTS65001`, `AADSTS90094`, `AADSTS90095`, `consent_required`, „admin approval“ | Organisation verlangt Admin-Freigabe | Admin-Freigabe-Link + Text zum Weiterleiten |
+| `AADSTS50020` | Konto gehört nicht zum gewählten Tenant | anderes Konto oder `PERCH_MICROSOFT_TENANT=common` (bzw. Domain der Organisation) |
+| `AADSTS700016` | App-ID im Tenant unbekannt | `perch microsoft client show` / `client setup` |
+| `AADSTS50011` | Redirect passt nicht | Plattform „Mobile and desktop applications“ mit `http://localhost` |
+| `AADSTS53003` | Conditional Access blockiert | nur ein Admin der Organisation kann helfen |
+
+**Eigene App (geführt):** Ohne eingebaute frilabs-ID oder für eine eigene App führt `perch microsoft add` (oder Outlook in `perch setup`) bzw. `perch microsoft client setup` im Terminal durch die App-Registrierung, jeweils mit „Enter, wenn erledigt“:
 
 1. Direktlink auf die neue App-Registrierung im Entra Admin Center
    (<https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/CreateApplicationBlade/quickStartType~/null/isMSAApp~/false>,
@@ -296,7 +317,7 @@ Fehlt nach dem Consent ein angefragter Scope, z. B. weil ein Häkchen entfernt w
 
 ```bash
 perch microsoft client setup     # nur die Registrierung (ersetzt eine vorhandene Datei nach Rückfrage)
-perch microsoft client show      # Quelle (Variable oder Datei), gekürzte Client-ID, Pfad, Tenant
+perch microsoft client show      # Quelle (Variable, Datei oder frilabs default), gekürzte Client-ID, Pfad, Tenant
 ```
 
 **Manuell (Alternative):** die App-Registrierung wie oben anlegen und `PERCH_MICROSOFT_CLIENT_ID=<Application (client) ID>` in `.env` setzen.
@@ -316,7 +337,7 @@ perch microsoft remove microsoft-1a2b3c4d
 ```
 
 - Ohne Tunnel: nach der Zustimmung die Adresse `http://localhost:<port>/?code=…` aus der Adresszeile ins Terminal einfügen (wie bei Google, Abschnitt 3.2). Oder der Browser erreicht `http://localhost:<port>` auf dem Server per `ssh -N -L <port>:127.0.0.1:<port>`. Der Listener bindet nur `127.0.0.1`. Löst der Browser `localhost` nur auf `::1` auf, hilft `--redirect-host 127.0.0.1`. Dann muss `http://127.0.0.1` als Redirect-URI im Manifest der App-Registrierung stehen.
-- **Firmen-Tenants** können User-Consent für `Mail.*` verbieten oder Admin-Consent verlangen. `add` scheitert dann mit einem klaren Fehler.
+- **Firmen-Tenants** können User-Consent für `Mail.*` verbieten oder Admin-Consent verlangen. `add` scheitert dann mit einer klaren Meldung und dem Admin-Freigabe-Link (siehe oben).
 - Microsoft rotiert Refresh-Tokens. Perch speichert sie unter Lock. Lässt sich ein neuer Token nicht speichern, oder wurde das Konto währenddessen entfernt bzw. geändert, schlägt der Aufruf fehl (fail closed).
 - **Widerruf:** <https://account.live.com/consent/Manage> (persönlich) bzw. <https://myapplications.microsoft.com> (Firma). `remove` löscht nur lokal.
 

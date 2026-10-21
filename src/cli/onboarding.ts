@@ -140,7 +140,9 @@ const SERVICES: readonly SetupService[] = [
     cmd: 'microsoft',
     title: 'Outlook / Microsoft 365',
     needs: (c) =>
-      c.microsoftClientId
+      c.microsoftClientIdSource === 'frilabs'
+        ? 'No app registration needed: Perch uses the built-in "Perch (frilabs)" app.\n' + tunnel(8766)
+        : c.microsoftClientId
         ? tunnel(8766)
         : 'Needs your own Entra app registration (once per installation): Perch guides you through it step by step first.\n' + tunnel(8766),
     args: async () => ['--port', '8766'],

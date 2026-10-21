@@ -1,7 +1,9 @@
 import type { PerchConfig } from '../config.js';
 import { PerchError } from '../errors.js';
 import { pathExists } from '../secureFs.js';
+import { adminConsentBlock, adminConsentTenant } from '../microsoft/authErrors.js';
 import { runMicrosoftClientGuide, shortClientId } from '../microsoft/clientSetup.js';
+import { FRILABS_MICROSOFT_APP_NAME } from '../microsoft/defaultApp.js';
 import { yes } from './onboarding.js';
 
 /** The parts of CliIo the Microsoft client commands use. */
@@ -16,8 +18,8 @@ const noTerminalHint =
   'or run perch microsoft client setup in a terminal (guided, docs/SETUP.md §4a)';
 
 /**
- * Client ID for `perch microsoft add`: PERCH_MICROSOFT_CLIENT_ID, else the client-id file, else the guided
- * Entra registration (interactive only; without a terminal a clear error as before).
+ * Client ID for `perch microsoft add`: PERCH_MICROSOFT_CLIENT_ID, else the client-id file, else the built-in
+ * frilabs app (no guide), else the guided Entra registration (interactive only; without a terminal a clear error).
  */
 export async function ensureMicrosoftClientId(config: PerchConfig, io: Io, write: boolean): Promise<string> {
   if (config.microsoftClientId) return config.microsoftClientId;
@@ -36,6 +38,12 @@ export async function cmdMicrosoftClient(config: PerchConfig, io: Io, action: st
       io.stdout(`Client ID ${shortClientId(config.microsoftClientId!)} from PERCH_MICROSOFT_CLIENT_ID (takes precedence over ${file}).\n`);
     } else if (config.microsoftClientIdSource === 'file') {
       io.stdout(`Client ID ${shortClientId(config.microsoftClientId!)} from ${file}.\n`);
+    } else if (config.microsoftClientIdSource === 'frilabs') {
+      io.stdout(
+        `Client ID ${shortClientId(config.microsoftClientId!)}: frilabs default (the built-in ${FRILABS_MICROSOFT_APP_NAME} app).\n` +
+          'Your own app registration instead: perch microsoft client setup\n' +
+          `(or PERCH_MICROSOFT_CLIENT_ID; both take precedence over the default).\n`,
+      );
     } else if (config.microsoftClientIdFileError) {
       io.stdout(`No usable client ID: ${config.microsoftClientIdFileError}. Run perch microsoft client setup.\n`);
     } else {
@@ -57,4 +65,21 @@ export async function cmdMicrosoftClient(config: PerchConfig, io: Io, action: st
   }
   await runMicrosoftClientGuide({ stdout: io.stdout, ask: io.readLine }, { file });
   io.stdout('Next: perch microsoft add --label NAME\n');
+}
+
+/** `perch microsoft admin-consent-link [--tenant DOMAIN|GUID]`: the link an organisation's admin approves Perch with. */
+export function cmdMicrosoftAdminConsentLink(config: PerchConfig, io: Io, tenantArg: string | undefined): void {
+  const tenant = adminConsentTenant(tenantArg);
+  if (!config.microsoftClientId) {
+    throw new PerchError(
+      config.microsoftClientIdFileError
+        ? `The Microsoft client-id file is not usable: ${config.microsoftClientIdFileError}. Fix it or run perch microsoft client setup`
+        : 'No Microsoft client ID configured. Run perch microsoft client setup\n(or set PERCH_MICROSOFT_CLIENT_ID) first',
+      'bad_config',
+    );
+  }
+  io.stdout(adminConsentBlock({ clientId: config.microsoftClientId, frilabs: config.microsoftClientIdSource === 'frilabs' }, tenant));
+  if (tenantArg === undefined) {
+    io.stdout('\nSpecific organisation: perch microsoft admin-consent-link --tenant DOMAIN\n');
+  }
 }

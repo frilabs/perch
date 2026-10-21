@@ -58,7 +58,8 @@ import { generateHttpToken, startHttpServer, validateHttpToken } from '../mcp/ht
 import { createMcpServer } from '../mcp/server.js';
 import { registerMicrosoftAccount, removeMicrosoftAccount } from '../microsoft/accounts.js';
 import { runMicrosoftAuthorization, validateTenant } from '../microsoft/oauth.js';
-import { cmdMicrosoftClient, ensureMicrosoftClientId } from './microsoftClient.js';
+import { cmdMicrosoftAdminConsentLink, cmdMicrosoftClient, ensureMicrosoftClientId } from './microsoftClient.js';
+import { FRILABS_MICROSOFT_APP_NAME } from '../microsoft/defaultApp.js';
 import { chooseSlackMode, confirmSlackSession, maybeShowSlackGuide, maybeShowSlackSessionGuide } from './slackGuide.js';
 import { addNotionWorkspace, countVisibleNotionObjects, removeNotionWorkspace, type NotionVisibility } from '../notion/notion.js';
 import { runNotionAuthorization, upsertNotionOAuthWorkspace } from '../notion/oauth.js';
@@ -110,6 +111,8 @@ export interface CliIo {
   stdoutIsTTY?: boolean;
   /** Terminal width for perch status; undefined when piped. */
   stdoutColumns?: number;
+  /** Tests inject the built-in frilabs Microsoft client ID ('' = none); production uses FRILABS_MICROSOFT_CLIENT_ID. */
+  microsoftDefaultClientId?: string;
 }
 
 const USAGE = `perch ${PERCH_VERSION} - Google Drive + Notion + mail + Calendar/Contacts + Slack + WhatsApp MCP server (read-only unless a client grant allows more)
@@ -174,8 +177,11 @@ Usage:
   perch microsoft add --label NAME [--allow-drafts] [--allow-send] [--allow-modify] [--port N] [--timeout SECONDS]
                       [--redirect-host localhost|127.0.0.1] [--login-hint EMAIL]
   perch microsoft list | remove ID
-  perch microsoft client setup | show          guided Entra app registration; stores the client ID in
-                                               ~/.config/perch/microsoft-client-id (PERCH_MICROSOFT_CLIENT_ID wins)
+  perch microsoft client setup | show          own Entra app registration (guided); stores the client ID in
+                                               ~/.config/perch/microsoft-client-id (PERCH_MICROSOFT_CLIENT_ID wins;
+                                               without either Perch uses the built-in frilabs app, if available)
+  perch microsoft admin-consent-link [--tenant DOMAIN|GUID]   link + text for an organisation's admin
+                                               to approve Perch (default tenant: organizations)
   perch imap add --label NAME --email ADDRESS [--username USER] [--preset gmx|gmx-com]
                  [--imap-host H --imap-port N --smtp-host H --smtp-port N --smtp-security tls|starttls]
                  [--allow-drafts] [--allow-send] [--allow-modify] [--drafts-mailbox NAME] [--no-sent-copy]
@@ -510,7 +516,7 @@ async function cmdGoogle(config: PerchConfig, io: CliIo, sub: string | undefined
   oauthTiming(values);
   const services = await chooseGoogleServices(values, io.readLine, io.stderr);
   if (await chooseAccess('google', values, io.readLine, io.stderr)) {
-    io.stdout('Requesting read and write permissions from Google. Clients still need a grant to write: perch client add --label NAME --full\n');
+    io.stdout('Requesting read and write permissions from Google. Clients still need a grant\nto write: perch client add --label NAME --full\n');
   }
   const request: GoogleGroupRequest = googleRequestFromFlags(services, values);
   const reg = await googleGroupLogin(config, io, store, upstream, values, {
@@ -927,8 +933,20 @@ async function cmdGmail(config: PerchConfig, io: CliIo, sub: string | undefined,
   io.stdout('This Gmail account has its own login. One login for Drive, Gmail, Calendar and Contacts: perch google add --label NAME\n');
 }
 
+/** Shown with the login link when the built-in frilabs app is used (docs/MICROSOFT_FRILABS_APP_SPEC.md). */
+const FRILABS_APP_NOTE =
+  `Microsoft asks you to allow the app "${FRILABS_MICROSOFT_APP_NAME}". frilabs registered it\n` +
+  'with Microsoft; Perch runs only on this machine, and frilabs never receives\n' +
+  'your mail or sign-in tokens. If your organisation requires an administrator\'s\n' +
+  'approval, Perch shows a link for them (perch microsoft admin-consent-link).\n';
+
 async function cmdMicrosoft(config: PerchConfig, io: CliIo, sub: string | undefined, rest: string[], values: Record<string, unknown>) {
   if (sub === 'client') return cmdMicrosoftClient(config, io, rest[0]);
+  if (sub === 'admin-consent-link') {
+    if (rest.length) throw new UsageError('Usage: perch microsoft admin-consent-link [--tenant DOMAIN|GUID]');
+    return cmdMicrosoftAdminConsentLink(config, io, typeof values.tenant === 'string' ? values.tenant : undefined);
+  }
+  if (values.tenant !== undefined) throw new UsageError('--tenant is only valid for perch microsoft admin-consent-link (sign-in: PERCH_MICROSOFT_TENANT)');
   const upstream = new Upstream(io.transport ?? createFetchTransport());
   const store = await openStore(config);
   if (sub === 'list') return io.stdout(formatAccounts(await store.read(), 'microsoft'));
@@ -942,9 +960,10 @@ async function cmdMicrosoft(config: PerchConfig, io: CliIo, sub: string | undefi
     );
     return;
   }
-  if (sub !== 'add') throw new UsageError('Usage: perch microsoft add|list|remove|client');
+  if (sub !== 'add') throw new UsageError('Usage: perch microsoft add|list|remove|client|admin-consent-link');
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
   const clientId = await ensureMicrosoftClientId(config, io, Boolean(values['allow-send'] || values['allow-drafts'] || values['allow-modify']));
+  const frilabsApp = config.microsoftClientIdSource === 'frilabs';
   const tenant = validateTenant(config.microsoftTenant);
   const redirectHost = values['redirect-host'] ?? 'localhost';
   if (redirectHost !== 'localhost' && redirectHost !== '127.0.0.1') throw new UsageError('--redirect-host must be localhost or 127.0.0.1');
@@ -960,7 +979,8 @@ async function cmdMicrosoft(config: PerchConfig, io: CliIo, sub: string | undefi
     timeoutMs,
     redirectHost,
     ...(typeof values['login-hint'] === 'string' ? { loginHint: values['login-hint'] } : {}),
-    ...loginPrompts(io, approve(`Outlook mail access (${describeOptIns(values)})`), timeoutMs),
+    ...(frilabsApp ? { frilabsApp } : {}),
+    ...loginPrompts(io, approve(`Outlook mail access (${describeOptIns(values)})`), timeoutMs, frilabsApp ? FRILABS_APP_NOTE : undefined),
   });
   const account = await registerMicrosoftAccount(store, upstream, {
     label: values.label,
@@ -1404,6 +1424,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         label: { type: 'string' },
         timeout: { type: 'string' },
         'login-hint': { type: 'string' },
+        tenant: { type: 'string' },
         revoke: { type: 'boolean' },
         force: { type: 'boolean' },
         'allow-send': { type: 'boolean' },
@@ -1474,12 +1495,12 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
     return 0;
   }
   try {
-    const config = resolveConfig(io.env);
+    const config = resolveConfig(io.env, io.microsoftDefaultClientId !== undefined ? { frilabsMicrosoftClientId: io.microsoftDefaultClientId } : {});
     let wantsWrite = false;
     // perch google add asks for its services first and then for the access (in cmdGoogle).
     if (sub === 'add' && WRITE_FLAGS[cmd] && cmd !== 'google') wantsWrite = await chooseAccess(cmd, values as Record<string, unknown>, io.readLine, io.stderr);
     if (wantsWrite) {
-      io.stdout('Requesting read and write permissions from the provider. Clients still need a grant to write: perch client add --label NAME --full\n');
+      io.stdout('Requesting read and write permissions from the provider. Clients still need a\ngrant to write: perch client add --label NAME --full\n');
     }
     switch (cmd) {
       case 'init':
