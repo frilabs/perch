@@ -76,6 +76,28 @@ export interface MockGraphOptions {
   /** Rotate the refresh token on every refresh_token grant (Microsoft's usual behaviour). Default true. */
   rotateOnRefresh?: boolean;
   pageSize?: number;
+  /** MOCK: the authorization_code grant fails the way Microsoft's token endpoint does (AADSTS number). */
+  tokenError?: { error: string; aadsts: number };
+}
+
+/** MOCK Microsoft error_description: AADSTS number, prose, trace/correlation ids (never to be echoed by Perch). */
+export const msErrorDescription = (aadsts: number) =>
+  `AADSTS${aadsts}: MOCK error text. Trace ID: MOCK-TRACE-5f1e Correlation ID: MOCK-CORR-77aa Timestamp: 2026-10-21 10:00:00Z`;
+
+/**
+ * MOCK redirect the identity platform sends instead of a code when sign-in fails:
+ * <redirect_uri>?error=…&error_description=AADSTS…&state=… (plus error_uri, like Microsoft).
+ */
+export function msCallbackError(authUrl: string, error: string, aadsts?: number, description?: string): string {
+  const u = new URL(authUrl);
+  const redirect = new URL(u.searchParams.get('redirect_uri')!);
+  redirect.search = new URLSearchParams({
+    error,
+    error_description: description ?? (aadsts ? msErrorDescription(aadsts) : 'MOCK error text'),
+    error_uri: 'https://login.microsoftonline.com/error?code=0',
+    state: u.searchParams.get('state')!,
+  }).toString();
+  return redirect.toString();
 }
 
 const json = (status: number, body: unknown): UpstreamResponse => ({
@@ -156,6 +178,17 @@ export class MockGraph {
       const challenge = createHash('sha256').update(form.get('code_verifier') ?? '').digest('base64url');
       if (challenge !== pending.challenge) return json(400, { error: 'invalid_grant' });
       if (form.get('redirect_uri') !== pending.redirectUri) return json(400, { error: 'invalid_request' });
+      if (this.opts.tokenError) {
+        const { error, aadsts } = this.opts.tokenError;
+        return json(400, {
+          error,
+          error_description: msErrorDescription(aadsts),
+          error_codes: [aadsts],
+          timestamp: '2026-10-21 10:00:00Z',
+          trace_id: 'MOCK-TRACE-5f1e',
+          correlation_id: 'MOCK-CORR-77aa',
+        });
+      }
       return json(200, {
         token_type: 'Bearer',
         scope,

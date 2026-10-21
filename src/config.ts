@@ -2,7 +2,8 @@ import { defaultNotionClientFile } from './notion/oauth.js';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { PerchError } from './errors.js';
-import { defaultMicrosoftClientIdFile, readMicrosoftClientIdFile } from './microsoft/clientSetup.js';
+import { defaultMicrosoftClientIdFile, parseMicrosoftClientId, readMicrosoftClientIdFile } from './microsoft/clientSetup.js';
+import { FRILABS_MICROSOFT_CLIENT_ID } from './microsoft/defaultApp.js';
 import { readPrivateFile } from './secureFs.js';
 import { validateCimdOrigin } from './upstream.js';
 
@@ -29,8 +30,11 @@ export interface PerchConfig {
   googleClientDefaultFile: string;
   /** Application (client) ID of the Entra app registration (public client; not a secret). */
   microsoftClientId?: string;
-  /** Where microsoftClientId came from: PERCH_MICROSOFT_CLIENT_ID (precedence) or the client-id file. */
-  microsoftClientIdSource?: 'env' | 'file';
+  /**
+   * Where microsoftClientId came from: PERCH_MICROSOFT_CLIENT_ID (precedence), the client-id file, or the
+   * built-in frilabs app (docs/MICROSOFT_FRILABS_APP_SPEC.md; only while FRILABS_MICROSOFT_CLIENT_ID is set).
+   */
+  microsoftClientIdSource?: 'env' | 'file' | 'frilabs';
   /** Fallback file written by `perch microsoft client setup` (~/.config/perch/microsoft-client-id). */
   microsoftClientIdFile: string;
   /** Notion OAuth client (public integration): ~/.config/perch/notion-client.json, 0600. */
@@ -67,14 +71,27 @@ function rejectUserSelector(env: Record<string, string | undefined>): void {
   }
 }
 
+/**
+ * Last fallback for the Microsoft client ID: the built-in frilabs app. An unusable client-id file is reported
+ * instead (the operator chose an own app), never silently replaced by the default.
+ */
+function frilabsMicrosoft(id: string): { microsoftClientId?: string; microsoftClientIdSource?: 'frilabs' } {
+  return id.trim() ? { microsoftClientId: parseMicrosoftClientId(id), microsoftClientIdSource: 'frilabs' } : {};
+}
+
 const list = (v: string | undefined) =>
   (v ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
 
+export interface ResolveConfigOptions {
+  /** Test seam: replaces the built-in FRILABS_MICROSOFT_CLIENT_ID ('' = none). */
+  frilabsMicrosoftClientId?: string;
+}
+
 /** Configuration comes from environment variables only (no secrets on the command line). */
-export function resolveConfig(env: Record<string, string | undefined>): PerchConfig {
+export function resolveConfig(env: Record<string, string | undefined>, opts: ResolveConfigOptions = {}): PerchConfig {
   const home = homedir();
   const dataHome = env.XDG_DATA_HOME || path.join(home, '.local', 'share');
   const configHome = env.XDG_CONFIG_HOME || path.join(home, '.config');
@@ -91,7 +108,7 @@ export function resolveConfig(env: Record<string, string | undefined>): PerchCon
       ? { microsoftClientId: msRead.id, microsoftClientIdSource: 'file' as const }
       : msRead && 'error' in msRead
         ? { microsoftClientIdFileError: msRead.error }
-        : {};
+        : frilabsMicrosoft(opts.frilabsMicrosoftClientId ?? FRILABS_MICROSOFT_CLIENT_ID);
   const publicPort = Number(env.PERCH_PUBLIC_PORT || '8767');
   if (!Number.isInteger(publicPort) || publicPort < 0 || publicPort > 65535) throw new PerchError('PERCH_PUBLIC_PORT must be a valid port', 'bad_config');
   const flag = (name: string, dflt: boolean) => {

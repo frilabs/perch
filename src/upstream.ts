@@ -428,6 +428,8 @@ export class UpstreamError extends PerchError {
     readonly upstreamCode: string | undefined,
     /** Sanitised Retry-After in seconds (delta-seconds form only), if the upstream sent one. */
     readonly retryAfterSeconds?: number,
+    /** Microsoft identity platform only: the AADSTS error number (digits only, never the description text). */
+    readonly aadstsCode?: string,
   ) {
     super(message, 'upstream_error');
   }
@@ -537,6 +539,29 @@ function extractCode(service: Service, body: Buffer): string | undefined {
   return typeof code === 'string' && SAFE_CODE.test(code) ? code : undefined;
 }
 
+/**
+ * The AADSTS number of a Microsoft identity platform error (`error_codes: [65001]` or `AADSTS65001: …` in
+ * error_description). Only the digits leave this function; the description text is never kept.
+ */
+export function extractAadstsCode(body: Buffer): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.toString('utf8'));
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  const o = parsed as { error_codes?: unknown; error_description?: unknown };
+  const first = Array.isArray(o.error_codes) ? o.error_codes[0] : undefined;
+  if (typeof first === 'number' && Number.isInteger(first) && first > 0 && first < 1e7) return String(first);
+  return typeof o.error_description === 'string' ? aadstsFromText(o.error_description) : undefined;
+}
+
+/** "AADSTS65001: The user or administrator …" -> "65001". */
+export function aadstsFromText(text: string): string | undefined {
+  return /\bAADSTS(\d{4,7})\b/.exec(text.slice(0, 4096))?.[1];
+}
+
 function statusHint(status: number): string {
   if (status === 401) return 'unauthorized: credential invalid, expired or revoked';
   if (status === 403) return 'forbidden or rate limited';
@@ -615,6 +640,7 @@ export class Upstream {
         res.status,
         code,
         parseRetryAfter(res.headers['retry-after']),
+        service === 'msauth' ? extractAadstsCode(res.body) : undefined,
       );
     }
     return res;
