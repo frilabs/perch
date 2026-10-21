@@ -23,7 +23,7 @@ import { linkedinExpiry, loginExpired, renewCommandFor } from '../linkedin/linke
  * token providers, so refresh-token rotation never races with the running server.
  */
 
-export type AccountFamily = 'drive' | 'notion' | 'mail' | 'calendar' | 'slack' | 'whatsapp' | 'luma' | 'linkedin';
+export type AccountFamily = 'drive' | 'notion' | 'mail' | 'calendar' | 'slack' | 'whatsapp' | 'luma' | 'linkedin' | 'x';
 
 export const FAMILY_TITLES: Record<AccountFamily, string> = {
   drive: 'Google Drive',
@@ -34,6 +34,7 @@ export const FAMILY_TITLES: Record<AccountFamily, string> = {
   whatsapp: 'WhatsApp',
   luma: 'Luma',
   linkedin: 'LinkedIn',
+  x: 'X',
 };
 
 export interface CheckResult {
@@ -172,6 +173,9 @@ function accountsOf(d: StoreData): AccountStatus[] {
       ...(exp.state === 'expired' ? { check: { state: 'error' as const, message: loginExpired(a, exp.until).message } } : {}),
     });
   }
+  for (const a of d.x) {
+    rows.push({ family: 'x', id: a.id, label: a.label, provider: 'x', identity: `@${a.username}`, permissions: a.scopes.includes('tweet.write') ? 'read, post' : 'read', connectedAt: a.createdAt });
+  }
   return rows;
 }
 
@@ -269,6 +273,9 @@ async function checkAccount(ctx: PerchContext, d: StoreData, a: AccountStatus, o
       return;
     case 'linkedin':
       await ctx.linkedin.check(a.id);
+      return;
+    case 'x':
+      await ctx.x.check(a.id);
       return;
   }
 }

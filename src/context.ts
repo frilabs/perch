@@ -15,13 +15,15 @@ import { SendWorkflow } from './mail/workflow.js';
 import { MailWorkflowLedger } from './mail/workflowLedger.js';
 import { NotionService } from './notion/notion.js';
 import { SlackService } from './slack/slack.js';
-import type { CredentialStore, GmailAccount, GoogleAccountGroup, GoogleProductivityAccount, LumaAccount, MicrosoftAccount } from './store/credentialStore.js';
+import type { CredentialStore, GmailAccount, GoogleAccountGroup, GoogleProductivityAccount, LumaAccount, MicrosoftAccount, XAccount } from './store/credentialStore.js';
 import { createFetchTransport, Upstream, type UpstreamTransport } from './upstream.js';
 import { WhatsappService } from './whatsapp/whatsapp.js';
 import { LumaMcp } from './luma/client.js';
 import { createLumaTokenProvider, LumaService } from './luma/service.js';
 import { LinkedinService } from './linkedin/linkedin.js';
 import { createLinkedinTokenProvider } from './linkedin/oauth.js';
+import { createXTokenProvider } from './x/oauth.js';
+import { XService } from './x/x.js';
 
 /** Long-lived services shared by all MCP requests (keeps the access-token caches warm). */
 export interface PerchContext {
@@ -39,6 +41,8 @@ export interface PerchContext {
   luma: LumaService;
   /** LinkedIn: own profile posts (docs/LINKEDIN_X_SPEC.md). */
   linkedin: LinkedinService;
+  /** X posting (docs/LINKEDIN_X_SPEC.md). */
+  x: XService;
   /** The namespace's OAuth access-token providers (shared by services and status checks). */
   tokens: {
     drive: GoogleTokenProvider;
@@ -46,6 +50,7 @@ export interface PerchContext {
     microsoft: RefreshingTokenProvider<MicrosoftAccount>;
     productivity: RefreshingTokenProvider<GoogleProductivityAccount>;
     luma: RefreshingTokenProvider<LumaAccount>;
+    x: RefreshingTokenProvider<XAccount>;
     /** Shared logins of Google account groups; the drive, gmail and productivity providers delegate group members here. */
     googleGroups: RefreshingTokenProvider<GoogleAccountGroup>;
   };
@@ -80,6 +85,7 @@ export function createPerchContext(
   // Slack and WhatsApp sends use the same idempotent workflow (and send-record ledger) as mail.
   const workflow = new SendWorkflow(ledger);
   const lumaTokens = createLumaTokenProvider(store, upstream);
+  const xTokens = createXTokenProvider(store, upstream);
   return {
     store,
     upstream,
@@ -95,7 +101,8 @@ export function createPerchContext(
     linkedin: new LinkedinService(store, upstream, workflow, audit, createLinkedinTokenProvider(store, upstream), {
       ...(opts.linkedinVersion ? { version: opts.linkedinVersion } : {}),
     }),
-    tokens: { drive: tokens, gmail: gmailTokens, microsoft: microsoftTokens, productivity: productivityTokens, luma: lumaTokens, googleGroups: groupTokens },
+    x: new XService(store, upstream, workflow, audit, xTokens),
+    tokens: { drive: tokens, gmail: gmailTokens, microsoft: microsoftTokens, productivity: productivityTokens, luma: lumaTokens, x: xTokens, googleGroups: groupTokens },
     audit,
   };
 }

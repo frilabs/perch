@@ -46,6 +46,7 @@ function baseStore(): StoreData {
     luma: [],
     googleGroups: [],
     linkedin: [],
+    x: [],
   };
 }
 
@@ -267,6 +268,7 @@ describe('perch status terminal rendering', () => {
         '  ✓ whatsapp-c3da7b43  "Whatsapp"  +4366012345678  [gowa: read, send]  since 2026-10-20  ok (16 ms)',
         'Luma: none',
         'LinkedIn: none',
+        'X: none',
         '',
         'Client grants',
         '  client-5cda7d00  "Claude Code Mac"  FULL access → every account (also later ones)',

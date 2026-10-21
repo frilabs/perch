@@ -861,6 +861,7 @@ describe('perch whatsapp install / perch setup [MOCK GOWA]', () => {
       'n', // another WhatsApp account
       'n', // Luma
       'n', // LinkedIn
+      'n', // X
       'n', // full-access client
     ];
     expect(await runCli(['setup'], io(answers)), cliErr).toBe(0);
@@ -875,7 +876,7 @@ describe('perch whatsapp install / perch setup [MOCK GOWA]', () => {
   });
 
   it('perch setup skips WhatsApp when the install is declined', async () => {
-    const answers = ['n', 'n', 'n', 'n', 'n', 'y', 'n', 'n', 'n', 'n'];
+    const answers = ['n', 'n', 'n', 'n', 'n', 'y', 'n', 'n', 'n', 'n', 'n'];
     expect(await runCli(['setup'], io(answers)), cliErr).toBe(0);
     expect(answers).toHaveLength(0);
     expect(cliOut).toMatch(/Skipping WhatsApp/);

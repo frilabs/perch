@@ -21,6 +21,7 @@ export function sendTypeOf(provider: SendProvider): string {
   if (provider === 'drive') return 'drive_write';
   if (provider === 'notion') return 'notion_write';
   if (provider === 'linkedin') return 'linkedin_post';
+  if (provider === 'x') return 'x_post';
   return 'mail_send';
 }
 

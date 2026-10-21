@@ -201,6 +201,15 @@ const SERVICES: readonly SetupService[] = [
         : 'First Perch walks you through your own LinkedIn app (once; LinkedIn requires a company page for it).\n' + tunnel(8770),
     args: async () => [],
   },
+  {
+    cmd: 'x',
+    title: 'X (post on your own account)',
+    needs: () =>
+      'Needs your own X developer app (once per installation; Perch shows the steps) and API credits: X bills every post ' +
+      '(pay-per-use, see developer.x.com).\n' +
+      tunnel(8771),
+    args: async () => [],
+  },
 ];
 
 /**

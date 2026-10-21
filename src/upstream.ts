@@ -27,11 +27,12 @@ export type Service =
   | 'luma'
   | 'lumaauth'
   | 'linkedin'
-  | 'linkedinauth';
+  | 'linkedinauth'
+  | 'x';
 /**
  * `admin` routes (GOWA device pairing/removal) are only ever passed by the local CLI, never by an MCP tool.
  */
-export type RouteCapability = 'read' | 'draft' | 'send' | 'calendar_write' | 'calendar_invite' | 'slack_send' | 'whatsapp_send' | 'admin' | 'notify' | 'drive_write' | 'notion_write' | 'mail_modify' | 'linkedin_post';
+export type RouteCapability = 'read' | 'draft' | 'send' | 'calendar_write' | 'calendar_invite' | 'slack_send' | 'whatsapp_send' | 'admin' | 'notify' | 'drive_write' | 'notion_write' | 'mail_modify' | 'linkedin_post' | 'x_post';
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
 export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
@@ -69,6 +70,8 @@ export const ORIGINS: Readonly<Record<Service, string>> = Object.freeze({
   linkedin: 'https://api.linkedin.com',
   /** LinkedIn OAuth 2.0 token endpoint (the authorization page is opened in the browser, never fetched). */
   linkedinauth: 'https://www.linkedin.com',
+  /** X API v2 (docs/LINKEDIN_X_SPEC.md): OAuth 2.0 token/revoke, users/me and posting. Authorization runs in the browser (x.com). */
+  x: 'https://api.x.com',
 });
 
 /** Services whose origin is configured per namespace instead of fixed (see validateGowaOrigin). */
@@ -93,6 +96,7 @@ const SERVICE_NAMES: Record<Service, string> = {
   lumaauth: 'Luma authorization server',
   linkedin: 'LinkedIn API',
   linkedinauth: 'LinkedIn OAuth',
+  x: 'X API',
 };
 
 const NOTION_ID = '[0-9a-fA-F-]{32,36}';
@@ -304,6 +308,15 @@ const ROUTES: Record<Service, Route[]> = {
   ],
   // Code exchange and refresh: internal callers only, never reachable from a client grant.
   linkedinauth: [['POST', /^\/oauth\/v2\/accessToken$/, 'admin']],
+  x: [
+    // OAuth 2.0 code exchange and refresh (public client: client_id in the body; confidential: Basic auth).
+    ['POST', /^\/2\/oauth2\/token$/],
+    // Local CLI only (perch x remove --revoke).
+    ['POST', /^\/2\/oauth2\/revoke$/, 'admin'],
+    ['GET', /^\/2\/users\/me$/],
+    // Posting on the connected account only; no delete, no media, no DMs, no likes or follows.
+    ['POST', /^\/2\/tweets$/, 'x_post'],
+  ],
 };
 
 /** Hosts Perch accepts for Luma's authorization server (from metadata): luma.com, lu.ma and their subdomains. */

@@ -140,6 +140,7 @@ describe('perch setup', () => {
       'n', // WhatsApp
       'n', // Luma
       'n', // LinkedIn
+      'n', // X
       '', // full-access client (default yes)
       'Claude Code', // client label
     ];
