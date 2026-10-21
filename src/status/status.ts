@@ -8,7 +8,7 @@ import { verifyImapAccount } from '../mail/imapAccounts.js';
 import { MAX_SEND_RECORDS, MailWorkflowLedger } from '../mail/workflowLedger.js';
 import { fetchMicrosoftIdentity } from '../microsoft/accounts.js';
 import { NOTION_VERSION } from '../notion/notion.js';
-import { SLACK_USER_SCOPES } from '../slack/slack.js';
+import { isSlackAuthFailure, isSlackSession, SLACK_USER_SCOPES, slackAuth, slackSessionAddCommand, slackSessionExpired } from '../slack/slack.js';
 import { ROOT_NAMESPACE, type ImapAccount, type StoreData } from '../store/credentialStore.js';
 import { expireDevices, isPublicLocked, OAuthStore } from '../access/state.js';
 import { PERCH_VERSION } from '../version.js';
@@ -118,14 +118,12 @@ function accountsOf(d: StoreData): AccountStatus[] {
     rows.push({ family: 'calendar', id: a.id, label: a.label, provider: 'google', identity: a.email, permissions: p.join(', '), connectedAt: a.createdAt, ...group(a) });
   }
   for (const w of d.slack) {
-    const p = [
-      'read',
-      ...(w.scopes.includes('search:read') ? ['search'] : []),
-      ...(w.scopes.includes('chat:write') ? ['post'] : []),
-      ...(w.scopes.includes('im:write') || w.scopes.includes('mpim:write') ? ['open dm'] : []),
-    ];
+    // Session workspaces (unofficial) report no scopes: nothing to check, Slack decides per call.
+    const session = isSlackSession(w);
+    const has = (s: string) => session || w.scopes.includes(s);
+    const p = ['read', ...(has('search:read') ? ['search'] : []), ...(has('chat:write') ? ['post'] : []), ...(has('im:write') || has('mpim:write') ? ['open dm'] : [])];
     // Scopes as Slack reported them at connect time (x-oauth-scopes); a missing one is a hint, not a failure.
-    const missing = SLACK_USER_SCOPES.filter((s) => !w.scopes.includes(s));
+    const missing = SLACK_USER_SCOPES.filter((s) => !has(s));
     rows.push({
       family: 'slack',
       id: w.id,
@@ -134,9 +132,11 @@ function accountsOf(d: StoreData): AccountStatus[] {
       identity: [w.teamName ?? w.teamId, w.userName].filter(Boolean).join(' / '),
       permissions: p.join(', '),
       connectedAt: w.createdAt,
-      ...(missing.length
-        ? { hint: `token lacks ${missing.join(', ')}: reinstall the app with the current manifest (perch slack manifest), then perch slack remove ${w.id} and perch slack add` }
-        : {}),
+      ...(session
+        ? { hint: `session (unofficial): browser session instead of an app; when it expires: ${slackSessionAddCommand(w.label)}` }
+        : missing.length
+          ? { hint: `token lacks ${missing.join(', ')}: reinstall the app with the current manifest (perch slack manifest), then perch slack remove ${w.id} and perch slack add` }
+          : {}),
     });
   }
   for (const a of d.whatsapp) {
@@ -202,7 +202,7 @@ async function checkAccount(ctx: PerchContext, d: StoreData, a: AccountStatus, o
       return;
     case 'notion': {
       const ws = d.notion.find((w) => w.id === a.id)!;
-      await up.json('notion', { method: 'GET', path: '/v1/users/me', headers: { authorization: `Bearer ${ws.token}`, 'notion-version': NOTION_VERSION } });
+      await up.json('notion', { method: 'GET', path: '/v1/users/me', headers: { authorization: `Bearer ${await ctx.notion.accessToken(ws)}`, 'notion-version': NOTION_VERSION } });
       return;
     }
     case 'mail':
@@ -215,9 +215,10 @@ async function checkAccount(ctx: PerchContext, d: StoreData, a: AccountStatus, o
       return;
     case 'slack': {
       const ws = d.slack.find((w) => w.id === a.id)!;
-      const r = await up.json<{ ok?: boolean; error?: unknown }>('slack', { method: 'GET', path: '/api/auth.test', headers: { authorization: `Bearer ${ws.token}` } });
+      const r = await up.json<{ ok?: boolean; error?: unknown }>('slack', { method: 'GET', path: '/api/auth.test', ...slackAuth(ws) });
       if (r.ok !== true) {
         const code = typeof r.error === 'string' && /^[a-z_]{1,64}$/.test(r.error) ? r.error : 'unknown_error';
+        if (isSlackSession(ws) && isSlackAuthFailure(code)) throw slackSessionExpired(code, ws.label);
         throw new PerchError(`Slack refused the token (${code}); reconnect with perch slack add`, 'upstream_error');
       }
       return;

@@ -6,8 +6,10 @@ import type { SendWorkflow } from '../mail/workflow.js';
 import { fanOut, type FanOutResult } from '../fanout.js';
 import { newAccountId, validateLabel } from '../ids.js';
 import type { CredentialStore, NotionWorkspace } from '../store/credentialStore.js';
-import { UpstreamError, type Upstream } from '../upstream.js';
+import { UpstreamError, type CallOptions, type Upstream } from '../upstream.js';
 import { NotionWriter } from './notionWrite.js';
+import { createNotionTokenProvider } from './oauth.js';
+import type { RefreshingTokenProvider } from '../oauth/tokenProvider.js';
 
 /** Pinned Notion API version (data sources model). */
 export const NOTION_VERSION = '2026-03-11';
@@ -128,6 +130,38 @@ export async function addNotionWorkspace(
   });
 }
 
+export interface NotionVisibility {
+  /** Pages and data sources in the first search page (at most `pageSize`). */
+  count: number;
+  /** More exist than were counted. */
+  more: boolean;
+}
+
+/**
+ * One cheap search call (page_size small) after connecting: how much the integration can see. Undefined when the
+ * call fails (the workspace is stored either way; this is only a hint).
+ */
+export async function countVisibleNotionObjects(upstream: Upstream, token: string, pageSize = 10): Promise<NotionVisibility | undefined> {
+  try {
+    const list = await upstream.json<{ results?: unknown[]; has_more?: boolean }>('notion', {
+      method: 'POST',
+      path: '/v1/search',
+      headers: headers(token),
+      json: { page_size: pageSize },
+    });
+    return { count: Array.isArray(list.results) ? list.results.length : 0, more: list.has_more === true };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Access token for API calls: OAuth workspaces with a refresh token go through the provider, others use the stored token. */
+export type NotionTokenSource = (ws: NotionWorkspace) => Promise<string>;
+
+export function notionTokenSource(tokens: RefreshingTokenProvider<NotionWorkspace>): NotionTokenSource {
+  return async (ws) => (ws.refreshToken ? tokens.getAccessToken(ws.id) : ws.token);
+}
+
 /** Local disconnect only. The PAT itself must be revoked in Notion's settings. */
 export async function removeNotionWorkspace(store: CredentialStore, id: string): Promise<void> {
   await store.update((data) => {
@@ -163,7 +197,22 @@ export class NotionService {
     opts: { sleep?: (ms: number) => Promise<void>; workflow?: SendWorkflow; audit?: AuditLog } = {},
   ) {
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
-    if (opts.workflow && opts.audit) this.write = new NotionWriter(store, upstream, opts.workflow, opts.audit);
+    this.tokens = createNotionTokenProvider(store, upstream);
+    this.accessToken = notionTokenSource(this.tokens);
+    if (opts.workflow && opts.audit) this.write = new NotionWriter(store, upstream, opts.workflow, opts.audit, this.accessToken);
+  }
+
+  /** Refreshing provider for OAuth workspaces with expiring tokens (shared with the status check). */
+  readonly tokens: RefreshingTokenProvider<NotionWorkspace>;
+  readonly accessToken: NotionTokenSource;
+
+  private async call<T>(ws: NotionWorkspace, opts: Omit<CallOptions, 'headers'>): Promise<T> {
+    try {
+      return await this.upstream.json<T>('notion', { ...opts, headers: headers(await this.accessToken(ws)) });
+    } catch (err) {
+      if (ws.refreshToken && err instanceof UpstreamError && err.status === 401) this.tokens.invalidate(ws.id);
+      throw err;
+    }
   }
 
   /** Asserts notion_read for the workspace (before any lookup or I/O), then loads it. */
@@ -210,11 +259,11 @@ export class NotionService {
   }
 
   private get<T>(budget: RetryBudget, ws: NotionWorkspace, path: string, query?: Record<string, string | number | undefined>) {
-    return this.withRetry(budget, () => this.upstream.json<T>('notion', { method: 'GET', path, query, headers: headers(ws.token) }));
+    return this.withRetry(budget, () => this.call<T>(ws, { method: 'GET', path, query }));
   }
 
   private post<T>(budget: RetryBudget, ws: NotionWorkspace, path: string, json: unknown) {
-    return this.withRetry(budget, () => this.upstream.json<T>('notion', { method: 'POST', path, json, headers: headers(ws.token) }));
+    return this.withRetry(budget, () => this.call<T>(ws, { method: 'POST', path, json }));
   }
 
   /** Title search over pages and data sources (Notion does not guarantee full-text matching). */

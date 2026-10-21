@@ -123,6 +123,11 @@ export const SLACK_UPLOAD_PATH = /^\/upload\/v1\/[A-Za-z0-9_-]{1,2048}$/;
  * The name may be percent-encoded but never an encoded '/', backslash or '.', and never contain '..'.
  */
 export const SLACK_DOWNLOAD_PATH = /^\/files-pri\/[TE][A-Z0-9]{2,30}-(F[A-Z0-9]{2,30})\/(?:download\/)?(?!.*\.\.)(?!.*%(?:2[fFeE]|5[cC]))[A-Za-z0-9._~%()+-]{1,255}$/;
+/**
+ * Value of Slack's browser cookie `d` for session workspaces (xoxd-…), URL-encoded as the browser sends it.
+ * No ';', ',', spaces or control characters, so it can never smuggle another cookie or header.
+ */
+export const SLACK_SESSION_COOKIE = /^xoxd-[A-Za-z0-9%._~-]{20,2000}$/;
 /** WhatsApp JIDs Perch reads and writes to: people (phone or LID) and groups. Never status/newsletter/broadcast. */
 export const WHATSAPP_JID = /^(?:[0-9]{5,20}@s\.whatsapp\.net|[0-9]{5,20}@lid|[0-9]{5,20}(?:-[0-9]{5,20})?@g\.us)$/;
 const JID_PATH = '[0-9]{5,20}(?:-[0-9]{5,20})?%40(?:s\\.whatsapp\\.net|lid|g\\.us)';
@@ -160,6 +165,8 @@ const ROUTES: Record<Service, Route[]> = {
   ],
   notion: [
     ['GET', /^\/v1\/users\/me$/],
+    // OAuth code exchange and refresh (public integrations); internal callers only, never reachable from a client grant.
+    ['POST', /^\/v1\/oauth\/token$/, 'admin'],
     ['POST', /^\/v1\/search$/],
     ['GET', new RegExp(`^/v1/pages/${NOTION_ID}$`)],
     ['GET', new RegExp(`^/v1/blocks/${NOTION_ID}/children$`)],
@@ -502,6 +509,11 @@ export interface CallOptions {
   capability?: RouteCapability;
   /** Only for services without a fixed origin (GOWA): the configured instance origin, re-validated here. */
   origin?: string;
+  /**
+   * Slack session workspaces only: the stored `d` cookie, sent as `Cookie: d=<value>`. Accepted for the
+   * slack and slackfiles services only; a raw Cookie header in `headers` is always refused.
+   */
+  slackCookie?: string;
 }
 
 const SAFE_CODE = /^[A-Za-z_]{1,64}$/;
@@ -516,7 +528,7 @@ function extractCode(service: Service, body: Buffer): string | undefined {
   if (!parsed || typeof parsed !== 'object') return undefined;
   const o = parsed as Record<string, unknown>;
   let code: unknown;
-  if (service === 'notion') code = o.code;
+  if (service === 'notion') code = o.code ?? o.error; // the OAuth token endpoint answers { error: "invalid_grant" }
   else if (typeof o.error === 'string') code = o.error;
   else if (o.error && typeof o.error === 'object') {
     const e = o.error as { errors?: Array<{ reason?: unknown }>; status?: unknown; code?: unknown };
@@ -558,7 +570,15 @@ export class Upstream {
     for (const [k, v] of Object.entries(opts.query ?? {})) {
       if (v !== undefined) url.searchParams.set(k, String(v));
     }
+    if (Object.keys(opts.headers ?? {}).some((k) => k.toLowerCase() === 'cookie')) {
+      throw new PerchError(`Blocked a raw Cookie header for ${SERVICE_NAMES[service]}`, 'route_not_allowed');
+    }
     const headers: Record<string, string> = { accept: 'application/json', ...opts.headers };
+    if (opts.slackCookie !== undefined) {
+      if (service !== 'slack' && service !== 'slackfiles') throw new PerchError(`Blocked the Slack session cookie for ${SERVICE_NAMES[service]}`, 'route_not_allowed');
+      if (!SLACK_SESSION_COOKIE.test(opts.slackCookie)) throw new PerchError('The stored Slack session cookie has an unexpected format', 'bad_argument');
+      headers.cookie = `d=${opts.slackCookie}`;
+    }
     let body: string | undefined;
     if (opts.json !== undefined) {
       headers['content-type'] = 'application/json';

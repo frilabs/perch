@@ -1,3 +1,4 @@
+import { defaultNotionClientFile } from './notion/oauth.js';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { PerchError } from './errors.js';
@@ -32,6 +33,8 @@ export interface PerchConfig {
   microsoftClientIdSource?: 'env' | 'file';
   /** Fallback file written by `perch microsoft client setup` (~/.config/perch/microsoft-client-id). */
   microsoftClientIdFile: string;
+  /** Notion OAuth client (public integration): ~/.config/perch/notion-client.json, 0600. */
+  notionClientFile: string;
   /** Why the client-id file exists but was not used (insecure mode, not a GUID, …). */
   microsoftClientIdFileError?: string;
   /** Entra tenant for sign-in: common (default), consumers, organizations, a tenant GUID or domain. */
@@ -112,6 +115,7 @@ export function resolveConfig(env: Record<string, string | undefined>): PerchCon
     googleClientDefaultFile: path.resolve(env.XDG_CONFIG_HOME || path.join(env.HOME || home, '.config'), 'perch', 'google-client.json'),
     ...microsoft,
     microsoftClientIdFile: msFile,
+    notionClientFile: defaultNotionClientFile(env.XDG_CONFIG_HOME || path.join(env.HOME || home, '.config')),
     microsoftTenant: env.PERCH_MICROSOFT_TENANT?.trim() || 'common',
     ...(env.PERCH_CLIENT_TOKEN_FILE ? { clientTokenFile: path.resolve(env.PERCH_CLIENT_TOKEN_FILE) } : {}),
     ...(env.PERCH_PUBLIC_BASE_URL ? { publicBaseUrl: env.PERCH_PUBLIC_BASE_URL.trim() } : {}),

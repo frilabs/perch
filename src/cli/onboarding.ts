@@ -165,14 +165,15 @@ const SERVICES: readonly SetupService[] = [
     cmd: 'notion',
     title: 'Notion',
     needs: () =>
-      'Create a personal access token per workspace (notion.so/my-integrations); for writing enable "Read/Update/Insert content" and "Read/Insert comments", and share the pages with it. The token is asked hidden.\n',
+      'Per workspace: a token (Perch shows the steps) or OAuth (no owner rights needed).\n',
     args: async () => [],
   },
   {
     cmd: 'slack',
     title: 'Slack',
     needs: () =>
-      'Per workspace: Perch shows the app manifest and the steps to create and install the Slack app, then asks for the "User OAuth Token" (xoxp-…) hidden.\n',
+      'Per workspace: either the Slack app (official; Perch shows the manifest and the steps, then asks for the "User OAuth Token" xoxp-… hidden) ' +
+      'or your browser session (unofficial, no admin needed; Perch warns first and shows how to copy cookie and token).\n',
     args: async () => [],
   },
   {

@@ -59,10 +59,13 @@ import { createMcpServer } from '../mcp/server.js';
 import { registerMicrosoftAccount, removeMicrosoftAccount } from '../microsoft/accounts.js';
 import { runMicrosoftAuthorization, validateTenant } from '../microsoft/oauth.js';
 import { cmdMicrosoftClient, ensureMicrosoftClientId } from './microsoftClient.js';
-import { maybeShowSlackGuide } from './slackGuide.js';
-import { addNotionWorkspace, removeNotionWorkspace } from '../notion/notion.js';
+import { chooseSlackMode, confirmSlackSession, maybeShowSlackGuide, maybeShowSlackSessionGuide } from './slackGuide.js';
+import { addNotionWorkspace, countVisibleNotionObjects, removeNotionWorkspace, type NotionVisibility } from '../notion/notion.js';
+import { runNotionAuthorization, upsertNotionOAuthWorkspace } from '../notion/oauth.js';
+import { cmdNotionClient, ensureNotionClient } from './notionClient.js';
+import { maybeShowNotionGuide } from './notionGuide.js';
 import { SLACK_APP_MANIFEST } from '../slack/manifest.js';
-import { addSlackWorkspace, removeSlackWorkspace } from '../slack/slack.js';
+import { addSlackWorkspace, isSlackSession, normalizeSlackCookie, removeSlackWorkspace } from '../slack/slack.js';
 import { ensurePrivateDir, pathExists, readPrivateFile, writePrivateFileAtomic, writePrivateFileExclusive } from '../secureFs.js';
 import { renameRecord } from '../store/rename.js';
 import { CredentialStore, initStore, type GoogleAccountGroup, type ImapAccount, type StoreData } from '../store/credentialStore.js';
@@ -156,7 +159,14 @@ Usage:
                                                one service of it (never revoked: the login is shared). --revoke ends
                                                Google's grant for that account and OAuth client; refused while another
                                                stored login of the same account uses it, unless --force
-  perch notion add --label NAME                PAT is read via a masked terminal prompt
+  perch notion add --label NAME [--internal|--oauth] [--skip-guide] [--timeout SECONDS]
+                                               --internal: shows the integration steps, then reads the
+                                               Internal Integration Secret (ntn_…) via a masked prompt;
+                                               --oauth: public integration, login in the browser (port 8769),
+                                               works without owner rights; same workspace again = update.
+                                               Without a flag Perch asks
+  perch notion client setup | show            guided Notion OAuth client (public integration); stored in
+                                               ~/.config/perch/notion-client.json (0600)
   perch notion list | remove ID
   perch gmail add --label NAME [--allow-drafts] [--allow-send] [--allow-modify] [--port N] [--timeout SECONDS] [--login-hint EMAIL]
                                                Gmail only, separate login (the usual way: perch google add --services gmail)
@@ -177,6 +187,8 @@ Usage:
   perch google-productivity list | remove ID [--revoke [--force]]
   perch slack manifest                         print the Slack app manifest (create one internal app per workspace)
   perch slack add --label NAME [--skip-guide]  shows the app setup steps first, then reads the user token (xoxp-…)
+  perch slack add --label NAME --session [--yes] [--skip-guide]   UNOFFICIAL, no admin needed: browser session
+                                               (cookie d=xoxd-… and token xoxc-…, both hidden); same team = update
                                                via a masked terminal prompt
   perch slack list | remove ID
   perch whatsapp install [--yes] [--dir PATH] [--port N]   download the pinned GOWA bridge (SHA-256 checked), run it as a
@@ -203,7 +215,7 @@ Usage:
 Configuration is read from environment variables (see .env.example). Secrets are never
 accepted as command-line arguments. Perch serves exactly one operator per installation.`;
 
-const SECRET_FLAG = /^--?(token|pat|secret|client-secret|refresh-token|access-token|password|key|api-key)(=|$)/i;
+const SECRET_FLAG = /^--?(token|pat|secret|client-secret|refresh-token|access-token|password|key|api-key|cookie|session-cookie)(=|$)/i;
 
 class UsageError extends PerchError {
   constructor(message: string) {
@@ -237,7 +249,8 @@ function formatSlack(data: StoreData): string[] {
   const lines = ['Slack workspaces (labels are user-assigned):'];
   if (!data.slack.length) lines.push('  (none)');
   for (const w of data.slack) {
-    lines.push(`  ${w.id}  "${w.label}"  ${w.teamName ?? w.teamId}  user ${w.userName ?? w.userId}  ${w.scopes.includes('chat:write') ? 'read+post' : 'read'}  connected ${w.createdAt}`);
+    const mode = isSlackSession(w) ? 'read+post  session (unofficial)' : w.scopes.includes('chat:write') ? 'read+post' : 'read';
+    lines.push(`  ${w.id}  "${w.label}"  ${w.teamName ?? w.teamId}  user ${w.userName ?? w.userId}  ${mode}  connected ${w.createdAt}`);
   }
   return lines;
 }
@@ -335,7 +348,8 @@ function formatAccounts(data: StoreData, which: AccountSection): string {
     if (!data.notion.length) lines.push('  (none)');
     for (const w of data.notion) {
       const owner = w.tokenOwner?.name ? `  token owner: ${w.tokenOwner.name}` : '';
-      lines.push(`  ${w.id}  "${w.label}"${owner}  connected ${w.createdAt}`);
+      const via = w.authMode === 'oauth' ? `  via OAuth${w.workspaceName ? ` (${w.workspaceName})` : ''}` : '';
+      lines.push(`  ${w.id}  "${w.label}"${owner}${via}  connected ${w.createdAt}`);
     }
   }
   if (which === 'all') lines.push(...formatMail(data, 'all'), ...formatProductivity(data), ...formatSlack(data), ...formatWhatsapp(data));
@@ -774,10 +788,34 @@ async function cmdNotion(config: PerchConfig, io: CliIo, sub: string | undefined
     );
     return;
   }
-  if (sub !== 'add') throw new UsageError('Usage: perch notion add|list|remove');
+  if (sub === 'client') return cmdNotionClient(config, io, rest[0]);
+  if (sub !== 'add') throw new UsageError('Usage: perch notion add|list|remove|client');
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
-  const token = await io.readSecret(`Notion personal access token for "${values.label}" (input hidden): `);
-  const ws = await addNotionWorkspace(store, new Upstream(io.transport ?? createFetchTransport()), {
+  const upstream = new Upstream(io.transport ?? createFetchTransport());
+  const hasWorkspace = (await store.read()).notion.length > 0;
+  if ((await chooseNotionMode(io, values)) === 'oauth') {
+    const timeoutS = values.timeout !== undefined ? Number(values.timeout) : DEFAULT_AUTH_TIMEOUT_MS / 1000;
+    if (!Number.isInteger(timeoutS) || timeoutS < 1 || timeoutS > MAX_AUTH_TIMEOUT_MS / 1000) {
+      throw new UsageError(`--timeout must be a whole number of seconds between 1 and ${MAX_AUTH_TIMEOUT_MS / 1000}`);
+    }
+    const client = await ensureNotionClient(config, io);
+    const grant = await runNotionAuthorization({
+      client,
+      upstream,
+      timeoutMs: timeoutS * 1000,
+      ...loginPrompts(io, 'choose the workspace and the pages Perch may use', timeoutS * 1000),
+    });
+    const { workspace: ws, updated } = await upsertNotionOAuthWorkspace(store, { label: values.label, client, grant });
+    io.stdout(
+      `${updated ? 'Updated' : 'Connected'} Notion workspace ${ws.id} as "${ws.label}"` +
+        `${ws.workspaceName ? ` (${ws.workspaceName})` : ''} via OAuth${ws.refreshToken ? ' (refreshing token)' : ''}.\n`,
+    );
+    io.stdout(notionVisibilityLine(await countVisibleNotionObjects(upstream, grant.access_token!), 'oauth'));
+    return;
+  }
+  await maybeShowNotionGuide(io, { skip: values['skip-guide'] === true, hasWorkspace });
+  const token = await io.readSecret(`Notion Internal Integration Secret (ntn_…) for "${values.label}" (input hidden): `);
+  const ws = await addNotionWorkspace(store, upstream, {
     label: values.label,
     token,
   });
@@ -785,6 +823,35 @@ async function cmdNotion(config: PerchConfig, io: CliIo, sub: string | undefined
     `Connected Notion workspace ${ws.id} as "${ws.label}"` +
       `${ws.tokenOwner?.name ? ` (token owner: ${ws.tokenOwner.name})` : ''}.\n`,
   );
+  io.stdout(notionVisibilityLine(await countVisibleNotionObjects(upstream, ws.token), 'token'));
+}
+
+/** --oauth / --internal, else asked in a terminal, else the internal token (the masked prompt then fails as before). */
+async function chooseNotionMode(io: CliIo, values: Record<string, unknown>): Promise<'token' | 'oauth'> {
+  if (values.oauth === true && values.internal === true) throw new UsageError('Use either --oauth or --internal');
+  if (values.oauth === true) return 'oauth';
+  if (values.internal === true || !io.readLine) return 'token';
+  io.stdout(
+    '\nNotion can be connected in two ways:\n' +
+      '  [t]oken  internal integration (in team workspaces often owners only)\n' +
+      '  [o]auth  public integration, login in the browser (no owner rights needed)\n',
+  );
+  for (;;) {
+    const a = (await io.readLine('Connect via [t]oken or [o]auth? [T/o] ')).trim().toLowerCase();
+    if (a === '' || a === 't' || a === 'token') return 'token';
+    if (a === 'o' || a === 'oauth') return 'oauth';
+  }
+}
+
+/** Post-connect hint from one small search call (no line when the call failed). */
+function notionVisibilityLine(v: NotionVisibility | undefined, mode: 'token' | 'oauth'): string {
+  if (!v) return '';
+  if (v.count === 0) {
+    return mode === 'oauth'
+      ? 'No page shared yet: run the same command again and select pages in Notion, or open a page: ••• → Connections → Perch.\n'
+      : 'No page shared yet: open a page in Notion, ••• → Connections → Perch (subpages inherit access).\n';
+  }
+  return `Perch can see ${v.more ? `at least ${v.count}` : v.count} page(s)/data source(s) in this workspace.\n`;
 }
 
 function oauthTiming(values: Record<string, unknown>) {
@@ -1015,15 +1082,42 @@ async function cmdSlack(config: PerchConfig, io: CliIo, sub: string | undefined,
   if (sub === 'remove') {
     const id = rest[0];
     if (!id) throw new UsageError('Usage: perch slack remove ID');
+    const session = (await store.read()).slack.some((w) => w.id === id && isSlackSession(w));
     await removeSlackWorkspace(store, id);
-    io.stdout(`Disconnected ${id} locally. The token stays valid until you uninstall the app (or revoke the token) in that Slack workspace.\n`);
+    io.stdout(
+      session
+        ? `Disconnected ${id} locally. The browser session stays valid until you sign out of Slack in that browser.\n`
+        : `Disconnected ${id} locally. The token stays valid until you uninstall the app (or revoke the token) in that Slack workspace.\n`,
+    );
     return;
   }
   if (sub !== 'add') throw new UsageError('Usage: perch slack manifest|add|list|remove');
   if (typeof values.label !== 'string') throw new UsageError('--label is required');
-  await maybeShowSlackGuide(io, { skip: values['skip-guide'] === true, hasWorkspace: (await store.read()).slack.length > 0 });
+  const before = (await store.read()).slack;
+  const guide = { skip: values['skip-guide'] === true, hasWorkspace: before.length > 0 };
+  const mode = values.session === true ? 'session' : await chooseSlackMode(io);
+  if (mode === 'session') {
+    await confirmSlackSession(io, { yes: values.yes === true });
+    // Seen before when a session workspace exists: then one [y/N] question, Enter skips the steps.
+    await maybeShowSlackSessionGuide(io, { skip: guide.skip, hasWorkspace: before.some(isSlackSession) });
+    const sessionCookie = await io.readSecret(`Slack cookie "d" (xoxd-…) for "${values.label}" (input hidden): `);
+    normalizeSlackCookie(sessionCookie); // a wrong value fails here, before the token is asked
+    const token = await io.readSecret(`Slack session token (xoxc-…) for "${values.label}" (input hidden): `);
+    const ws = await addSlackWorkspace(store, new Upstream(io.transport ?? createFetchTransport()), { label: values.label, token, sessionCookie });
+    const updated = before.some((w) => w.id === ws.id);
+    io.stdout(
+      `${updated ? 'Updated' : 'Connected'} Slack workspace ${ws.id} "${ws.label}" (${ws.teamName ?? ws.teamId}, user ${ws.userName ?? ws.userId}) ` +
+        'with your browser session (unofficial).\n' +
+        (updated ? 'Same workspace id: client grants stay valid.\n' : '') +
+        'When the session expires (e.g. after signing out of Slack), run this command again.\n' +
+        `Posting needs a client grant: perch client add --label NAME --allow slack_read,slack_send --account ${ws.id}\n`,
+    );
+    return;
+  }
+  await maybeShowSlackGuide(io, guide);
   const token = await io.readSecret(`Slack user token (xoxp-…) for "${values.label}" (input hidden): `);
   const ws = await addSlackWorkspace(store, new Upstream(io.transport ?? createFetchTransport()), { label: values.label, token });
+  if (before.some((w) => w.id === ws.id)) io.stdout(`Switched Slack workspace ${ws.id} from the browser session to the app (same id, client grants stay valid).\n`);
   const missing = ['search:read', 'chat:write', 'reactions:read', 'reactions:write', 'files:read', 'files:write', 'im:write', 'mpim:write'].filter((s) => !ws.scopes.includes(s));
   io.stdout(
     `Connected Slack workspace ${ws.id} "${ws.label}" (${ws.teamName ?? ws.teamId}, user ${ws.userName ?? ws.userId}).\n` +
@@ -1341,6 +1435,9 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         'keep-device': { type: 'boolean' },
         'no-check': { type: 'boolean' },
         'skip-guide': { type: 'boolean' },
+        oauth: { type: 'boolean' },
+        internal: { type: 'boolean' },
+        session: { type: 'boolean' },
         'read-all': { type: 'boolean' },
         'allow-write': { type: 'boolean' },
         'allow-modify': { type: 'boolean' },

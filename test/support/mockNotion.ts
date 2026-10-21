@@ -40,6 +40,10 @@ export interface MockWorkspace {
   dataSources: Array<{ id: string; title: string; rows: Array<{ id: string; title: string; properties?: Record<string, unknown> }> }>;
   comments: MockComment[];
   databases: Array<{ id: string; title: string; dataSourceIds: string[] }>;
+  /** Notion's workspace_id (OAuth token responses). */
+  workspaceId: string;
+  /** Access tokens issued through the MOCK OAuth endpoint (accepted like the internal token). */
+  oauthTokens: Set<string>;
 }
 
 let counter = 0;
@@ -90,9 +94,71 @@ export class MockNotion {
       dataSources: [],
       databases: [],
       comments: [],
+      workspaceId: `${mockId().slice(0, 8)}-0000-4000-8000-${mockId().slice(-12)}`,
+      oauthTokens: new Set(),
     };
     this.workspaces.push(ws);
     return ws;
+  }
+
+  /** MOCK public integration (OAuth). */
+  readonly oauthClient = { id: `${'c'.repeat(8)}-mock-client-id`, secret: dummySecret('NOTION-OAUTH-SECRET') };
+  /** Whether token responses carry refresh_token/expires_in (newer Notion) or not (non-expiring tokens). */
+  oauthIssuesRefreshTokens = false;
+  private oauthCodes = new Map<string, { ws: MockWorkspace; redirectUri: string }>();
+  private refreshTokens = new Map<string, MockWorkspace>();
+  readonly tokenRequests: Array<{ grant_type?: unknown; basicOk: boolean }> = [];
+  /** Refresh tokens handed out so far (for "never printed" checks). */
+  readonly issuedRefreshTokens: string[] = [];
+
+  /** The user approved the consent screen for `ws`: returns the code the browser redirect would carry. */
+  approve(authUrl: string, ws: MockWorkspace): string {
+    const u = new URL(authUrl);
+    if (u.origin + u.pathname !== 'https://api.notion.com/v1/oauth/authorize') throw new Error('MOCK: wrong authorize URL');
+    if (u.searchParams.get('client_id') !== this.oauthClient.id || u.searchParams.get('owner') !== 'user') throw new Error('MOCK: bad authorize params');
+    const code = dummySecret('NOTION-CODE');
+    this.oauthCodes.set(code, { ws, redirectUri: u.searchParams.get('redirect_uri')! });
+    return code;
+  }
+
+  private issue(ws: MockWorkspace) {
+    const access = dummySecret('NOTION-OAUTH-ACCESS');
+    ws.oauthTokens.add(access);
+    const refresh = this.oauthIssuesRefreshTokens ? dummySecret('NOTION-REFRESH') : undefined;
+    if (refresh) {
+      this.refreshTokens.set(refresh, ws);
+      this.issuedRefreshTokens.push(refresh);
+    }
+    return {
+      access_token: access,
+      token_type: 'bearer',
+      bot_id: mockId(),
+      workspace_id: ws.workspaceId,
+      workspace_name: `Dummy workspace ${ws.owner.name}`,
+      owner: { type: 'user', user: { object: 'user', id: ws.owner.id, name: ws.owner.name, type: 'person' } },
+      ...(refresh ? { refresh_token: refresh, expires_in: 3600 } : {}),
+    };
+  }
+
+  private oauthToken(req: UpstreamRequest): UpstreamResponse {
+    const expected = `Basic ${Buffer.from(`${this.oauthClient.id}:${this.oauthClient.secret}`).toString('base64')}`;
+    const body = req.body ? (JSON.parse(req.body) as Record<string, unknown>) : {};
+    const basicOk = req.headers.authorization === expected;
+    this.tokenRequests.push({ grant_type: body.grant_type, basicOk });
+    if (!basicOk) return json(401, { error: 'invalid_client' });
+    if (body.grant_type === 'authorization_code') {
+      const c = this.oauthCodes.get(String(body.code));
+      if (!c || c.redirectUri !== body.redirect_uri) return json(400, { error: 'invalid_grant' });
+      this.oauthCodes.delete(String(body.code));
+      return json(200, this.issue(c.ws));
+    }
+    if (body.grant_type === 'refresh_token') {
+      const ws = this.refreshTokens.get(String(body.refresh_token));
+      if (!ws) return json(400, { error: 'invalid_grant' });
+      this.refreshTokens.delete(String(body.refresh_token)); // rotation
+      return json(200, this.issue(ws));
+    }
+    return json(400, { error: 'unsupported_grant_type' });
   }
 
   private findBlocks(ws: MockWorkspace, id: string): MockBlock[] | undefined {
@@ -246,7 +312,10 @@ export class MockNotion {
     if (req.headers['notion-version'] !== NOTION_VERSION) {
       return json(400, { object: 'error', code: 'missing_version', message: 'mock' });
     }
-    const ws = this.workspaces.find((w) => `Bearer ${w.token}` === req.headers.authorization);
+    if (req.url.pathname === '/v1/oauth/token' && req.method === 'POST') return this.oauthToken(req);
+    const ws = this.workspaces.find(
+      (w) => `Bearer ${w.token}` === req.headers.authorization || [...w.oauthTokens].some((t) => `Bearer ${t}` === req.headers.authorization),
+    );
     if (!ws) return json(401, { object: 'error', code: 'unauthorized', message: 'mock' });
     if (this.failingTokens.has(ws.token)) return json(503, { object: 'error', code: 'service_unavailable' });
     const limited = (retryAfter: string | null): UpstreamResponse => ({

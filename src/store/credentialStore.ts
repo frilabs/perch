@@ -66,6 +66,16 @@ const NotionWorkspaceSchema = z.object({
   tokenOwner: z
     .object({ id: z.string(), name: z.string().optional(), type: z.string().optional() })
     .optional(),
+  /** How the token was obtained: internal integration secret (absent = 'token') or a public integration via OAuth. */
+  authMode: z.enum(['token', 'oauth']).optional(),
+  /** OAuth only: Notion's workspace_id/workspace_name/bot_id from the token response (same workspace_id = update). */
+  oauthWorkspaceId: z.string().min(1).max(100).optional(),
+  workspaceName: z.string().max(200).optional(),
+  botId: z.string().max(100).optional(),
+  /** OAuth with expiring access tokens only: refresh token and the client it belongs to (like Google accounts). */
+  clientId: z.string().min(1).max(512).optional(),
+  clientSecret: z.string().min(1).max(512).optional(),
+  refreshToken: z.string().min(1).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -148,20 +158,29 @@ const GoogleProductivityAccountSchema = z.object({
 /**
  * Slack workspace connected with a user token (xoxp-…) of an internal app installed in that workspace
  * (docs/slack-app-manifest.json). `scopes` are what Slack reported for the token at onboarding.
+ *
+ * Session mode (docs/SLACK_SESSION_NOTION_GUIDE_SPEC.md §1, unofficial): `authMode: 'session'`, `token` is the
+ * browser session token (xoxc-…) and `sessionCookie` the value of the browser cookie `d` (xoxd-…, URL-encoded
+ * as the browser sends it). Session tokens report no scopes (`scopes` stays empty and is not checked).
+ * Records without `authMode` are app workspaces.
  */
-const SlackWorkspaceSchema = z.object({
-  id: z.string().regex(/^slack-[a-f0-9]{8}$/),
-  label: z.string().min(1).max(100),
-  token: z.string().min(1),
-  teamId: z.string().regex(/^[TE][A-Z0-9]{2,30}$/),
-  teamName: z.string().max(200).optional(),
-  teamUrl: z.string().max(500).optional(),
-  userId: z.string().regex(/^[UW][A-Z0-9]{2,30}$/),
-  userName: z.string().max(200).optional(),
-  scopes: z.array(z.string().max(100)),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+const SlackWorkspaceSchema = z
+  .object({
+    id: z.string().regex(/^slack-[a-f0-9]{8}$/),
+    label: z.string().min(1).max(100),
+    token: z.string().min(1),
+    teamId: z.string().regex(/^[TE][A-Z0-9]{2,30}$/),
+    teamName: z.string().max(200).optional(),
+    teamUrl: z.string().max(500).optional(),
+    userId: z.string().regex(/^[UW][A-Z0-9]{2,30}$/),
+    userName: z.string().max(200).optional(),
+    scopes: z.array(z.string().max(100)),
+    authMode: z.enum(['app', 'session']).optional(),
+    sessionCookie: z.string().min(1).max(4096).optional(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  })
+  .refine((w) => (w.authMode === 'session') === (w.sessionCookie !== undefined), 'a Slack session workspace needs its cookie (and only it)');
 
 /** The namespace's GOWA instance (self-hosted WhatsApp bridge). Basic-auth credentials are stored encrypted. */
 const WhatsappInstanceSchema = z.object({

@@ -1,8 +1,11 @@
 import { PerchError } from '../errors.js';
 
+/** At most this many `*` are echoed: long pasted secrets (Slack session cookie) stay on one terminal line. */
+export const MAX_SECRET_ECHO = 32;
+
 /**
- * Reads a secret from the controlling terminal without echoing it (one `*` per character).
- * Refuses to run without a TTY so secrets never come from arguments, pipes or shell history.
+ * Reads a secret from the controlling terminal without echoing it (one `*` per character, at most
+ * MAX_SECRET_ECHO). Refuses to run without a TTY so secrets never come from arguments, pipes or shell history.
  */
 export function readSecretFromTty(prompt: string): Promise<string> {
   const stdin = process.stdin;
@@ -29,12 +32,12 @@ export function readSecretFromTty(prompt: string): Promise<string> {
         if (ch === '\u0003' || ch === '\u0004') return finish(new PerchError('Aborted', 'aborted'));
         if (ch === '\u007f' || ch === '\b') {
           if (value.length) {
+            if (value.length <= MAX_SECRET_ECHO) process.stderr.write('\b \b');
             value = value.slice(0, -1);
-            process.stderr.write('\b \b');
           }
         } else if (ch >= ' ') {
           value += ch;
-          process.stderr.write('*');
+          if (value.length <= MAX_SECRET_ECHO) process.stderr.write('*');
         }
       }
     };

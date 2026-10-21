@@ -190,19 +190,45 @@ Ein einzeln verbundenes Drive-Konto (ohne Gruppe) vorher mit `perch google remov
 - **Nie:** endgültig löschen, Papierkorb leeren, Eigentümer übertragen oder Rolle „owner“ vergeben. Diese Routen stehen nicht in der Allowlist.
 - Alle Schreibaufrufe stehen im Audit-Log (`perch audit list`), ohne Dateinamen, Inhalte oder E-Mail-Adressen.
 
-## 4. Notion-Workspaces verbinden (PAT pro Workspace)
+## 4. Notion-Workspaces verbinden (Token oder OAuth, pro Workspace)
 
-1. In Notion pro Workspace ein **Personal Access Token** erstellen. Anleitung: <https://developers.notion.com/guides/get-started/personal-access-tokens>
-   - Das Token gilt für genau einen Workspace und erbt die Seitenrechte seines Erstellers.
-   - Admins können PATs einschränken. Gäste und eingeschränkte Mitglieder können keine erstellen.
-   - Das Token läuft nach höchstens einem Jahr ab.
-2. Das Token eintragen. Die Eingabe ist maskiert und funktioniert nur in einem interaktiven Terminal. Als Argument, über eine Pipe oder im Log nimmt Perch es nie entgegen.
+`perch notion add --label NAME` fragt zuerst den Weg (oder per Flag):
+
+- **`[t]oken` / `--internal`:** interne Verbindung mit eigenem Secret. Braucht in Team-Workspaces meist Owner-Rechte.
+- **`[o]auth` / `--oauth`:** öffentliche Verbindung, Anmeldung im Browser. Geht auch, wenn Notion meldet, dass man keine internen Verbindungen erstellen darf.
+
+Ohne Terminal und ohne Flag nimmt Perch den Token-Weg (die verdeckte Abfrage scheitert dann wie bisher).
+
+### 4.0a Token (interne Verbindung)
+
+Vor der verdeckten Abfrage zeigt Perch die Schritte (`--skip-guide` überspringt sie; ist schon ein Workspace verbunden, fragt Perch „Show the steps …? [y/N]“; ohne Terminal keine Anleitung):
+
+1. <https://www.notion.so/profile/integrations> öffnen → *New integration*: Name `Perch`, Workspace wählen, Typ *Internal*, speichern.
+2. *Capabilities*: Read content, Update content, Insert content, Read comments, Insert comments.
+3. Das **Internal Integration Secret** (`ntn_…`) kopieren und verdeckt einfügen. Als Argument, über eine Pipe oder im Log nimmt Perch es nie entgegen.
+4. Perch sieht nur freigegebene Seiten: Seite öffnen → ••• → *Connections* → *Perch* (Unterseiten erben). In Team-Workspaces dürfen oft nur Owner Integrationen anlegen.
 
 ```bash
-perch notion add --label "Privat-Notion"
+perch notion add --label "Privat-Notion"            # fragt Token oder OAuth
+perch notion add --label "Privat-Notion" --internal --skip-guide
 ```
 
 Perch prüft das Token mit `GET /v1/users/me` und speichert den gemeldeten Token-Eigentümer als Information. Das Label vergibt der Nutzer. Perch kann nicht verifizieren, welcher Workspace dahintersteht.
+
+### 4.0b OAuth (öffentliche Verbindung, ohne Owner-Rechte)
+
+Einmal pro Installation braucht Perch einen OAuth-Client; `perch notion add --oauth` (oder `perch notion client setup`) führt durch:
+
+1. <https://www.notion.so/profile/integrations> → *New integration*, Typ *Public* (OAuth), Name `Perch`, *Installable in*: „Any workspace“.
+2. **Redirect URI `http://localhost:8769/notion/callback`**; die übrigen Pflichtfelder (Firma, Website, Datenschutz, AGB, E-Mail) mit eigenen Angaben füllen.
+3. Dieselben *Capabilities* wie oben.
+4. *OAuth Client ID* und *OAuth Client Secret* kopieren und verdeckt einfügen. Perch speichert sie `0600` in `~/.config/perch/notion-client.json` (`perch notion client show` zeigt nur eine gekürzte ID).
+
+Danach öffnet die Anmeldung die Notion-Freigabeseite (`owner=user`, Port 8769 fest; wie bei Google/Microsoft geht auch das Einfügen der Adresse aus der Adresszeile oder ein SSH-Tunnel). Dort wählt man Workspace und Seiten. Für jeden weiteren Workspace fragt Perch nur „Use the stored Notion OAuth client …? [Y/n]“ (`n` richtet den Client neu ein). Derselbe Notion-Workspace erneut aktualisiert den Datensatz (gleiche Id, Grants bleiben).
+
+Perch tauscht den Code an `POST https://api.notion.com/v1/oauth/token` (Basic-Auth mit Client-ID:Secret). Liefert Notion einen `refresh_token`, erneuert Perch das Zugriffstoken darüber (Lock, Persistenz wie bei Google) und speichert dafür den Client verschlüsselt am Workspace; sonst gilt das Token unbefristet. Live noch zu prüfen: ob Notion `http://localhost` als Redirect akzeptiert und ob ein Refresh-Token kommt.
+
+Nach dem Verbinden zählt Perch mit einer kleinen Suche (`page_size` 10), wie viele Seiten/Data Sources sichtbar sind, oder meldet „No page shared yet“ mit dem Weg zur Freigabe.
 
 Lesen dürfen das globale Token (nur lesend) und Client-Grants mit `notion_read`, diese nur in ihren Workspaces.
 
@@ -218,7 +244,7 @@ perch client add --label "Codex Notion" --allow notion_read,notion_write --accou
 - Löschen heißt nur **Papierkorb** (`in_trash`, in Notion wiederherstellbar). Endgültiges Löschen und Änderungen am Datenbank-Schema sind nicht in der Allowlist.
 - Anlegen, Blöcke anhängen und Kommentieren brauchen eine `requestId` (wie beim Senden, Abschnitt 4d): dieselbe ID schreibt nie doppelt, kein automatischer Neuversuch.
 - Grenzen pro Aufruf: höchstens 100 Blöcke (verschachtelte mitgezählt), 512 KiB JSON, 2000 Zeichen pro Rich-Text-Element.
-- **Im Token freischalten (Nutzeraufgabe):** In den Einstellungen des Tokens bzw. der Integration die Fähigkeiten **„Update content“**, **„Insert content“** und für Kommentare **„Read comments“** und **„Insert comments“** aktivieren und die Seiten mit dem Token teilen. Perch kann das vorab nicht prüfen; fehlt eine Fähigkeit, meldet Notion `restricted_resource` und Perch zeigt einen Hinweis darauf.
+- **In der Integration freischalten (Nutzeraufgabe):** In den Einstellungen der Integration die Fähigkeiten **„Update content“**, **„Insert content“** und für Kommentare **„Read comments“** und **„Insert comments“** aktivieren und die Seiten mit dem Token teilen. Perch kann das vorab nicht prüfen; fehlt eine Fähigkeit, meldet Notion `restricted_resource` und Perch zeigt einen Hinweis darauf.
 
 ## 4a. Mail-Konten verbinden (E-Mail-Meilenstein)
 
@@ -455,7 +481,12 @@ perch mail-workflow resolve op-0123456789abcdef01234567 --outcome sent     # ode
 
 ## 4e. Slack-Workspaces verbinden (Slack/WhatsApp-Meilenstein)
 
-Pro Workspace gibt es eine eigene **interne Slack-App** mit einem **User-Token** (`xoxp-…`). Perch liest damit, was du in dem Workspace sehen kannst, und postet (nur mit Client-Grant `slack_send`) **als du**.
+Zwei Wege pro Workspace:
+
+- **App (offiziell, Standard):** eine eigene **interne Slack-App** mit einem **User-Token** (`xoxp-…`), Abschnitte 4e.1 und 4e.2. Braucht die Installation im Workspace, in vielen Workspaces mit Admin-Freigabe.
+- **Session (inoffiziell, ohne Admin):** deine Browser-Sitzung (Token `xoxc-…` + Cookie `d` = `xoxd-…`), Abschnitt 4e.4.
+
+In beiden Fällen liest Perch, was du in dem Workspace sehen kannst, und postet (nur mit Client-Grant `slack_send`) **als du**. Tools, Grants und Endpunkte sind gleich. `perch slack add` fragt im Terminal ohne `--session`: „[a]pp … oder [s]ession …“ (Enter = App); `perch setup` nutzt denselben Ablauf.
 
 Warum keine gemeinsame App für alle Workspaces: Slack drosselt seit 2025 verteilte Apps außerhalb des Marketplace bei `conversations.history`/`conversations.replies` stark (etwa 1 Anfrage pro Minute). Interne Apps, die nur im eigenen Workspace installiert sind, behalten die normalen Limits.
 
@@ -522,7 +553,39 @@ Perch prüft das Token mit `auth.test` und speichert Workspace, Nutzer und die t
 
   **Achtung Limit:** Slack-, WhatsApp- und Mail-Sends teilen sich 1000 Sende-Einträge pro Namespace. Danach schlagen alle Sends fehl, auch Mail (`ledger_full`), bis es einen Ledger-Rollover gibt (`docs/SLACK_WHATSAPP_MILESTONE.md` §6).
 
-Trennen: `perch slack remove ID` entfernt nur lokal. Das Token bleibt gültig, bis du die App im Workspace deinstallierst (App-Seite → **Remove app**).
+Trennen: `perch slack remove ID` entfernt nur lokal. Das Token bleibt gültig, bis du die App im Workspace deinstallierst (App-Seite → **Remove app**); bei einer Session, bis du dich in diesem Browser bei Slack abmeldest.
+
+### 4e.4 Session-Modus (inoffiziell, ohne Admin)
+
+Für Workspaces, in denen du keine App installieren darfst. **Risiken** (Perch zeigt sie vorher und fragt `[y/N]`; ohne Terminal nur mit `--yes`):
+
+- inoffiziell, vermutlich gegen Slacks Bedingungen und ggf. gegen Richtlinien deiner Organisation; Firmen-Workspaces können das erkennen und dich abmelden oder das Konto sperren;
+- Token und Cookie sind so mächtig wie dein Passwort (Lesen und Schreiben als du). Perch speichert beide verschlüsselt und gibt sie nie aus (keine Logs, Fehler, Audit-Einträge oder Status);
+- die Sitzung endet, wenn du dich in diesem Browser bei Slack abmeldest (oder Slack sie beendet).
+
+```bash
+perch slack add --label "Kunde" --session          # Warnung, Anleitung, dann Cookie und Token verdeckt
+perch slack add --label "Kunde" --session --yes --skip-guide
+```
+
+Anleitung (mit `--skip-guide` überspringbar; gibt es schon einen Session-Workspace, fragt Perch „… again? [y/N, Enter skips]“):
+
+1. <https://app.slack.com/client> im Browser öffnen und im Workspace anmelden.
+2. Entwicklerwerkzeuge öffnen: Chrome/Edge/Brave/Firefox Cmd+Opt+I (Windows/Linux Ctrl+Shift+I); Safari vorher Einstellungen → Erweitert → „Funktionen für Webentwickler einblenden“.
+3. **Cookie:** Application (Firefox, Safari: Storage/Speicher) → Cookies → `https://app.slack.com`, Zeile `d`, Wert kopieren (beginnt mit `xoxd-`, enthält `%2F` usw.). Perch nimmt den Wert so, wie der Browser ihn zeigt (mit oder ohne vorangestelltes `d=`) und sendet `Cookie: d=<Wert>` unverändert.
+4. **Token:** in der Konsole diese Zeile einfügen (Chrome verlangt eventuell zuerst die Eingabe `allow pasting`); sie druckt Name und Token (`xoxc-…`) des gerade offenen Workspaces aus `localStorage.localConfig_v2`:
+
+   ```js
+   c = JSON.parse(localStorage.localConfig_v2); t = c.teams[location.pathname.split('/')[2]] || c.teams[c.lastActiveTeamId]; console.log(t.name + '\n' + t.token)
+   ```
+
+5. Prüfen, dass der gedruckte Name der gewünschte Workspace ist; dann Cookie und Token verdeckt einfügen.
+
+Perch prüft beide mit `auth.test` (Bearer-Token + Cookie) und speichert Team, Nutzer, `authMode: session`, Token und Cookie. Lehnt Slack ab, wird nichts gespeichert. **Gleiche Team-Id erneut** (z. B. nach Ablauf) aktualisiert denselben Datensatz: gleiche Id, Client-Grants bleiben gültig. Ein Workspace ist entweder App oder Session; ein `perch slack add` mit App-Token für ein Session-Team stellt ihn auf die App um (gleiche Id).
+
+Session-Tokens melden keine Scopes; Scope-Prüfungen und Neuinstallations-Hinweise entfallen, Slack entscheidet je Aufruf. Den Cookie sendet Perch nur an `slack.com` und `files.slack.com` (Downloads), nie an die vorsignierte Upload-Adresse und nie an andere Dienste; Endpunkte sind dieselben wie bei der App.
+
+**Abgelaufen:** Meldet Slack `invalid_auth`, `not_authed` oder `token_revoked`, antworten die Tools mit „Slack session expired (…): run perch slack add --label … --session again (updates the same workspace)“; `perch status` zeigt den Workspace mit ✗ und diesem Befehl. Session-Workspaces tragen im Status den Hinweis „session (unofficial)“ (im Terminal gelb), in `perch slack list` und `perch_list_accounts` ebenfalls.
 
 ## 4f. WhatsApp über GOWA verbinden (Slack/WhatsApp-Meilenstein)
 
