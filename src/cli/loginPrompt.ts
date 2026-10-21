@@ -14,12 +14,14 @@ export interface LoginPromptIo {
 export function loginPrompts(io: LoginPromptIo, what: string, timeoutMs: number): { onAuthUrl: (url: string) => void; paste?: PasteRedirect } {
   const canPaste = Boolean(io.readPastedUrl);
   const onAuthUrl = (url: string) => {
-    const p = new URL(new URL(url).searchParams.get('redirect_uri')!).port;
+    const redirect = new URL(new URL(url).searchParams.get('redirect_uri')!);
+    const p = redirect.port;
     io.stderr(
       `Open this URL in a browser and ${what}:\n\n${url}\n\n` +
         (canPaste
-          ? 'After you approved, the browser tries to open 127.0.0.1 and shows "This site can\'t be reached" (unless it runs on this ' +
-            'machine). That is expected: copy the complete address from its address bar and paste it here.\n' +
+          ? `After you approved, the browser tries to open ${redirect.host} and shows "This site can't be reached" (unless it runs\n` +
+            'on this machine). That is expected: copy the complete address from its address bar (it contains\n' +
+            `port ${p}) and paste it here.\n` +
             `Or: forward the port first and the login completes by itself: ssh -N -L ${p}:127.0.0.1:${p} <this-server>\n`
           : `The browser must reach port ${p} on this machine (loopback). If the browser runs elsewhere, ` +
             `forward the port first: ssh -N -L ${p}:127.0.0.1:${p} <this-server>\n`) +
