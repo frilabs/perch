@@ -62,11 +62,11 @@ optional platform-specific binaries that `npm ci` installs only on a matching OS
 | lightningcss-win32-arm64-msvc | 1.33.0 | MPL-2.0 | yes | https://registry.npmjs.org/lightningcss-win32-arm64-msvc/-/lightningcss-win32-arm64-msvc-1.33.0.tgz |
 | lightningcss-win32-x64-msvc | 1.33.0 | MPL-2.0 | yes | https://registry.npmjs.org/lightningcss-win32-x64-msvc/-/lightningcss-win32-x64-msvc-1.33.0.tgz |
 | magic-string | 1.4.2 | MIT | no | https://registry.npmjs.org/magic-string/-/magic-string-1.4.2.tgz |
-| nanoid | 3.3.19 | MIT | no | https://registry.npmjs.org/nanoid/-/nanoid-3.3.19.tgz |
+| nanoid | 3.3.20 | MIT | no | https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz |
 | obug | 2.2.1 | MIT | no | https://registry.npmjs.org/obug/-/obug-2.2.1.tgz |
 | picocolors | 1.1.1 | ISC | no | https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz |
 | picomatch | 4.0.7 | MIT | no | https://registry.npmjs.org/picomatch/-/picomatch-4.0.7.tgz |
-| postcss | 8.5.28 | MIT | no | https://registry.npmjs.org/postcss/-/postcss-8.5.28.tgz |
+| postcss | 8.5.31 | MIT | no | https://registry.npmjs.org/postcss/-/postcss-8.5.31.tgz |
 | punycode.js | 2.3.1 | MIT | no | https://registry.npmjs.org/punycode.js/-/punycode.js-2.3.1.tgz |
 | rolldown | 1.2.12 | MIT | no | https://registry.npmjs.org/rolldown/-/rolldown-1.2.12.tgz |
 | smtp-server | 3.19.17 | MIT-0 | no | https://registry.npmjs.org/smtp-server/-/smtp-server-3.19.17.tgz |
@@ -77,6 +77,6 @@ optional platform-specific binaries that `npm ci` installs only on a matching OS
 | tinyglobby | 0.2.17 | MIT | no | https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz |
 | typescript | 5.9.3 | Apache-2.0 | no | https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz |
 | undici-types | 6.21.0 | MIT | no | https://registry.npmjs.org/undici-types/-/undici-types-6.21.0.tgz |
-| vite | 8.3.2 | MIT | no | https://registry.npmjs.org/vite/-/vite-8.3.2.tgz |
+| vite | 8.3.4 | MIT | no | https://registry.npmjs.org/vite/-/vite-8.3.4.tgz |
 | vitest | 5.0.3 | MIT | no | https://registry.npmjs.org/vitest/-/vitest-5.0.3.tgz |
 | why-is-node-running | 3.2.1 | MIT | no | https://registry.npmjs.org/why-is-node-running/-/why-is-node-running-3.2.1.tgz |
