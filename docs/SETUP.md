@@ -804,6 +804,105 @@ perch oauth grant oc-0123456789abcdef --allow luma_read,luma_events --account lu
 
 Perch löscht nie endgültig: Drive, Notion und Mail verschieben nur in den Papierkorb, Slack- und WhatsApp-Nachrichten lassen sich gar nicht löschen. Achtung: Die Anbieter leeren ihre Papierkörbe selbst nach einer Frist (Google Drive und Gmail etwa 30 Tage, Notion 30 Tage, Outlook je nach Einstellung, GMX laut Ordner-Einstellung). Wiederherstellen also zeitnah.
 
+## 4i. LinkedIn: aufs eigene Profil posten
+
+Spezifikation: `docs/LINKEDIN_X_SPEC.md` (von Fritz am 2026-10-21 freigegeben; hebt den früheren Ausschluss von LinkedIn auf). Nur Text-Posts aufs eigene Profil; keine Feeds, Bilder, Kommentare, kein Löschen, keine Unternehmensseiten. Nur gegen Mocks getestet.
+
+### 4i.1 LinkedIn-App anlegen (einmal pro Installation)
+
+`perch linkedin add` (oder `perch setup`, oder `perch linkedin client setup`) führt im Terminal durch diese Schritte:
+
+1. <https://www.linkedin.com/developers/apps> → **Create app**.
+2. App-Name „Perch“. **LinkedIn Page:** LinkedIn verlangt für jede App eine Unternehmensseite. Eine eigene wählen oder vorher anlegen (<https://www.linkedin.com/company/setup/new/>). Logo hochladen, Bedingungen akzeptieren, **Create app**. Verlangt LinkedIn eine Bestätigung der App, den Link als Admin der Seite öffnen.
+3. Reiter **Products:** „Sign In with LinkedIn using OpenID Connect“ und „Share on LinkedIn“ hinzufügen.
+4. Reiter **Auth** → OAuth 2.0 settings → Authorized redirect URLs: `http://localhost:8770/linkedin/callback` eintragen, **Update**.
+5. Im selben Reiter **Client ID** und **Primary Client Secret** kopieren. Perch fragt beide verdeckt ab und speichert sie mit `0600` in `~/.config/perch/linkedin-client.json`. `perch linkedin client show` zeigt Pfad und gekürzte Client-ID, nie das Secret.
+
+### 4i.2 Konto verbinden und erneuern
+
+```bash
+perch linkedin add --label Fritz          # Login im Browser (Port 8770 fest), Adresse einfügen oder Tunnel
+perch linkedin list | remove ID
+```
+
+- Login: OAuth 2.0 (Authorization Code) mit `state`; LinkedIn-Standard-Apps unterstützen kein PKCE, deshalb ohne. Scopes `openid profile w_member_social`. Läuft der Browser auf dem Laptop, zeigt er nach der Freigabe „Seite nicht erreichbar“: die ganze Adresse aus der Adresszeile ins Terminal kopieren (verdeckt). Oder vorher `ssh -N -L 8770:127.0.0.1:8770 <server>`.
+- Perch liest das Mitglied über `GET https://api.linkedin.com/v2/userinfo` (`sub` → `urn:li:person:<sub>`, Name).
+- **Laufzeit:** Der Login gilt 60 Tage, LinkedIn gibt normalerweise kein Refresh Token aus. `perch status` zeigt „connected until …“, ab 7 Tagen vorher einen gelben Hinweis mit `perch linkedin add --label …`; abgelaufen → ✗ (auch mit `--no-check`, Exit-Code 1). Derselbe Befehl erneuert das Konto in place: gleiche Id, gleiche URN, Grants bleiben gültig. Gibt LinkedIn doch ein Refresh Token aus (Partner-Apps), nutzt Perch es wie bei anderen Anbietern.
+- `perch linkedin remove ID` entfernt das Konto lokal (und Grants, die nur dieses Konto abdeckten). Der Zugriff bei LinkedIn endet mit dem Ablauf oder sofort unter LinkedIn → Einstellungen → Datenschutz → Erlaubte Dienste.
+
+### 4i.3 Rechte und Tools
+
+```bash
+perch client add --label friagent --allow linkedin_read,linkedin_post --account linkedin-…
+```
+
+- `linkedin_status { accountId }` (mit `linkedin_read`, auch globales Token): Name, Person-URN, verbunden bis, `loginState` ok/soon/expired, bei Bedarf der Erneuern-Befehl. Kein LinkedIn-Aufruf.
+- `linkedin_post { accountId, text, requestId }` (nur Client-Grant mit `linkedin_post`, für das globale Token nicht gelistet): ein öffentlicher Text-Post (`POST https://api.linkedin.com/rest/posts`, `visibility: PUBLIC`, Main Feed). Höchstens 3000 Zeichen (vor dem Escapen gezählt, Emoji als ein Zeichen), sonst klare Ablehnung ohne Aufruf. Perch escapet `\ | { } @ [ ] ( ) < > # * _ ~` („little text“), der Text erscheint also wörtlich (keine Erwähnungen oder Hashtag-Links). Rückgabe: `postId` (aus `x-restli-id`) und `url` (`https://www.linkedin.com/feed/update/<id>/`).
+- Idempotent über den gemeinsamen Ledger (§4d): gleiche `requestId` mit gleichem Text postet nie doppelt, anderer Text → `idempotency_conflict`. HTTP 4xx = `rejected` (nicht gepostet; 401 nennt den Erneuern-Befehl), Timeout, Netzfehler, 5xx = `indeterminate`, nie automatisch wiederholt; dann aufs Profil schauen. `linkedin_post_status { accountId, requestId }` zeigt den Stand.
+- Audit ohne Text und Token. Abgelaufener Login: klarer Fehler mit `perch linkedin add --label …`, kein Aufruf.
+- `PERCH_LINKEDIN_VERSION` (Format `YYYYMM`, Standard `202608`) setzt den Header `LinkedIn-Version`. LinkedIn stellt alte Versionen nach etwa einem Jahr ab; dann einen aktuellen Monat eintragen.
+
+## 4j. X: auf das eigene Konto posten
+
+Spezifikation: `docs/LINKEDIN_X_SPEC.md` (Abschnitt X). **Nur mit Mocks getestet, nicht live verifiziert.** Perch postet über die X-API v2 im Namen des verbundenen Kontos; Clients sehen die Zugangsdaten nie. Anmeldung: OAuth 2.0 Authorization Code mit PKCE (Scopes `tweet.read tweet.write users.read offline.access`), Zugriff bleibt über Refresh Tokens bestehen (X tauscht das Refresh Token bei jeder Erneuerung aus; Perch speichert das neue verschlüsselt).
+
+> **Kosten:** Die X-API ist kostenpflichtig (pay-per-use) und braucht Guthaben im Developer-Konto. Laut Stand des Auftrags etwa 1,5 US-Cent pro Post, mit Link etwa 20 Cent; die aktuellen Preise bei X prüfen (developer.x.com → Billing). Ohne Guthaben lehnt X jeden Post ab (HTTP 402, Perch meldet `rejected`). Auch der Live-Check von `perch status` (ein `GET /2/users/me` pro X-Konto) kann abgerechnet werden; `perch status --no-check` und das Tool `x_status` fragen X nicht.
+
+### 4j.1 X-Developer-App anlegen (einmal pro Installation, Nutzeraufgabe)
+
+`perch x add` (oder `perch setup`, oder `perch x client setup`) führt im Terminal durch diese Schritte:
+
+1. [developer.x.com/en/portal/dashboard](https://developer.x.com/en/portal/dashboard) öffnen und anmelden; unter **Billing** Guthaben kaufen.
+2. Eine App anlegen (oder die vorhandene im Projekt öffnen).
+3. **User authentication settings → Set up:**
+   - App permissions: **Read and write**
+   - Type of App: **Native App** (öffentlicher Client ohne Secret; empfohlen). **Web App, Automated App or Bot** geht auch (vertraulicher Client mit Secret).
+   - Callback URI / Redirect URL: `http://127.0.0.1:8771/x/callback` (genau so; Perch nutzt fest Port 8771)
+   - Website URL: irgendeine eigene Seite (Pflichtfeld bei X). Speichern.
+4. **Keys and tokens → OAuth 2.0 Client ID and Client Secret:** die Client-ID kopieren (und das Client-Secret, falls X eines zeigt).
+
+Perch fragt Client-ID und Secret verdeckt ab (Secret leer lassen = Native App) und speichert sie mit Modus `0600` in `~/.config/perch/x-client.json`. Öffentlicher Client: Perch schickt die Client-ID im Token-Request; vertraulicher Client: HTTP-Basic-Auth.
+
+```bash
+perch x client show      # gekürzte Client-ID, Art (öffentlich/vertraulich), Redirect-URL
+perch x client setup     # neu einrichten oder ersetzen
+```
+
+### 4j.2 Konto verbinden
+
+```bash
+perch x add --label "Privat" [--timeout 300]
+```
+
+- Der Befehl zeigt die Login-URL (`https://x.com/i/oauth2/authorize?…`, mit `state` und PKCE). Nach der Zustimmung zeigt der Browser „Seite nicht erreichbar“ (er versucht `127.0.0.1:8771`): die komplette Adresse aus der Adresszeile ins Terminal einfügen (verdeckt). Eine Adresse mit falschem `state`, Port oder Pfad lehnt Perch ab und wartet weiter. Alternative: vorher `ssh -N -L 8771:127.0.0.1:8771 homeserver` auf dem Laptop.
+- Perch liest das Konto über `GET /2/users/me` (Id, `@username`, Name).
+- **Gleiches X-Konto erneut** verbinden aktualisiert den Eintrag (gleiche `x-…`-Id, Grants bleiben gültig). So wird auch ein widerrufener Login repariert.
+- Fehlt `tweet.write` (App-Rechte nicht „Read and write“) oder liefert X kein Refresh Token, bricht Perch mit einem klaren Hinweis ab.
+
+```bash
+perch x list
+perch x remove x-1a2b3c4d [--revoke]     # --revoke beendet den Login auch bei X
+```
+
+### 4j.3 Rechte und Tools
+
+```bash
+perch client add --label "Claude X" --allow x_read,x_post --account x-1a2b3c4d
+# oder: perch client add --label "Claude Code" --full   (deckt X mit ab)
+```
+
+| Tool | Wer | Was |
+| --- | --- | --- |
+| `x_status { accountId }` | globales Token, `x_read` | `@username`, Name, Id, Profil-URL, ob gepostet werden kann; nur gespeicherte Daten, keine X-Anfrage |
+| `x_post { accountId, text, requestId }` | nur Grant `x_post` | öffentlicher Text-Post; Rückgabe `postId` und `url` (`https://x.com/i/status/<id>`) |
+| `x_post_status { accountId, requestId }` | nur Grant `x_post` | Stand eines früheren `x_post` desselben Clients |
+
+- **Länge:** höchstens 280 gewichtete Zeichen, vor dem Senden geprüft (zu lang = Fehler, nichts gesendet, nichts abgerechnet). Vereinfachte twitter-text-Gewichtung: jede URL zählt 23 (`http(s)://…`, `www.…` und nackte Domains mit gängiger Endung), Emoji und CJK-Zeichen zählen 2, sonst 1 (nach Unicode-NFC). Grenzfälle (seltene URL-Formen, ungewöhnliche Emoji-Folgen) entscheidet X; lehnt X ab, ist der Post `rejected`.
+- **Nie doppelt:** gleicher `requestId` mit gleichem Text liefert das gespeicherte Ergebnis (`replayed: true`), mit anderem Text einen Fehler. Nur eine eindeutige Ablehnung durch X (HTTP 4xx: z. B. 402 kein Guthaben, 403 doppelter Inhalt oder fehlende Rechte, 429 Limit) ist `rejected`; Timeout, Netzfehler und 5xx sind `indeterminate` und werden nie automatisch wiederholt (Profil prüfen, dann neuer `requestId`).
+- **Login abgelaufen/widerrufen:** Tools und `perch status` melden „Re-authorise: run `perch x add --label <label>`“ (aktualisiert dasselbe Konto).
+- Audit und Fehler enthalten weder Tokens noch Post-Texte.
+- Nicht enthalten: Bilder/Videos, Antworten, Threads, Löschen, fremde Timelines, Likes, DMs.
+
 ## 5a. Status: `perch status` und die Statusseite
 
 **Auf dem Server:**
@@ -818,7 +917,7 @@ perch status --plain      # bisherige schlichte Ausgabe (eine Zeile pro Konto)
 - **Darstellung:** Abschnitte pro Dienst mit Checkboxen. Verbundene Konten stehen als `☑` (oder `✗` bei fehlgeschlagenem Check) mit Label, Adresse und Ergebnis da. Darunter die **Fähigkeiten** des Kontos: aktivierte als `☑` (z. B. lesen, Entwürfe, senden), mögliche, aber nicht aktivierte als `☐` mit dem genauen Befehl, der sie freischaltet (Mail/Drive/Kalender: Konto entfernen und mit der zusätzlichen Option neu verbinden, bestehende Optionen bleiben im Befehl; Slack: App mit aktuellem Manifest neu installieren). Neu verbinden vergibt eine neue Konto-ID; Clients mit Kontoliste bekommen sie nicht automatisch (Hinweis in der Ausgabe). Nicht verbundene Dienste stehen als `☐` mit `perch … add`-Befehl. **Google ist ein Dienst:** ohne Google-Konto eine Zeile „☐ Google (Drive, Gmail, Calendar, Contacts)“ mit `perch google add --label NAME`; verbunden ein Block pro Google-Konto (`── Google · LABEL`) mit den Diensten darunter, je Dienst Konto-ID, Live-Check und die Rechte als `☑`/`☐` (z. B. `☑ read   ☐ write`). Fehlende Rechte und nicht verbundene Dienste nennen den `perch google access …`-Befehl (gleiche IDs). Einzeln verbundene Google-Konten (ohne Gruppe) behalten eigene Abschnitte und ihre bisherigen Hinweise. `--plain` zeigt ohne Google-Konto ebenfalls nur eine Zeile `Google (Drive, Gmail, Calendar, Contacts): none`; die `--json`-Felder sind unverändert. Danach Zugänge (Clients, öffentlicher Zugang, WhatsApp-Bridge), Sende-Speicher als Balken, Audit-Zähler, die Onboarding-Checkliste (`Onboarding N/4`) und das Gesamtergebnis.
 - **Farbe** nur für Status (grün ok, rot Fehler, gelb Hinweis) und nur im Terminal; mit `NO_COLOR=1` oder umgeleiteter Ausgabe ohne Farbe, die Checkboxen bleiben. Die Breite folgt dem Terminal (mindestens 60 Zeichen), lange Werte werden gekürzt, Befehle nie.
 
-- Pro Konto prüft Perch **nur lesend**, ob der Zugang noch funktioniert: Drive `about`, Gmail-Profil, Graph `/me`, Google `userinfo`, Notion `users/me`, Slack `auth.test`, IMAP-/SMTP-Login, GOWA-Gerätestatus.
+- Pro Konto prüft Perch **nur lesend**, ob der Zugang noch funktioniert: Drive `about`, Gmail-Profil, Graph `/me`, Google `userinfo`, Notion `users/me`, Slack `auth.test`, IMAP-/SMTP-Login, GOWA-Gerätestatus, X `users/me`.
 - Der Exit-Code ist 1, sobald ein Check fehlschlägt. Damit eignet sich der Befehl auch für Monitoring, z. B. per Cron.
 
 **Im Browser:** Läuft `perch serve --http`, zeigt `GET /status` dieselbe Übersicht als nur lesende Seite, z. B. `https://homeserver.tailnet-xyz.ts.net/status` (Tailscale Serve) oder `http://127.0.0.1:8765/status` (SSH-Tunnel).

@@ -3,7 +3,7 @@ import { validateLabel } from '../ids.js';
 import type { CredentialStore, StoreData } from './credentialStore.js';
 
 /** Store sections whose records carry a user-chosen `label` (accounts, groups and client grants). */
-const LABELLED = ['googleGroups', 'google', 'notion', 'gmail', 'microsoft', 'imap', 'googleProductivity', 'slack', 'whatsapp', 'luma', 'clients'] as const;
+const LABELLED = ['googleGroups', 'google', 'notion', 'gmail', 'microsoft', 'imap', 'googleProductivity', 'slack', 'whatsapp', 'luma', 'linkedin', 'x', 'clients'] as const;
 
 type Labelled = { id: string; label: string; updatedAt?: string; groupId?: string };
 

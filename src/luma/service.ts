@@ -113,7 +113,7 @@ export async function removeLumaAccount(store: CredentialStore, upstream: Upstre
     data.clients = data.clients
       .map((c) => ({ ...c, accountIds: c.accountIds.filter((x) => x !== id) }))
       .filter((c) => {
-        const keep = c.accountIds.length > 0;
+        const keep = c.full === true || c.accountIds.length > 0;
         if (!keep) removedGrants.push(c.id);
         return keep;
       });

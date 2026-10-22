@@ -238,6 +238,52 @@ const LumaAccountSchema = z.object({
   updatedAt: z.string(),
 });
 
+/**
+ * LinkedIn member connected with the operator's own LinkedIn app (OAuth 2.0, 3-legged; docs/LINKEDIN_X_SPEC.md).
+ * Access tokens live 60 days and LinkedIn normally issues no refresh token: the access token and its expiry are
+ * stored, and `perch linkedin add` again renews it (same id, same person URN). When LinkedIn does issue a refresh
+ * token, it is stored with the client it belongs to and used like every other provider's.
+ */
+const LinkedinAccountSchema = z
+  .object({
+    id: z.string().regex(/^linkedin-[a-f0-9]{8}$/),
+    label: z.string().min(1).max(100),
+    /** OpenID Connect subject from /v2/userinfo; the person URN is urn:li:person:<sub>. */
+    sub: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/),
+    personUrn: z.string().regex(/^urn:li:person:[A-Za-z0-9_-]{1,100}$/),
+    name: z.string().max(200).optional(),
+    accessToken: z.string().min(1).max(4096),
+    accessTokenExpiresAt: z.string(),
+    refreshToken: z.string().min(1).max(4096).optional(),
+    refreshTokenExpiresAt: z.string().optional(),
+    /** Only with a refresh token: the client it belongs to (like Notion OAuth workspaces). */
+    clientId: z.string().min(1).max(512).optional(),
+    clientSecret: z.string().min(1).max(512).optional(),
+    scopes: z.array(z.string().max(100)).max(20),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  })
+  .refine((a) => !a.refreshToken || (a.clientId !== undefined && a.clientSecret !== undefined), 'a LinkedIn refresh token needs its client');
+
+/**
+ * X account (docs/LINKEDIN_X_SPEC.md, X): OAuth 2.0 Authorization Code with PKCE through the operator's X developer app
+ * (public client, or confidential with `clientSecret`). Refresh tokens rotate on every refresh (persisted by the
+ * token provider). `userId`/`username` come from GET /2/users/me; re-adding the same X user updates this record.
+ */
+const XAccountSchema = z.object({
+  id: z.string().regex(/^x-[a-f0-9]{8}$/),
+  label: z.string().min(1).max(100),
+  userId: z.string().regex(/^[0-9]{1,25}$/),
+  username: z.string().regex(/^[A-Za-z0-9_]{1,50}$/),
+  name: z.string().max(200).optional(),
+  clientId: z.string().min(1).max(512),
+  clientSecret: z.string().min(1).max(512).optional(),
+  refreshToken: z.string().min(1).max(4096),
+  scopes: z.array(z.string().max(100)).max(50),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
 /** Mail capabilities (email milestone) apply to mail accounts only. */
 export const MAIL_CAPABILITIES = ['read', 'draft', 'send', 'modify'] as const;
 /**
@@ -255,6 +301,10 @@ export const LUMA_CAPABILITIES = ['luma_read', 'luma_events', 'luma_guests', 'lu
 export const DRIVE_CAPABILITIES = ['drive_read', 'drive_write'] as const;
 /** Notion capabilities apply to Notion workspaces (notion-…) only. */
 export const NOTION_CAPABILITIES = ['notion_read', 'notion_write'] as const;
+/** LinkedIn capabilities apply to LinkedIn accounts (linkedin-…) only (docs/LINKEDIN_X_SPEC.md). */
+export const LINKEDIN_CAPABILITIES = ['linkedin_read', 'linkedin_post'] as const;
+/** X capabilities apply to X accounts (x-…) only (docs/LINKEDIN_X_SPEC.md). */
+export const X_CAPABILITIES = ['x_read', 'x_post'] as const;
 export const CAPABILITIES = [
   ...MAIL_CAPABILITIES,
   ...PRODUCTIVITY_CAPABILITIES,
@@ -263,6 +313,8 @@ export const CAPABILITIES = [
   ...LUMA_CAPABILITIES,
   ...DRIVE_CAPABILITIES,
   ...NOTION_CAPABILITIES,
+  ...LINKEDIN_CAPABILITIES,
+  ...X_CAPABILITIES,
 ] as const;
 
 /** Local per-client grant. Only the SHA-256 of the (high-entropy) client token is stored. */
@@ -328,6 +380,10 @@ const StoreDataSchema = z.object({
   luma: z.array(LumaAccountSchema).default([]),
   // Added by the unified Google onboarding (docs/GOOGLE_UNIFIED_SPEC.md).
   googleGroups: z.array(GoogleAccountGroupSchema).default([]),
+  // Added by the LinkedIn connector (docs/LINKEDIN_X_SPEC.md).
+  linkedin: z.array(LinkedinAccountSchema).default([]),
+  // Added by the X connector (docs/LINKEDIN_X_SPEC.md).
+  x: z.array(XAccountSchema).default([]),
 }).superRefine((d, ctx) => {
   const groups = new Set(d.googleGroups.map((g) => g.id));
   if (groups.size !== d.googleGroups.length) ctx.addIssue({ code: 'custom', message: 'duplicate Google account group id' });
@@ -363,7 +419,11 @@ export type WhatsappCapability = (typeof WHATSAPP_CAPABILITIES)[number];
 export type LumaCapability = (typeof LUMA_CAPABILITIES)[number];
 export type DriveCapability = (typeof DRIVE_CAPABILITIES)[number];
 export type NotionCapability = (typeof NOTION_CAPABILITIES)[number];
+export type XCapability = (typeof X_CAPABILITIES)[number];
+export type XAccount = z.infer<typeof XAccountSchema>;
 export type LumaAccount = z.infer<typeof LumaAccountSchema>;
+export type LinkedinAccount = z.infer<typeof LinkedinAccountSchema>;
+export type LinkedinCapability = (typeof LINKEDIN_CAPABILITIES)[number];
 export type LumaToolSnapshot = z.infer<typeof LumaToolSnapshotSchema>;
 export type UserRecord = z.infer<typeof UserSchema>;
 export type Capability = (typeof CAPABILITIES)[number];
@@ -393,6 +453,8 @@ const emptyData = (): StoreData => ({
   whatsapp: [],
   luma: [],
   googleGroups: [],
+  linkedin: [],
+  x: [],
   // initStore creates the ledger before the store, so a new store is born with it.
   mailWorkflowLedger: { createdAt: new Date().toISOString() },
 });

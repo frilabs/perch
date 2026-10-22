@@ -1,5 +1,12 @@
 # Handoff: Perch
 
+## Update 2026-10-21: LinkedIn-Connector (Branch `feat/linkedin`, Basis `feat/linkedin-x`)
+
+- **Freigabe:** Fritz: „hebe auf und baue, sowohl LI als auch x“ (`docs/LINKEDIN_X_SPEC.md`). Dieser Branch: gemeinsame Regeln + LinkedIn; X baut ein paralleler Branch.
+- **Umgesetzt:** `src/linkedin/oauth.ts` (App-Datei `~/.config/perch/linkedin-client.json` 0600, Login über Loopback/eingefügte Adresse mit `state`, ohne PKCE, Redirect fest `http://localhost:8770/linkedin/callback`, userinfo → `urn:li:person:<sub>`, gleiches Mitglied = Update mit gleicher Id, Refresh Token falls ausgegeben), `src/linkedin/linkedin.ts` (Posten über den gemeinsamen Ledger, little-text-Escaping, 3000 Zeichen, `x-restli-id` → URL, 4xx rejected / Timeout+5xx indeterminate, Ablauf), `src/mcp/tools/linkedin.ts` (`linkedin_status`, `linkedin_post`, `linkedin_post_status`), `src/cli/linkedin.ts` (`perch linkedin add|list|remove|client setup|show`). Familie `linkedin-…`, Capabilities `linkedin_read`/`linkedin_post`, Upstream-Dienste `linkedin` (api.linkedin.com: `GET /v2/userinfo`, `POST /rest/posts` mit Tag `linkedin_post`) und `linkedinauth` (www.linkedin.com: `POST /oauth/v2/accessToken`, nur `admin`). `perch status` (verbunden bis, gelber Hinweis ab 7 Tagen, abgelaufen ✗), `perch_list_accounts`, `perch setup` (optionaler Schritt), README, SETUP §4i, `PERCH_LINKEDIN_VERSION` (Standard 202608). Ausschluss in README/PHASE1_REMAINING angepasst.
+- **Getestet (nur Mocks):** `npm run check` grün (`test/linkedin.test.ts`, 22 Tests); Anleitung und Status im echten Pseudo-Terminal mit 80 Spalten geprüft.
+- **Live verifiziert:** nichts. Offene Live-Punkte: PHASE1_REMAINING §1.
+
 ## Update 2026-10-20: Einfacheres Onboarding (Branch `feat/easy-onboarding`)
 
 - **Auftrag:** Fritz: „setze A–D um“ (beim Verbinden lesen/schreiben fragen; `--full`; Kopplung fragt lesen/voll; `perch setup`).
